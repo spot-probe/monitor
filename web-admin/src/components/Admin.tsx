@@ -575,6 +575,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   const [removing, setRemoving] = useState(false)
   const [manualOrder, setManualOrder] = useState<number[]>([])
   const [query, setQuery] = useState("")
+  const [group, setGroup] = useState("all")
   const [dragging, setDragging] = useState<number | null>(null)
   const orderBeforeDrag = useRef<number[]>([])
   const byId = new Map(nodes.map((node) => [node.id, node]))
@@ -586,9 +587,15 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   // Name and address, the two things a row is looked up by. `order` itself stays
   // whole, because the order sent on drop is the order of every node.
   const needle = query.trim().toLowerCase()
-  const visible = needle
-    ? order.filter((n) => [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
-    : order
+  // The group names are whatever the nodes actually use -- there is no separate list
+  // to keep in step, and a value stops offering itself as soon as no node carries it.
+  const groups = [...new Set(order.map((n) => n.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh"))
+  // Worth offering only while some node still lacks one: it is the "what have I not
+  // filed yet" filter, and it would be noise once every node has a group.
+  const hasUngrouped = order.some((n) => !n.group)
+  const visible = order
+    .filter((n) => group === "all" || (group === "" ? !n.group : n.group === group))
+    .filter((n) => !needle || [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
 
   async function remove() {
     if (!deleting) return
@@ -637,6 +644,20 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
     <div className="space-y-4">
       {!canProvision && <p className="text-sm text-muted-foreground">请通过 HTTPS 域名访问面板后添加或安装节点。</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
+        {groups.length > 0 && (
+          <Select value={group} onValueChange={setGroup}>
+            <SelectTrigger className="w-full sm:w-40" aria-label="按分组筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部分组</SelectItem>
+              {groups.map((g) => (
+                <SelectItem key={g} value={g}>{g}</SelectItem>
+              ))}
+              {hasUngrouped && <SelectItem value="">未分组</SelectItem>}
+            </SelectContent>
+          </Select>
+        )}
         <Input
           className="mr-auto w-full sm:w-64"
           placeholder="搜索名称或地址"
@@ -712,6 +733,11 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                       <GripVertical className="size-4" />
                     </button>
                     <div className="min-w-0 font-medium">{n.name}</div>
+                    {n.group && (
+                      <Badge variant="outline" className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground">
+                        {n.group}
+                      </Badge>
+                    )}
                     {n.country && (
                       <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">
                         {n.country}
