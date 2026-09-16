@@ -132,7 +132,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-5 px-4 py-6">
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p className="text-sm text-danger-fg">{error}</p>}
         {!nodes ? (
           <Skeleton className="h-64" />
         ) : (
