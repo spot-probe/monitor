@@ -176,7 +176,7 @@ install_hub() {
 	want="$(sed -n "s/^\([0-9a-f]\{64\}\)  *$asset\$/\1/p" "$tmp/sums")"
 	[ -n "$want" ] || die "sha256sums.txt 里没有 $asset 这一项"
 	got="$(sha256sum "$tmp/$asset" | cut -d' ' -f1)"
-	[ "$got" = "$want" ] || die "校验不通过，已丢弃下载的文件。期望 $want，实得 $got"
+	[ "$got" = "$want" ] || die "校验不通过，已丢弃下载的文件。期望 ${want}，实得 $got"
 	ok "校验" "sha256 一致"
 
 	# Keep the old binary until the new one has proved it starts: a failed upgrade
@@ -351,7 +351,7 @@ uninstall_hub() {
 			ok "数据" "已删除"
 			return 0
 		fi
-		[ ! -e "$DATA" ] || die "服务已经卸载了，数据还留在 $DATA；要一并删掉就加 --purge"
+		[ ! -e "$DATA" ] || die "服务已经卸载了，数据还留在 ${DATA}；要一并删掉就加 --purge"
 		die "这台机器上没有装 monitor hub"
 	fi
 	if [ -n "$PURGE" ]; then
@@ -369,7 +369,7 @@ uninstall_hub() {
 		rmdir "$ROOT" 2>/dev/null || true
 		ok "数据" "已删除"
 	else
-		field "数据" "保留在 $DATA，重新安装会直接接着用"
+		field "数据" "保留在 ${DATA}，重新安装会直接接着用"
 	fi
 }
 
@@ -429,7 +429,7 @@ hub 只监听 127.0.0.1，公网访问不到，需要自己配 nginx / caddy / C
 
 重跑一次就是升级：校验通过后才替换二进制，起不来会自动回滚到上一版；
 没写的参数沿用上次的，所以升级不会把端口和 --site 冲掉。
-二进制和数据都在 $ROOT 下（数据库和主题在 $DATA），卸载默认保留数据。
+二进制和数据都在 $ROOT 下（数据库和主题在 ${DATA}），卸载默认保留数据。
 TXT
 }
 
