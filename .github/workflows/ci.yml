@@ -2,8 +2,11 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `dev` is this fork's integration branch: main stays a mirror of upstream and
+    # never receives a commit of our own, so without it nothing here would ever be
+    # built on a push. PRs are built anyway, via the pull_request trigger below.
     # Prose changes nothing a compiler or linter can check.
+    branches: [main, dev]
     paths-ignore: ["**.md", "LICENSE"]
   pull_request:
     paths-ignore: ["**.md", "LICENSE"]
