@@ -25,6 +25,8 @@ export type Node = {
   id: number
   name: string
   sort: number
+  /** The bucket the public page groups by; empty means ungrouped. */
+  group: string
   public: boolean
   online: boolean
   last_seen: number
