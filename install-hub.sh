@@ -1,7 +1,7 @@
 #!/bin/sh
 # monitor hub installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/monitor-probe/monitor/main/install-hub.sh -o install-hub.sh
+#   curl -fsSL https://raw.githubusercontent.com/spot-probe/monitor/main/install-hub.sh -o install-hub.sh
 #   chmod +x install-hub.sh
 #   sudo ./install-hub.sh
 #
@@ -10,7 +10,10 @@
 # waiting on an invisible prompt.
 set -eu
 
-REPO="monitor-probe/monitor"
+# This fork's own releases, not upstream's: the binary carries this fork's embedded
+# theme and its node grouping, so installing upstream's build would be a different
+# program wearing the same name.
+REPO="spot-probe/monitor"
 SERVICE="monitor-hub"
 UNIT="/etc/systemd/system/monitor-hub.service"
 # Everything but the unit lives under one directory: the two binaries at the top,
