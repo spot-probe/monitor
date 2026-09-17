@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ExternalLink, LogOut, Moon, Sun, UserRound } from "lucide-react"
+import { ChevronRight, ExternalLink, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react"
 import { Toaster } from "sonner"
 
 import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin } from "@/components/Admin"
@@ -49,9 +49,21 @@ function useTheme() {
   return [dark, () => setDark((d) => !d)] as const
 }
 
+// Only meaningful at md and up, where the nav is a column; below that it is a
+// horizontal scroller with nothing to collapse. Remembered, because a preference
+// that resets on every page load is not a preference.
+function useNavOpen() {
+  const [open, setOpen] = useState(() => localStorage.getItem("nav") !== "closed")
+  useEffect(() => {
+    localStorage.setItem("nav", open ? "open" : "closed")
+  }, [open])
+  return [open, () => setOpen((v) => !v)] as const
+}
+
 export default function App() {
   const [path, go] = usePath()
   const [dark, toggleTheme] = useTheme()
+  const [navOpen, toggleNav] = useNavOpen()
   const [me, setMe] = useState<Me | null>(null)
   const [meError, setMeError] = useState("")
   const { nodes, admin, error, refresh } = useNodes()
@@ -115,21 +127,29 @@ export default function App() {
     // same line as the page tools; the brand used to sit inside the nav's scroll area,
     // which left the top-left corner empty and put two "Nvidia"s a few pixels apart.
     <div className="flex min-h-svh flex-col md:flex-row">
-      <aside className="border-b bg-card md:w-60 md:shrink-0 md:border-r md:border-b-0">
+      <aside
+        className={`border-b bg-card transition-[width] duration-200 ease-in-out md:shrink-0 md:border-r md:border-b-0 ${
+          navOpen ? "md:w-60" : "md:w-16"
+        }`}
+      >
         <div className="flex h-14 items-center gap-2 px-4 md:h-[60px]">
           {/* The same mark the browser tab carries, so the panel and its tab are one
               product rather than two that happen to share a name. */}
           <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
           {/* Name only: the badge that used to sit under it made a two-line block in a
               one-line bar, and the breadcrumb beside this already says 后台. */}
-          <span className="min-w-0 truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
+          <span className={`min-w-0 truncate text-sm font-semibold tracking-tight ${navOpen ? "" : "md:hidden"}`}>
+            {me.site_name || "Monitor"}
+          </span>
         </div>
         {/* Below md this is a horizontal scroller, and group headings would be words
             wedged in among the buttons. */}
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:gap-5 md:overflow-visible md:px-2.5 md:pt-6 md:pb-4">
           {ADMIN_SECTIONS.map((section) => (
             <div key={section.group} className="flex gap-1 md:flex-col md:gap-1">
-              <span className="hidden px-3 pb-2 text-[11px] font-medium tracking-wide text-muted-foreground md:block">{section.group}</span>
+              <span className={`hidden px-3 pb-2 text-[11px] font-medium tracking-wide text-muted-foreground md:block ${navOpen ? "" : "md:hidden"}`}>
+                {section.group}
+              </span>
               {section.items.map(({ path: to, label, icon: Icon }) => {
                 const active = path === to
                 return (
@@ -137,15 +157,20 @@ export default function App() {
                     key={to}
                     onClick={() => go(to)}
                     aria-current={active ? "page" : undefined}
+                    title={navOpen ? undefined : label}
                     className={`relative flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+                      navOpen ? "" : "md:justify-center"
+                    } ${
                       active ? "bg-accent font-medium text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
                     }`}
                   >
                     {/* A bar on the leading edge: a tinted background alone sat too close to
                         the hover state to read as "you are here". */}
                     {active && <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" aria-hidden />}
-                    <Icon className="size-4" />
-                    {label}
+                    <Icon className="size-4 shrink-0" />
+                    {/* Collapsed, the icon is the label and the title attribute is the
+                        tooltip -- the alternative is a tooltip primitive for one case. */}
+                    <span className={navOpen ? "" : "md:hidden"}>{label}</span>
                   </button>
                 )
               })}
@@ -165,10 +190,27 @@ export default function App() {
                 centre of a two-line block and left nothing actually aligned.
                 The site name is deliberately absent: the brand column beside this says
                 it, and its first crumb is the way back to the status page instead. */}
+            {/* The toggle lives at md and up only: below that the nav is a horizontal
+                scroller with nothing to collapse. */}
+            <button
+              type="button"
+              onClick={toggleNav}
+              title={navOpen ? "收起侧栏" : "展开侧栏"}
+              aria-label={navOpen ? "收起侧栏" : "展开侧栏"}
+              aria-expanded={navOpen}
+              className="hidden size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:grid"
+            >
+              {navOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+            </button>
+            {/* A real element rather than a `|` character: a pipe sits on the baseline and
+                cannot be given a height. */}
+            <span className="hidden h-3.5 w-px shrink-0 bg-border md:block" aria-hidden />
             <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[13px] text-muted-foreground">
               <a href="/" className="transition-colors hover:text-foreground">后台</a>
-              <span className="text-muted-foreground/60" aria-hidden>/</span>
-              <span className="truncate">{pageGroup || "总览"}</span>
+              {/* A chevron rather than a slash: it is the conventional separator, and it
+                  is a real element that can be sized, unlike a text pipe. */}
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
+              <span className="truncate font-semibold text-foreground">{pageGroup || "总览"}</span>
             </div>
             {/* The status page is a separate app, so this is a navigation. */}
             <Button variant="ghost" size="sm" asChild>

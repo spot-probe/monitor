@@ -777,9 +777,15 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                   <Addresses node={n} />
                 </TableCell>
                 <TableCell>
-                  <Badge variant={n.online ? "default" : "secondary"} className="font-normal">
-                    {n.online ? "在线" : "离线"}
-                  </Badge>
+                  {/* A dot and a word in a light pill, not a filled badge: the filled
+                      one read as a button and competed with the node name beside it. */}
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs">
+                    <span
+                      className={n.online ? "size-1.5 rounded-full bg-ok" : "size-1.5 rounded-full bg-muted-foreground/60"}
+                      aria-hidden
+                    />
+                    <span className={n.online ? "text-ok-fg" : "text-muted-foreground"}>{n.online ? "在线" : "离线"}</span>
+                  </span>
                   {!n.public && <Badge variant="outline" className="ml-1 font-normal">不公开</Badge>}
                   {/* Under the badge, not inside it: the column is a tenth of
                       the table and the three do not share one line. */}
@@ -802,6 +808,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                 </TableCell>
                 <TableCell className="text-sm">{n.expires_at || FOREVER}</TableCell>
                 <TableCell className="text-right whitespace-nowrap">
+                  <div className="flex items-center justify-end gap-1">
                   <Button variant="ghost" size="icon" disabled={!canProvision} onClick={() => setInstalling(n)} title="安装 Agent" aria-label="安装 Agent">
                     <Download />
                   </Button>
@@ -812,8 +819,9 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                     <CalendarClock />
                   </Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(n)} title="删除节点" aria-label="删除节点">
-                    <Trash2 className="text-danger-fg" />
+                    <Trash2 className="text-destructive" />
                   </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -952,7 +960,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 <TableCell className="text-right whitespace-nowrap">
                   <Button variant="ghost" size="icon" onClick={() => setEditing(t)} title="编辑监控" aria-label="编辑监控"><Pencil /></Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(t)} title="删除监控" aria-label="删除监控">
-                    <Trash2 className="text-danger-fg" />
+                    <Trash2 className="text-destructive" />
                   </Button>
                 </TableCell>
               </TableRow>
