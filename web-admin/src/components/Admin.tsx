@@ -930,10 +930,31 @@ function Ping({ nodes }: { nodes: Node[] }) {
       const nodes = t.nodes ?? []
       return { ...t, nodes: nodes.includes(id) ? nodes.filter((n) => n !== id) : [...nodes, id] }
     })
+  // Three helpers rather than one "select all" checkbox: with a fleet of any size,
+  // adding a probe to twenty machines was twenty clicks.
+  const setAll = (on: boolean) =>
+    setEditing((t) => (t ? { ...t, nodes: on ? nodes.map((n) => n.id) : [] } : t))
+  const invert = () =>
+    setEditing((t) => (t ? { ...t, nodes: nodes.filter((n) => !(t.nodes ?? []).includes(n.id)).map((n) => n.id) } : t))
+  // Distinct nodes any probe runs on: coverage is the question this page answers.
+  const covered = new Set(tasks.flatMap((t) => t.nodes)).size
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        {/* The left half of this row was empty: the button was pinned right and the row
+            said nothing about what the page does. */}
+        <div className="min-w-0 flex-1">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            每个节点独立 TCP 连接目标端口并上报耗时，公开页据此画出延迟与丢包。勾选运行节点，即可让一台机器同时探多个目标。
+          </p>
+          {tasks.length > 0 && (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              共 <span className="font-medium text-foreground">{tasks.length}</span> 个监控 · 覆盖{" "}
+              <span className="font-medium text-foreground">{covered}</span> / {nodes.length} 个节点
+            </p>
+          )}
+        </div>
         <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}>
           <Plus /> 添加监控
         </Button>
@@ -1002,7 +1023,25 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 <Input value={editing.target ?? ""} onChange={(e) => setEditing({ ...editing, target: e.target.value })} placeholder="1.1.1.1:443" />
               </Field>
               <div className="space-y-2">
-                <Label className="text-sm font-medium">运行节点</Label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">运行节点</Label>
+                  <div className="flex items-center gap-0.5">
+                    <span className="mr-1 text-xs text-muted-foreground">
+                      已选 {editing.nodes?.length ?? 0} / {nodes.length}
+                    </span>
+                    {/* 清空 rather than 取消: the dialog's own 取消 sits just below and
+                        closes the dialog, so the same word would mean two things. */}
+                    {([
+                      ["全选", () => setAll(true), nodes.length === 0 || (editing.nodes?.length ?? 0) === nodes.length],
+                      ["清空", () => setAll(false), (editing.nodes?.length ?? 0) === 0],
+                      ["反选", invert, nodes.length === 0],
+                    ] as const).map(([label, onClick, disabled]) => (
+                      <Button key={label} type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onClick} disabled={disabled}>
+                        {label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
                 <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border bg-muted/20 p-2">
                   {nodes.map((n) => (
                     <label key={n.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-background">
