@@ -95,6 +95,8 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, full: bool
         // address it was derived from remains behind the panel.
         "country": node.country,
         "sort": node.sort,
+        // The bucket, not a private note: it is what the page's tabs are built from.
+        "group": node.group,
         "public": node.public,
         "online": current.is_some(),
         // The live entry while connected, the stored one afterwards. Zero means

@@ -168,6 +168,7 @@ function NodeForm({ node, onClose, onSaved }: {
     if (!form.name.trim()) return toast.error("请填写节点名称")
     const patch = changes(node, {
       name: form.name.trim(),
+      group: form.group.trim(),
       public: form.public,
       remark: form.remark,
       traffic_mode: form.traffic_mode,
@@ -211,6 +212,13 @@ function NodeForm({ node, onClose, onSaved }: {
         <div className="space-y-5">
           <Field label="名称">
             <Input value={form.name} onChange={(e) => set("name", e.target.value)} />
+          </Field>
+          {/* Filed beside the name rather than with the billing fields: this is how
+              the node is grouped, not what it costs. The public page derives its tabs
+              from the values in use, so there is nothing to pick from -- only to type.
+              Empty means the node appears under every tab. */}
+          <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。留空则出现在每个页签下">
+            <Input value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="每月流量额度 (GB)" hint="留空或 0 不限">
@@ -567,6 +575,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   const [removing, setRemoving] = useState(false)
   const [manualOrder, setManualOrder] = useState<number[]>([])
   const [query, setQuery] = useState("")
+  const [group, setGroup] = useState("all")
   const [dragging, setDragging] = useState<number | null>(null)
   const orderBeforeDrag = useRef<number[]>([])
   const byId = new Map(nodes.map((node) => [node.id, node]))
@@ -578,9 +587,15 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   // Name and address, the two things a row is looked up by. `order` itself stays
   // whole, because the order sent on drop is the order of every node.
   const needle = query.trim().toLowerCase()
-  const visible = needle
-    ? order.filter((n) => [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
-    : order
+  // The group names are whatever the nodes actually use -- there is no separate list
+  // to keep in step, and a value stops offering itself as soon as no node carries it.
+  const groups = [...new Set(order.map((n) => n.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh"))
+  // Worth offering only while some node still lacks one: it is the "what have I not
+  // filed yet" filter, and it would be noise once every node has a group.
+  const hasUngrouped = order.some((n) => !n.group)
+  const visible = order
+    .filter((n) => group === "all" || (group === "" ? !n.group : n.group === group))
+    .filter((n) => !needle || [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
 
   async function remove() {
     if (!deleting) return
@@ -629,6 +644,20 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
     <div className="space-y-4">
       {!canProvision && <p className="text-sm text-muted-foreground">请通过 HTTPS 域名访问面板后添加或安装节点。</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
+        {groups.length > 0 && (
+          <Select value={group} onValueChange={setGroup}>
+            <SelectTrigger className="w-full sm:w-40" aria-label="按分组筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部分组</SelectItem>
+              {groups.map((g) => (
+                <SelectItem key={g} value={g}>{g}</SelectItem>
+              ))}
+              {hasUngrouped && <SelectItem value="">未分组</SelectItem>}
+            </SelectContent>
+          </Select>
+        )}
         <Input
           className="mr-auto w-full sm:w-64"
           placeholder="搜索名称或地址"
@@ -704,6 +733,11 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                       <GripVertical className="size-4" />
                     </button>
                     <div className="min-w-0 font-medium">{n.name}</div>
+                    {n.group && (
+                      <Badge variant="outline" className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground">
+                        {n.group}
+                      </Badge>
+                    )}
                     {n.country && (
                       <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">
                         {n.country}
@@ -751,7 +785,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                     <CalendarClock />
                   </Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(n)} title="删除节点" aria-label="删除节点">
-                    <Trash2 className="text-destructive" />
+                    <Trash2 className="text-danger-fg" />
                   </Button>
                 </TableCell>
               </TableRow>
@@ -891,7 +925,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 <TableCell className="text-right whitespace-nowrap">
                   <Button variant="ghost" size="icon" onClick={() => setEditing(t)} title="编辑监控" aria-label="编辑监控"><Pencil /></Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(t)} title="删除监控" aria-label="删除监控">
-                    <Trash2 className="text-destructive" />
+                    <Trash2 className="text-danger-fg" />
                   </Button>
                 </TableCell>
               </TableRow>
@@ -1306,7 +1340,7 @@ function TemplatePreview({ template, site, json = false }: { template: string; s
       out = JSON.stringify(JSON.parse(out), null, 2)
     } catch {
       return (
-        <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-danger-fg">
           代入后不是合法 JSON，保存会被拒绝。占位符要写在引号里，例如 "text": "{"{{title}}"}"
         </p>
       )
@@ -1630,7 +1664,7 @@ function Security({ site }: { site: string }) {
           </Field>
         </div>
         {String(s.github_client_id ?? "") !== "" && String(s.github_allowed_users ?? "").trim() === "" && (
-          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-danger-fg">
             白名单为空，GitHub 登录拒绝所有人。填入用户名并保存后生效。
           </p>
         )}

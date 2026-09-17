@@ -50,7 +50,7 @@ export function Login({ github, onDone }: { github: boolean; onDone: () => void 
         <h1 className="text-lg font-semibold">登录后台</h1>
 
         {error && (
-          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
+          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-danger-fg">{error}</p>
         )}
 
         {github && (

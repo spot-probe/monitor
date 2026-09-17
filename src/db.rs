@@ -68,7 +68,12 @@ CREATE TABLE IF NOT EXISTS node (
   -- rather than held in memory so that a hub restart neither repeats the alert
   -- nor loses the recovery that pairs with it.
   down_since INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- Free-form bucket the public page groups by ("建站", "入口集群", ...). A plain
+  -- string rather than a table: the set is whatever the operator types, and the
+  -- page's tabs are derived from the values in use. Quoted because GROUP is a
+  -- keyword -- every reference to this column needs the quotes.
+  "group" TEXT NOT NULL DEFAULT ''
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -128,7 +133,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
 /// database already in service.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -230,6 +235,10 @@ fn migrate_to_4(conn: &Connection) -> Result<()> {
     add_column(conn, "node", "down_since INTEGER NOT NULL DEFAULT 0")
 }
 
+fn migrate_to_5(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", r#""group" TEXT NOT NULL DEFAULT ''"#)
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -249,6 +258,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 4 {
         migrate_to_4(conn)?;
     }
+    if from < 5 {
+        migrate_to_5(conn)?;
+    }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
 }
@@ -267,6 +279,10 @@ pub struct Node {
     pub public: bool,
     #[serde(default)]
     pub sort: i64,
+    /// Which bucket the public page files this node under. Empty means ungrouped;
+    /// the page then shows the node under every tab.
+    #[serde(default)]
+    pub group: String,
     #[serde(default)]
     pub price: f64,
     #[serde(default = "usd")]
@@ -354,6 +370,7 @@ pub struct NodePatch {
     pub traffic_mode: Option<String>,
     pub traffic_reset_day: Option<u32>,
     pub notify: Option<bool>,
+    pub group: Option<String>,
 }
 
 fn expiry_patch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
@@ -529,8 +546,8 @@ impl Db {
             // A new node belongs at the end. The caller sends sort 0, which would
             // tie with whatever the last reorder placed first.
             "INSERT INTO node (name, token, sort, public, price, currency, billing_cycle,
-                               expires_at, remark, traffic_limit, traffic_mode, traffic_reset_day, created_at)
-             VALUES (?1,?2,(SELECT COALESCE(MAX(sort),-1)+1 FROM node),?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                               expires_at, remark, traffic_limit, traffic_mode, traffic_reset_day, created_at, \"group\")
+             VALUES (?1,?2,(SELECT COALESCE(MAX(sort),-1)+1 FROM node),?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 n.name,
                 token,
@@ -543,7 +560,8 @@ impl Db {
                 n.traffic_limit,
                 n.traffic_mode,
                 n.traffic_reset_day,
-                Utc::now().timestamp()
+                Utc::now().timestamp(),
+                n.group
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -574,7 +592,7 @@ impl Db {
                              remark=COALESCE(?10,remark), traffic_limit=COALESCE(?11,traffic_limit),
                              traffic_mode=COALESCE(?12,traffic_mode),
                              traffic_reset_day=COALESCE(?13,traffic_reset_day),
-                             notify=COALESCE(?14,notify)
+                             notify=COALESCE(?14,notify), \"group\"=COALESCE(?15,\"group\")
              WHERE id=?1",
             params![
                 id,
@@ -590,7 +608,8 @@ impl Db {
                 n.traffic_limit,
                 n.traffic_mode,
                 n.traffic_reset_day,
-                n.notify
+                n.notify,
+                n.group
             ],
         )?;
         Ok(())
@@ -1527,6 +1546,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
     Node {
         id: n("id"),
         name: s("name"),
+        group: s("group"),
         public: r.get::<_, bool>("public").unwrap_or(true),
         sort: n("sort"),
         price: r.get::<_, f64>("price").unwrap_or(0.0),
