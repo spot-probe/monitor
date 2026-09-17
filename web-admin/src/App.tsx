@@ -126,9 +126,9 @@ export default function App() {
     // Two panes. The brand and the nav are a full-height column whose header sits on the
     // same line as the page tools; the brand used to sit inside the nav's scroll area,
     // which left the top-left corner empty and put two "Nvidia"s a few pixels apart.
-    <div className="flex min-h-svh flex-col md:flex-row">
+    <div className="flex min-h-svh flex-col md:h-svh md:min-h-0 md:flex-row md:overflow-hidden">
       <aside
-        className={`border-b bg-card transition-[width] duration-200 ease-in-out md:shrink-0 md:border-r md:border-b-0 ${
+        className={`border-b bg-card transition-[width] duration-200 ease-in-out md:shrink-0 md:overflow-y-auto md:border-r md:border-b-0 ${
           navOpen ? "md:w-60" : "md:w-16"
         }`}
       >
@@ -179,7 +179,9 @@ export default function App() {
         </nav>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* min-h-0 on both: a flex child will not shrink below its content without it, and
+          the content area is the only part allowed to scroll. */}
+      <div className="flex min-w-0 flex-1 flex-col md:min-h-0">
         {/* A surface of its own rather than the page's colour. With both the same, the
             title and the tools read as floating on the background instead of forming the
             bar they are. */}
@@ -206,7 +208,16 @@ export default function App() {
                 cannot be given a height. */}
             <span className="hidden h-3.5 w-px shrink-0 bg-border md:block" aria-hidden />
             <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[13px] text-muted-foreground">
-              <a href="/" className="transition-colors hover:text-foreground">后台</a>
+              {/* The panel's own root, not the status page: an `<a href="/">` here sent
+                  anyone clicking the first crumb out of the panel entirely, and 状态面板
+                  at the other end is already the way to the public page. */}
+              <button
+                type="button"
+                onClick={() => go("/admin/nodes")}
+                className="transition-colors hover:text-foreground"
+              >
+                后台
+              </button>
               {/* A chevron rather than a slash: it is the conventional separator, and it
                   is a real element that can be sized, unlike a text pipe. */}
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
@@ -236,7 +247,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 space-y-5 p-4 md:p-6">
+        <main className="min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6">
           {/* The page's heading lives with the page. In the bar it had to share a line
               with the breadcrumb, and the bar is what should stay one line. */}
           <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
