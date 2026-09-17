@@ -111,68 +111,111 @@ export default function App() {
   const pageGroup = ADMIN_SECTIONS.find((section) => section.items.some((item) => item.path === path))?.group ?? ""
 
   return (
-    <div className="min-h-svh">
-      <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5">
-          {/* A breadcrumb over a page title, where the site name alone used to be: the
-              header said which product this was but never where in it you were. The site
-              name is still the first crumb -- and the way back to the status page -- while
-              the sidebar's brand block takes it over visually at md and up. */}
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <a href="/" className="transition-colors hover:text-foreground">
-                {me.site_name || "Monitor"}
-              </a>
-              <span aria-hidden>/</span>
-              <span>{pageGroup || "后台"}</span>
-            </div>
-            <h1 className="truncate text-base font-semibold tracking-tight md:text-xl">{pageTitle || "后台"}</h1>
-          </div>
-          {/* The status page is a separate app, so this is a navigation. */}
-          <Button variant="ghost" size="sm" asChild>
-            <a href="/">
-              <ExternalLink /> <span className="hidden sm:inline">状态面板</span>
-            </a>
-          </Button>
-          <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
-            {dark ? <Sun /> : <Moon />}
-          </Button>
-          {/* One admin, reached by password or by GitHub, so there is no profile page to
-              link to and no menu worth opening. The identity and the way out are shown
-              side by side instead. */}
-          <span className="hidden items-center gap-2 rounded-full border py-1 pr-2.5 pl-1 sm:flex">
-            <span className="grid size-6 place-items-center rounded-full bg-tag text-tag-foreground" aria-hidden>
-              <UserRound className="size-3.5" />
-            </span>
-            <span className="text-xs text-muted-foreground">管理员</span>
+    // Two panes. The brand and the nav are a full-height column whose header sits on the
+    // same line as the page tools; the brand used to sit inside the nav's scroll area,
+    // which left the top-left corner empty and put two "Nvidia"s a few pixels apart.
+    <div className="flex min-h-svh flex-col md:flex-row">
+      <aside className="border-b bg-card md:w-60 md:shrink-0 md:border-r md:border-b-0">
+        <div className="flex items-center gap-2.5 px-4 py-3 md:h-14">
+          {/* The same mark the browser tab carries, so the panel and its tab are one
+              product rather than two that happen to share a name. */}
+          <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
+            <span className="mt-1 inline-block rounded bg-tag px-1.5 py-0.5 text-[10px] leading-none text-tag-foreground">管理后台</span>
           </span>
-          <Button variant="ghost" size="icon" onClick={signOut} title="退出登录">
-            <LogOut />
-          </Button>
         </div>
-      </header>
+        {/* Below md this is a horizontal scroller, and group headings would be words
+            wedged in among the buttons. */}
+        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:gap-5 md:px-2.5 md:pb-4 md:overflow-visible">
+          {ADMIN_SECTIONS.map((section) => (
+            <div key={section.group} className="flex gap-1 md:flex-col md:gap-1">
+              <span className="hidden px-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground md:block">{section.group}</span>
+              {section.items.map(({ path: to, label, icon: Icon }) => {
+                const active = path === to
+                return (
+                  <button
+                    key={to}
+                    onClick={() => go(to)}
+                    aria-current={active ? "page" : undefined}
+                    className={`relative flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+                      active ? "bg-accent font-medium text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
+                  >
+                    {/* A bar on the leading edge: a tinted background alone sat too close to
+                        the hover state to read as "you are here". */}
+                    {active && <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" aria-hidden />}
+                    <Icon className="size-4" />
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+        </nav>
+      </aside>
 
-      <main className="mx-auto max-w-7xl space-y-5 px-4 py-6">
-        {error && <p className="text-sm text-danger-fg">{error}</p>}
-        {!nodes ? (
-          <Skeleton className="h-64" />
-        ) : (
-          <Admin
-            path={path}
-            go={go}
-            nodes={sorted}
-            refresh={refresh}
-            // The hub's own public URL rather than this browser's address: the
-            // panel is frequently reached over a loopback port behind a proxy,
-            // while the install command and OAuth callback need the real one.
-            site={me.site || location.origin}
-            siteName={me.site_name || "Monitor"}
-            canProvision={me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)}
-          />
-        )}
-      </main>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* A surface of its own rather than the page's colour. With both the same, the
+            title and the tools read as floating on the background instead of forming the
+            bar they are. */}
+        <header className="sticky top-0 z-10 border-b bg-card/95 backdrop-blur">
+          <div className="flex h-14 items-center gap-3 px-4">
+            <div className="min-w-0 flex-1">
+              {/* The site name is deliberately absent: the brand column beside this says it,
+                  and saying it twice a few pixels apart is what made one header look like
+                  two. Its first crumb is the way back to the status page instead. */}
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <a href="/" className="transition-colors hover:text-foreground">后台</a>
+                <span aria-hidden>/</span>
+                <span>{pageGroup || "总览"}</span>
+              </div>
+              <h1 className="truncate text-base font-semibold tracking-tight md:text-xl">{pageTitle || "后台"}</h1>
+            </div>
+            {/* The status page is a separate app, so this is a navigation. */}
+            <Button variant="ghost" size="sm" asChild>
+              <a href="/">
+                <ExternalLink /> <span className="hidden sm:inline">状态面板</span>
+              </a>
+            </Button>
+            <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
+              {dark ? <Sun /> : <Moon />}
+            </Button>
+            {/* One admin, reached by password or by GitHub, so there is no profile page to
+                link to and no menu worth opening. The identity and the way out are shown
+                side by side instead. */}
+            <span className="hidden items-center gap-2 rounded-full border py-1 pr-2.5 pl-1 sm:flex">
+              <span className="grid size-6 place-items-center rounded-full bg-tag text-tag-foreground" aria-hidden>
+                <UserRound className="size-3.5" />
+              </span>
+              <span className="text-xs text-muted-foreground">管理员</span>
+            </span>
+            <Button variant="ghost" size="icon" onClick={signOut} title="退出登录">
+              <LogOut />
+            </Button>
+          </div>
+        </header>
 
-      <Toaster position="top-center" theme={dark ? "dark" : "light"} />
+        <main className="min-w-0 flex-1 space-y-5 p-4 md:p-6">
+          {error && <p className="text-sm text-danger-fg">{error}</p>}
+          {!nodes ? (
+            <Skeleton className="h-64" />
+          ) : (
+            <Admin
+              path={path}
+              nodes={sorted}
+              refresh={refresh}
+              // The hub's own public URL rather than this browser's address: the
+              // panel is frequently reached over a loopback port behind a proxy,
+              // while the install command and OAuth callback need the real one.
+              site={me.site || location.origin}
+              canProvision={me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)}
+            />
+          )}
+        </main>
+
+        <Toaster position="top-center" theme={dark ? "dark" : "light"} />
+      </div>
     </div>
   )
 }

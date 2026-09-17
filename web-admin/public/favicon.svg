@@ -1,8 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <!-- The same mark the public page carries: one product, and one mid tone
-       rather than a light/dark pair, because a favicon sits on browser chrome
-       neither page picks. -->
-  <g fill="#8a8a8a">
+  <!-- The theme's own blue: deepest at the baseline, brightest at the top of the
+       tallest bar. A flat tone cannot work here. A favicon sits on browser chrome
+       this page does not pick, and the deep accent alone disappears against a dark
+       tab bar while the bright one washes out against a light one, so the gradient
+       keeps a legible end on either. (Upstream shipped this in mid-grey for that
+       same reason; the theme is no longer greyscale.) -->
+  <defs>
+    <linearGradient id="mark" x1="0" y1="16" x2="0" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#193cb8"/>
+      <stop offset="100%" stop-color="#5b8cff"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#mark)">
     <rect x="2" y="9" width="3" height="5" rx="1"/>
     <rect x="6.5" y="5" width="3" height="9" rx="1"/>
     <rect x="11" y="2" width="3" height="12" rx="1"/>
