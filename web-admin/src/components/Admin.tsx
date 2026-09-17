@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Bell, CalendarClock, ChevronRight, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, Trash2, Upload } from "lucide-react"
+import { Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -66,13 +66,40 @@ function Addresses({ node }: { node: Node }) {
   )
 }
 
-function Field({ label, hint, className = "", children }: { label: string; hint?: string; className?: string; children: React.ReactNode }) {
+function Field({ label, hint, suffix, className = "", children }: { label: string; hint?: string; suffix?: string; className?: string; children: React.ReactNode }) {
   return (
     <div className={`space-y-2 ${className}`}>
       <Label className="text-sm font-medium">{label}</Label>
-      {children}
+      {/* The unit sits inside the control rather than in the label: "离线宽限期（分钟）"
+          made the label do two jobs, and the reader had to parse past the parenthesis to
+          find the field's name. */}
+      {suffix ? (
+        <div className="relative">
+          {children}
+          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">{suffix}</span>
+        </div>
+      ) : (
+        children
+      )}
       {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
     </div>
+  )
+}
+
+/** A titled block of the page. Without one, two unrelated groups of settings read as a
+ *  single long form. */
+function Section({ title, hint, action, children }: { title: string; hint?: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+          {hint && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{hint}</p>}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
   )
 }
 
@@ -1226,9 +1253,13 @@ type Settings = Record<string, string | boolean>
 // Two pages write settings, and each loads only what it displays.
 function useSettings() {
   const [s, setS] = useState<Settings | null>(null)
-  useEffect(() => { api<Settings>("/settings").then(setS).catch(() => {}) }, [])
+  const load = useCallback(() => { api<Settings>("/settings").then(setS).catch(() => {}) }, [])
+  useEffect(() => { load() }, [load])
   return {
     s,
+    // Discards unsaved edits by re-reading the hub's copy. Per-card saving means the
+    // only way back is to ask for the stored values again.
+    reload: load,
     set: (k: string, v: string) => setS((old) => ({ ...(old ?? {}), [k]: v })),
     save: async (patch: Record<string, string>) => {
       try {
@@ -1356,16 +1387,27 @@ function TemplatePreview({ template, site, json = false }: { template: string; s
 
 // A channel's form, collapsed until needed. The summary carries whether the
 // channel is configured, so the closed card still answers the common question.
-function ChannelCard({ title, configured, children }: { title: string; configured: boolean; children: React.ReactNode }) {
+function ChannelCard({ title, icon, configured, children }: { title: string; icon: React.ReactNode; configured: boolean; children: React.ReactNode }) {
   return (
     <Card className="p-5">
       <details className="group">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
-          <span className="flex items-center gap-2 text-sm font-medium">
-            <ChevronRight className="size-4 text-muted-foreground transition-transform group-open:rotate-90" />
-            {title}
+        <summary className="flex cursor-pointer list-none items-center gap-3 rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+          {/* A mark per channel: two rows of bare text were indistinguishable at a
+              glance, which is the one thing a channel list has to be. */}
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-tag text-tag-foreground" aria-hidden>
+            {icon}
           </span>
-          <Badge variant={configured ? "secondary" : "outline"}>{configured ? "已配置" : "未配置"}</Badge>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium">{title}</span>
+            {/* Status as an icon plus tinted text, not as a bordered pill: the pill read
+                as a button, and it was the only thing on the row that looked pressable. */}
+            <span className={configured ? "mt-0.5 flex items-center gap-1 text-xs text-ok-fg" : "mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"}>
+              {configured ? <CircleCheck className="size-3" /> : <CircleAlert className="size-3" />}
+              {configured ? "已配置" : "未配置"}
+            </span>
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground group-open:hidden">配置</span>
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
         </summary>
         <div className="mt-4 space-y-4">{children}</div>
       </details>
@@ -1404,16 +1446,31 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
           <h3 className="text-sm font-medium">离线通知</h3>
           <p className="mt-1 text-xs text-muted-foreground">按节点打开，默认关。已打开 {enabled} / {nodes.length} 台</p>
         </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="secondary" disabled={busy || enabled === nodes.length} onClick={() => apply(nodes, true)}>全部打开</Button>
-          <Button size="sm" variant="ghost" disabled={busy || enabled === 0} onClick={() => apply(nodes, false)}>全部关闭</Button>
+        {/* A matched pair inside one border: the same kind of action differing only in
+            direction, which a strong/ghost pairing overstated. */}
+        <div className="flex shrink-0 overflow-hidden rounded-md border">
+          <Button className="rounded-none" size="sm" variant="ghost" disabled={busy || enabled === nodes.length} onClick={() => apply(nodes, true)}>全部打开</Button>
+          <span className="w-px bg-border" aria-hidden />
+          <Button className="rounded-none" size="sm" variant="ghost" disabled={busy || enabled === 0} onClick={() => apply(nodes, false)}>全部关闭</Button>
         </div>
       </div>
       {nodes.length > 0 && (
-        <div className="grid max-h-64 gap-x-6 gap-y-2 overflow-y-auto sm:grid-cols-2">
+        // One column, with each switch beside the name it belongs to. Two columns put
+        // a row's name and its switch half a page apart, so every row had to be read
+        // twice -- once to find it, once to find its control.
+        <div className="max-h-64 divide-y overflow-y-auto rounded-lg border">
           {nodes.map((node) => (
-            <label key={node.id} className="flex cursor-pointer items-center justify-between gap-3 text-sm">
-              <span className="truncate">{node.name}</span>
+            <label key={node.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-muted/50">
+              <span
+                className={node.online ? "size-1.5 shrink-0 rounded-full bg-ok" : "size-1.5 shrink-0 rounded-full bg-muted-foreground/40"}
+                title={node.online ? "在线" : "离线"}
+              />
+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
+              {node.country && (
+                <Badge variant="outline" className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground">
+                  {node.country}
+                </Badge>
+              )}
               <Switch checked={!!node.notify} disabled={busy} onCheckedChange={(v) => apply([node], v)} />
             </label>
           ))}
@@ -1424,7 +1481,7 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
 }
 
 function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
-  const { s, set, save } = useSettings()
+  const { s, set, save, reload } = useSettings()
   const [testing, setTesting] = useState(false)
   if (!s) return null
   const text = (k: string) => String(s[k] ?? "")
@@ -1447,22 +1504,20 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   }
 
   return (
-    <div className="space-y-4">
-      <Card className="gap-4 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-medium">通知渠道</h3>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              Telegram 和 Webhook 配了哪个就发哪个，也可以同时用。离线通知在下方按节点打开；流量和到期提醒对填了额度、到期日的节点生效。
-            </p>
-          </div>
+    // Wider gaps between sections than within them: the two groups answer different
+    // questions, and a single rhythm made the page read as one long form.
+    <div className="space-y-6">
+      <Section
+        title="推送渠道"
+        hint="Telegram 和 Webhook 配了哪个就发哪个，也可以同时用。"
+        action={
           <Button size="sm" variant="secondary" disabled={testing} onClick={test}>
-            <Send /> {testing ? "发送中…" : "发送测试"}
+            <TestTube2 /> {testing ? "发送中…" : "发送测试"}
           </Button>
-        </div>
-      </Card>
+        }
+      >
 
-      <ChannelCard title="Telegram" configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}>
+      <ChannelCard title="Telegram" icon={<Send className="size-4" />} configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Bot Token" hint={secretHint("notify_telegram_token")}>
             <Input
@@ -1481,7 +1536,12 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           <textarea rows={3} className={TEXTAREA} value={text("notify_telegram_text")} onChange={(e) => set("notify_telegram_text", e.target.value)} />
         </Field>
         <TemplatePreview template={text("notify_telegram_text")} site={text("site_name") || "Monitor"} />
-        <div className="flex gap-2">
+        <div className="flex justify-end gap-2 border-t pt-4">
+          {s.notify_telegram_token_set && (
+            <Button size="sm" variant="ghost" onClick={() => save({ notify_telegram_token: "", notify_telegram_chat: "" })}>
+              清除
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() =>
@@ -1494,15 +1554,10 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           >
             保存 Telegram
           </Button>
-          {s.notify_telegram_token_set && (
-            <Button size="sm" variant="ghost" onClick={() => save({ notify_telegram_token: "", notify_telegram_chat: "" })}>
-              清除
-            </Button>
-          )}
         </div>
       </ChannelCard>
 
-      <ChannelCard title="Webhook" configured={!!s.notify_webhook_url_set}>
+      <ChannelCard title="Webhook" icon={<Webhook className="size-4" />} configured={!!s.notify_webhook_url_set}>
         <Field label="URL" hint={secretHint("notify_webhook_url")}>
           <Input
             type="password"
@@ -1525,13 +1580,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           <textarea rows={4} className={TEXTAREA} value={text("notify_webhook_body")} onChange={(e) => set("notify_webhook_body", e.target.value)} />
         </Field>
         <TemplatePreview template={text("notify_webhook_body")} site={text("site_name") || "Monitor"} json />
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            onClick={() => save({ notify_webhook_body: text("notify_webhook_body"), ...typed("notify_webhook_url", "notify_webhook_headers") })}
-          >
-            保存 Webhook
-          </Button>
+        <div className="flex justify-end gap-2 border-t pt-4">
           {s.notify_webhook_headers_set && (
             <Button size="sm" variant="ghost" onClick={() => save({ notify_webhook_headers: "" })}>
               清除请求头
@@ -1542,29 +1591,40 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               清除
             </Button>
           )}
+          <Button
+            size="sm"
+            onClick={() => save({ notify_webhook_body: text("notify_webhook_body"), ...typed("notify_webhook_url", "notify_webhook_headers") })}
+          >
+            保存 Webhook
+          </Button>
         </div>
       </ChannelCard>
+      </Section>
 
-      <OfflineNodes nodes={nodes} refresh={refresh} />
+      <Section title="触发规则" hint="离线通知在下面按节点打开；流量和到期提醒对填了额度、到期日的节点生效。">
+        <OfflineNodes nodes={nodes} refresh={refresh} />
 
       <Card className="gap-4 p-5">
         <h3 className="text-sm font-medium">事件</h3>
         <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="离线宽限期（分钟）" hint="断开超过这么久才算离线，1–30">
-            <Input type="number" min={1} max={30}value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
+          <Field label="离线宽限期" suffix="分钟" hint="断开超过这么久才算离线，1–30">
+            <Input type="number" min={1} max={30} className="pr-14" value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
           </Field>
-          <Field label="流量提醒（%）" hint="本期用量达到该比例和 100% 时各提醒一次，0 关闭">
-            <Input type="number" min={0} max={100} value={text("notify_traffic")} onChange={(e) => set("notify_traffic", e.target.value)} />
+          <Field label="流量提醒" suffix="%" hint="本期用量达到该比例和 100% 时各提醒一次，0 关闭">
+            <Input type="number" min={0} max={100} className="pr-9" value={text("notify_traffic")} onChange={(e) => set("notify_traffic", e.target.value)} />
           </Field>
-          <Field label="到期提醒（天）" hint="每天 9 点汇总这么多天内到期的节点，自动续期时也提醒，0 关闭">
-            <Input type="number" min={0} max={365} value={text("notify_expiry")} onChange={(e) => set("notify_expiry", e.target.value)} />
+          <Field label="到期提醒" suffix="天" hint="每天 9 点汇总这么多天内到期的节点，自动续期时也提醒，0 关闭">
+            <Input type="number" min={0} max={365} className="pr-9" value={text("notify_expiry")} onChange={(e) => set("notify_expiry", e.target.value)} />
           </Field>
         </div>
         <div className="flex items-center gap-2 text-sm">
           <Switch aria-labelledby="notify-login-label" checked={s.notify_login !== "off"} onCheckedChange={(v) => set("notify_login", v ? "on" : "off")} />
           <span id="notify-login-label">登录后台时提醒</span>
         </div>
-        <div>
+        {/* Bottom-right, with the divider marking where reading ends and acting begins.
+            Bottom-left gave the page's only commit action the least weight on it. */}
+        <div className="flex justify-end gap-2 border-t pt-4">
+          <Button size="sm" variant="ghost" onClick={reload} title="放弃未保存的修改">重置</Button>
           <Button
             size="sm"
             onClick={() =>
@@ -1580,6 +1640,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           </Button>
         </div>
       </Card>
+      </Section>
     </div>
   )
 }
