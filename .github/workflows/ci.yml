@@ -2,11 +2,11 @@ name: ci
 
 on:
   push:
-    # `dev` is this fork's integration branch: main stays a mirror of upstream and
-    # never receives a commit of our own, so without it nothing here would ever be
-    # built on a push. PRs are built anyway, via the pull_request trigger below.
+    # The line this fork ships from. It read `[main, dev]` while main was a mirror of
+    # upstream and dev carried our commits; the fork went solo, so main is the line
+    # and dev is gone. PRs are built anyway, via the pull_request trigger below.
     # Prose changes nothing a compiler or linter can check.
-    branches: [main, dev]
+    branches: [main]
     paths-ignore: ["**.md", "LICENSE"]
   pull_request:
     paths-ignore: ["**.md", "LICENSE"]

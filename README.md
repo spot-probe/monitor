@@ -11,9 +11,13 @@
 
 | 仓库 | 说明 |
 |---|---|
-| [monitor](https://github.com/monitor-probe/monitor) | hub：后台、API、公开页宿主 |
-| [agent](https://github.com/monitor-probe/agent) | Linux agent |
-| [monitor-theme-default](https://github.com/monitor-probe/monitor-theme-default) | 内置默认主题 |
+| [monitor](https://github.com/spot-probe/monitor) | hub：后台、API、公开页宿主 |
+| [agent](https://github.com/spot-probe/agent) | Linux agent |
+| [monitor-theme-default](https://github.com/spot-probe/monitor-theme-default) | 内置默认主题 |
+
+> fork 自 [monitor-probe](https://github.com/monitor-probe)，在其上独立演进：公开页改为浅色语义
+> 配色、节点可分组、后台沿用同一套调色板。安装脚本与 hub 取的都是本组织的 release，
+> 不是上游的。
 
 ```
 agent (Linux)  ──WebSocket / JSON-RPC 2.0──▶  hub (axum + SQLite)  ──▶  后台 + 状态页

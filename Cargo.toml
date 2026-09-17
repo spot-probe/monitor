@@ -1,10 +1,10 @@
 [package]
 name = "monitor-hub"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 license = "MIT"
 description = "Lightweight server monitoring hub"
-repository = "https://github.com/monitor-probe/monitor"
+repository = "https://github.com/spot-probe/monitor"
 
 [dependencies]
 anyhow = "1"
