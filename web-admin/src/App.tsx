@@ -116,21 +116,20 @@ export default function App() {
     // which left the top-left corner empty and put two "Nvidia"s a few pixels apart.
     <div className="flex min-h-svh flex-col md:flex-row">
       <aside className="border-b bg-card md:w-60 md:shrink-0 md:border-r md:border-b-0">
-        <div className="flex items-center gap-2.5 px-4 py-3 md:h-14">
+        <div className="flex h-14 items-center gap-2 px-4 md:h-[60px]">
           {/* The same mark the browser tab carries, so the panel and its tab are one
               product rather than two that happen to share a name. */}
           <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
-            <span className="mt-1 inline-block rounded bg-tag px-1.5 py-0.5 text-[10px] leading-none text-tag-foreground">管理后台</span>
-          </span>
+          {/* Name only: the badge that used to sit under it made a two-line block in a
+              one-line bar, and the breadcrumb beside this already says 后台. */}
+          <span className="min-w-0 truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
         </div>
         {/* Below md this is a horizontal scroller, and group headings would be words
             wedged in among the buttons. */}
-        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:gap-5 md:px-2.5 md:pb-4 md:overflow-visible">
+        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:gap-5 md:overflow-visible md:px-2.5 md:pt-6 md:pb-4">
           {ADMIN_SECTIONS.map((section) => (
             <div key={section.group} className="flex gap-1 md:flex-col md:gap-1">
-              <span className="hidden px-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground md:block">{section.group}</span>
+              <span className="hidden px-3 pb-2 text-[11px] font-medium tracking-wide text-muted-foreground md:block">{section.group}</span>
               {section.items.map(({ path: to, label, icon: Icon }) => {
                 const active = path === to
                 return (
@@ -160,17 +159,16 @@ export default function App() {
             title and the tools read as floating on the background instead of forming the
             bar they are. */}
         <header className="sticky top-0 z-10 border-b bg-card/95 backdrop-blur">
-          <div className="flex h-14 items-center gap-3 px-4">
-            <div className="min-w-0 flex-1">
-              {/* The site name is deliberately absent: the brand column beside this says it,
-                  and saying it twice a few pixels apart is what made one header look like
-                  two. Its first crumb is the way back to the status page instead. */}
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <a href="/" className="transition-colors hover:text-foreground">后台</a>
-                <span aria-hidden>/</span>
-                <span>{pageGroup || "总览"}</span>
-              </div>
-              <h1 className="truncate text-base font-semibold tracking-tight md:text-xl">{pageTitle || "后台"}</h1>
+          <div className="flex h-14 items-center gap-3 px-4 md:h-[60px]">
+            {/* One line, so the breadcrumb shares an axis with the tools at the far end.
+                It used to be stacked over the page title, which put the tools on the
+                centre of a two-line block and left nothing actually aligned.
+                The site name is deliberately absent: the brand column beside this says
+                it, and its first crumb is the way back to the status page instead. */}
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[13px] text-muted-foreground">
+              <a href="/" className="transition-colors hover:text-foreground">后台</a>
+              <span className="text-muted-foreground/60" aria-hidden>/</span>
+              <span className="truncate">{pageGroup || "总览"}</span>
             </div>
             {/* The status page is a separate app, so this is a navigation. */}
             <Button variant="ghost" size="sm" asChild>
@@ -197,6 +195,9 @@ export default function App() {
         </header>
 
         <main className="min-w-0 flex-1 space-y-5 p-4 md:p-6">
+          {/* The page's heading lives with the page. In the bar it had to share a line
+              with the breadcrumb, and the bar is what should stay one line. */}
+          <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
           {error && <p className="text-sm text-danger-fg">{error}</p>}
           {!nodes ? (
             <Skeleton className="h-64" />
