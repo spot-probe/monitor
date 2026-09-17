@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react"
-import { ExternalLink, LogOut, Moon, Sun } from "lucide-react"
+import { ExternalLink, LogOut, Moon, Sun, UserRound } from "lucide-react"
 import { Toaster } from "sonner"
 
-import { Admin } from "@/components/Admin"
+import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin } from "@/components/Admin"
 import { Login } from "@/components/Login"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -105,26 +105,47 @@ export default function App() {
     location.href = "/"
   }
 
+  // The page's own name and the group it belongs to, both from the one table the
+  // sidebar renders, so a route can never be titled differently from its nav entry.
+  const pageTitle = ADMIN_ITEMS.find((item) => item.path === path)?.label ?? ""
+  const pageGroup = ADMIN_SECTIONS.find((section) => section.items.some((item) => item.path === path))?.group ?? ""
+
   return (
     <div className="min-h-svh">
       <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3">
-          {/* The site name is the way back to the status page, as in the
-              theme's own header. */}
-          <a href="/" className="font-semibold transition-opacity hover:opacity-70">
-            {me.site_name || "Monitor"}
-          </a>
-          <span className="text-xs text-muted-foreground">后台</span>
-          <div className="flex-1" />
+        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5">
+          {/* A breadcrumb over a page title, where the site name alone used to be: the
+              header said which product this was but never where in it you were. The site
+              name is still the first crumb -- and the way back to the status page -- while
+              the sidebar's brand block takes it over visually at md and up. */}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <a href="/" className="transition-colors hover:text-foreground">
+                {me.site_name || "Monitor"}
+              </a>
+              <span aria-hidden>/</span>
+              <span>{pageGroup || "后台"}</span>
+            </div>
+            <h1 className="truncate text-base font-semibold tracking-tight md:text-xl">{pageTitle || "后台"}</h1>
+          </div>
           {/* The status page is a separate app, so this is a navigation. */}
           <Button variant="ghost" size="sm" asChild>
             <a href="/">
-              <ExternalLink /> 状态面板
+              <ExternalLink /> <span className="hidden sm:inline">状态面板</span>
             </a>
           </Button>
           <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
             {dark ? <Sun /> : <Moon />}
           </Button>
+          {/* One admin, reached by password or by GitHub, so there is no profile page to
+              link to and no menu worth opening. The identity and the way out are shown
+              side by side instead. */}
+          <span className="hidden items-center gap-2 rounded-full border py-1 pr-2.5 pl-1 sm:flex">
+            <span className="grid size-6 place-items-center rounded-full bg-tag text-tag-foreground" aria-hidden>
+              <UserRound className="size-3.5" />
+            </span>
+            <span className="text-xs text-muted-foreground">管理员</span>
+          </span>
           <Button variant="ghost" size="icon" onClick={signOut} title="退出登录">
             <LogOut />
           </Button>
@@ -145,6 +166,7 @@ export default function App() {
             // panel is frequently reached over a loopback port behind a proxy,
             // while the install command and OAuth callback need the real one.
             site={me.site || location.origin}
+            siteName={me.site_name || "Monitor"}
             canProvision={me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)}
           />
         )}

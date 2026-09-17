@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
+import { Activity, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -1944,16 +1944,31 @@ function Data() {
 }
 
 // Each area is its own route rather than a tab, so a page can be linked to and a
-// reload returns to the same section.
-const ADMIN_SECTIONS = [
-  { path: "/admin/nodes", label: "节点", icon: Server },
-  { path: "/admin/ping", label: "延迟", icon: Radio },
-  { path: "/admin/notify", label: "通知", icon: Bell },
-  { path: "/admin/data", label: "数据", icon: Database },
-  { path: "/admin/themes", label: "主题", icon: Palette },
-  { path: "/admin/security", label: "安全", icon: Shield },
-  { path: "/admin/settings", label: "设置", icon: Settings },
-] as const
+// reload returns to the same section. Grouped the way the work divides: the machines
+// and what they report, then the settings that apply to all of them. Seven flat items
+// gave no hint that 通知 and 节点 are different kinds of thing.
+export const ADMIN_SECTIONS = [
+  {
+    group: "资源管理",
+    items: [
+      { path: "/admin/nodes", label: "节点", icon: Server },
+      { path: "/admin/ping", label: "延迟", icon: Radio },
+      { path: "/admin/data", label: "数据", icon: Database },
+    ],
+  },
+  {
+    group: "系统设置",
+    items: [
+      { path: "/admin/notify", label: "通知", icon: Bell },
+      { path: "/admin/themes", label: "主题", icon: Palette },
+      { path: "/admin/security", label: "安全", icon: Shield },
+      { path: "/admin/settings", label: "设置", icon: Settings },
+    ],
+  },
+]
+
+/** Flattened, for the header: the page's own label and the group it belongs to. */
+export const ADMIN_ITEMS = ADMIN_SECTIONS.flatMap((section) => section.items)
 
 export function Admin({
   path,
@@ -1961,6 +1976,7 @@ export function Admin({
   nodes,
   refresh,
   site,
+  siteName,
   canProvision,
 }: {
   path: string
@@ -1968,27 +1984,49 @@ export function Admin({
   nodes: Node[]
   refresh: () => void
   site: string
+  siteName: string
   canProvision: boolean
 }) {
   return (
     <div className="flex flex-col gap-6 md:flex-row">
-      <nav className="flex gap-1 overflow-x-auto md:w-44 md:shrink-0 md:flex-col md:overflow-visible">
-        {ADMIN_SECTIONS.map(({ path: to, label, icon: Icon }) => {
-          const active = path === to
-          return (
-            <button
-              key={to}
-              onClick={() => go(to)}
-              aria-current={active ? "page" : undefined}
-              className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-                active ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted"
-              }`}
-            >
-              <Icon className="size-4" />
-              {label}
-            </button>
-          )
-        })}
+      <nav className="flex gap-1 overflow-x-auto md:w-52 md:shrink-0 md:flex-col md:gap-5 md:overflow-visible">
+        {/* The brand lives here at md and up, which is what frees the header to be a
+            breadcrumb and a page title rather than carrying the site name as well. */}
+        <div className="hidden items-center gap-2.5 md:flex">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground" aria-hidden>
+            <Activity className="size-4" />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold tracking-tight">{siteName || "Monitor"}</span>
+            <span className="mt-1 inline-block rounded bg-tag px-1.5 py-0.5 text-[10px] leading-none text-tag-foreground">管理后台</span>
+          </span>
+        </div>
+        {ADMIN_SECTIONS.map((section) => (
+          // On small screens this nav is a horizontal scroller, and group headings would
+          // be words wedged in among the buttons.
+          <div key={section.group} className="flex gap-1 md:flex-col md:gap-1">
+            <span className="hidden px-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground md:block">{section.group}</span>
+            {section.items.map(({ path: to, label, icon: Icon }) => {
+              const active = path === to
+              return (
+                <button
+                  key={to}
+                  onClick={() => go(to)}
+                  aria-current={active ? "page" : undefined}
+                  className={`relative flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+                    active ? "bg-accent font-medium text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                >
+                  {/* A bar on the leading edge: a tinted background alone sat too close to
+                      the hover state to read as "you are here". */}
+                  {active && <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" aria-hidden />}
+                  <Icon className="size-4" />
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className="min-w-0 flex-1">
