@@ -43,6 +43,10 @@ fn bad(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, message.to_owned()).into_response()
 }
 
+fn no_such_node() -> Response {
+    (StatusCode::NOT_FOUND, "no such node").into_response()
+}
+
 // ---- read paths, shared between the panel and the public page ----
 
 /// Everything a report may expose under `metrics` on the public page: the agent
@@ -679,10 +683,11 @@ pub async fn update_node(
         return bad(message);
     }
     match app.db.update_node(id, &node) {
-        Ok(()) => {
+        Ok(true) => {
             invalidate_snapshot(&app);
             Json(json!({"ok": true})).into_response()
         }
+        Ok(false) => no_such_node(),
         Err(e) => fail(e),
     }
 }
@@ -707,19 +712,20 @@ pub async fn reorder_nodes(_: Admin, State(app): State<Shared>, Json(order): Jso
 }
 
 pub async fn delete_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
+    match app.db.delete_node(id) {
+        Ok(true) => {}
+        Ok(false) => return no_such_node(),
+        Err(e) => return fail(e),
+    }
     // The token is checked only at the handshake, so deleting the row does not
     // end a connection already open on it; dropping the sender does. Without
     // this the agent would keep reporting under an id SQLite reassigns to the
     // next node created, which would then appear online on another node's
-    // metrics. The same reasoning applies in `reset_token` below.
+    // metrics. Dropped after the delete, so the reconnect that follows finds no
+    // token to accept. The same reasoning applies in `reset_token` below.
     app.agents.write().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    match app.db.delete_node(id) {
-        Ok(()) => {
-            invalidate_snapshot(&app);
-            Json(json!({"ok": true})).into_response()
-        }
-        Err(e) => fail(e),
-    }
+    invalidate_snapshot(&app);
+    Json(json!({"ok": true})).into_response()
 }
 
 /// Issues a fresh token, invalidating the old one immediately.
@@ -728,9 +734,10 @@ pub async fn delete_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64
 /// reinstall the agent. Reading the install command does not pass through here.
 pub async fn reset_token(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
     let token = random_token();
-    let updated = app.db.node(id).map(|n| n.is_some()).unwrap_or(false);
-    if !updated {
-        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    match app.db.reset_token(id, &token) {
+        Ok(true) => {}
+        Ok(false) => return no_such_node(),
+        Err(e) => return fail(e),
     }
     // The token is checked only at the handshake, so a session opened with the
     // old one would continue reporting. Dropping the sender ends that loop; the
@@ -740,12 +747,9 @@ pub async fn reset_token(_: Admin, State(app): State<Shared>, Path(id): Path<i64
     // The token is part of the admin frame, which would otherwise continue to
     // display an install command for the credential just retired.
     invalidate_snapshot(&app);
-    match app.db.reset_token(id, &token) {
-        // The token alone: the panel builds the command, and one place needs to
-        // know its form.
-        Ok(()) => Json(json!({"token": token})).into_response(),
-        Err(e) => fail(e),
-    }
+    // The token alone: the panel builds the command, and one place needs to know
+    // its form.
+    Json(json!({"token": token})).into_response()
 }
 
 pub async fn patch_traffic(
@@ -758,10 +762,11 @@ pub async fn patch_traffic(
         return bad("traffic must be non-negative");
     }
     match app.db.set_traffic(id, &p) {
-        Ok(()) => {
+        Ok(true) => {
             invalidate_snapshot(&app);
             Json(json!({"ok": true})).into_response()
         }
+        Ok(false) => no_such_node(),
         Err(e) => fail(e),
     }
 }
@@ -2026,6 +2031,20 @@ mod tests {
             "the old agent's channel must be closed"
         );
         assert!(app.agents.read().unwrap().is_empty(), "the node must read as offline at once");
+    }
+
+    /// A write naming a node that no longer exists, such as one deleted from
+    /// another tab, is refused rather than reported as saved.
+    #[tokio::test]
+    async fn writes_to_a_missing_node_are_not_found() {
+        let app = std::sync::Arc::new(app());
+        let state = || axum::extract::State(app.clone());
+        let patch = Ok(Json(NodePatch { notify: Some(true), ..Default::default() }));
+        assert_eq!(update_node(Admin, state(), Path(9), patch).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(delete_node(Admin, state(), Path(9)).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(reset_token(Admin, state(), Path(9)).await.status(), StatusCode::NOT_FOUND);
+        let traffic = Json(TrafficPatch { total_rx: Some(1), ..Default::default() });
+        assert_eq!(patch_traffic(Admin, state(), Path(9), traffic).await.status(), StatusCode::NOT_FOUND);
     }
 
     /// Deleting a node must reach the connection it opened, for the same reason

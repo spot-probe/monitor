@@ -1550,8 +1550,8 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       <Card className="gap-4 p-5">
         <h3 className="text-sm font-medium">事件</h3>
         <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="离线宽限期（分钟）" hint="断开超过这么久才算离线，1–1440">
-            <Input type="number" min={1} max={1440} value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
+          <Field label="离线宽限期（分钟）" hint="断开超过这么久才算离线，1–30">
+            <Input type="number" min={1} max={30}value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
           </Field>
           <Field label="流量提醒（%）" hint="本期用量达到该比例和 100% 时各提醒一次，0 关闭">
             <Input type="number" min={0} max={100} value={text("notify_traffic")} onChange={(e) => set("notify_traffic", e.target.value)} />

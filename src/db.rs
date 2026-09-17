@@ -583,8 +583,9 @@ impl Db {
         Ok(())
     }
 
-    pub fn update_node(&self, id: i64, n: &NodePatch) -> Result<()> {
-        self.conn().execute(
+    /// False when no node has this id.
+    pub fn update_node(&self, id: i64, n: &NodePatch) -> Result<bool> {
+        let found = self.conn().execute(
             "UPDATE node SET name=COALESCE(?2,name), sort=COALESCE(?3,sort), public=COALESCE(?4,public),
                              price=COALESCE(?5,price), currency=COALESCE(?6,currency),
                              billing_cycle=COALESCE(?7,billing_cycle),
@@ -612,7 +613,7 @@ impl Db {
                 n.group
             ],
         )?;
-        Ok(())
+        Ok(found > 0)
     }
 
     pub fn set_expiry(&self, id: i64, date: &str) -> Result<()> {
@@ -645,21 +646,21 @@ impl Db {
         Ok(())
     }
 
-    pub fn delete_node(&self, id: i64) -> Result<()> {
+    /// False when no node has this id.
+    pub fn delete_node(&self, id: i64) -> Result<bool> {
         let conn = self.conn();
         // `ping_record` carries no foreign key -- it is WITHOUT ROWID and keyed
         // for the chart query -- so it is cleared explicitly. SQLite reassigns a
         // deleted node's id to the next node created, which would otherwise
         // inherit the removed machine's latency chart.
         conn.execute("DELETE FROM ping_record WHERE node_id = ?1", [id])?;
-        conn.execute("DELETE FROM node WHERE id = ?1", [id])?;
-        Ok(())
+        Ok(conn.execute("DELETE FROM node WHERE id = ?1", [id])? > 0)
     }
 
-    /// Replaces a node's token, which immediately locks out the old one.
-    pub fn reset_token(&self, id: i64, token: &str) -> Result<()> {
-        self.conn().execute("UPDATE node SET token=?2 WHERE id=?1", params![id, token])?;
-        Ok(())
+    /// Replaces a node's token, which immediately locks out the old one. False
+    /// when no node has this id.
+    pub fn reset_token(&self, id: i64, token: &str) -> Result<bool> {
+        Ok(self.conn().execute("UPDATE node SET token=?2 WHERE id=?1", params![id, token])? > 0)
     }
 
     pub fn node_by_token(&self, token: &str) -> Result<Option<i64>> {
@@ -904,10 +905,16 @@ impl Db {
     /// they would belong to whichever period the row still held, `all_traffic`
     /// would read them back as zero, and the node's next report would restart the
     /// counter and discard the correction.
-    pub fn set_traffic(&self, node_id: i64, p: &TrafficPatch) -> Result<()> {
+    ///
+    /// False when no node has this id.
+    pub fn set_traffic(&self, node_id: i64, p: &TrafficPatch) -> Result<bool> {
         let conn = self.conn();
-        let reset_day: u32 =
-            conn.query_row("SELECT traffic_reset_day FROM node WHERE id=?1", [node_id], |r| r.get(0))?;
+        let Some(reset_day): Option<u32> = conn
+            .query_row("SELECT traffic_reset_day FROM node WHERE id=?1", [node_id], |r| r.get(0))
+            .optional()?
+        else {
+            return Ok(false);
+        };
         let period = period_start(Local::now().date_naive(), reset_day).to_string();
         conn.execute(
             "UPDATE traffic SET total_rx=COALESCE(?2,total_rx), total_tx=COALESCE(?3,total_tx),
@@ -916,7 +923,7 @@ impl Db {
              WHERE node_id=?1",
             params![node_id, p.total_rx, p.total_tx, p.month_rx, p.month_tx, period],
         )?;
-        Ok(())
+        Ok(true)
     }
 
     // ---- metrics ----

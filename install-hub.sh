@@ -9,6 +9,10 @@
 # terminal to read answers from, so it installs with the defaults rather than
 # waiting on an invisible prompt.
 set -eu
+# useradd resides in sbin, which a root shell entered through `su` without `-`
+# lacks on Debian: su keeps the caller's PATH unless ALWAYS_SET_PATH is set, and
+# Debian does not set it.
+PATH="$PATH:/usr/sbin:/sbin"
 
 # This fork's own releases, not upstream's: the binary carries this fork's embedded
 # theme and its node grouping, so installing upstream's build would be a different
