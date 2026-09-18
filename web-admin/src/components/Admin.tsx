@@ -927,12 +927,20 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
 
 function Ping({ nodes }: { nodes: Node[] }) {
   const [tasks, setTasks] = useState<PingTask[]>([])
+  // The list starts empty, so an empty-state check on `tasks.length` alone fires while the
+  // first fetch is still in flight and tells the operator there are no probes. Themes and
+  // Sessions already guard this with a null; here a flag is enough and touches less.
+  const [loaded, setLoaded] = useState(false)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState(false)
 
-  const load = () => api<{ tasks: PingTask[] }>("/ping-tasks").then((d) => setTasks(d.tasks)).catch(() => {})
+  const load = () =>
+    api<{ tasks: PingTask[] }>("/ping-tasks")
+      .then((d) => setTasks(d.tasks))
+      .catch(() => {})
+      .finally(() => setLoaded(true))
   useEffect(() => { load() }, [])
 
   async function save() {
@@ -1028,7 +1036,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 </TableCell>
               </TableRow>
             ))}
-            {tasks.length === 0 && (
+            {loaded && tasks.length === 0 && (
               <TableRow>
                 <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
                   还没有延迟监控。每个节点独立 TCP 连接目标端口并上报耗时。
@@ -1309,7 +1317,14 @@ function Themes() {
                     directory to delete -- it is also the fallback everything
                     else lands on. */}
                 {!theme.builtin && (
-                  <Button size="icon" variant="ghost" disabled={!!busy} onClick={() => setDoomed(theme)}>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="删除主题"
+                    aria-label="删除主题"
+                    disabled={!!busy}
+                    onClick={() => setDoomed(theme)}
+                  >
                     <Trash2 />
                   </Button>
                 )}
@@ -1794,6 +1809,7 @@ function since(ts: number): string {
 
 function Sessions() {
   const [rows, setRows] = useState<Session[] | null>(null)
+  const [doomed, setDoomed] = useState<Session | null>(null)
   const [busy, setBusy] = useState("")
 
   const load = () => api<Session[]>("/sessions").then(setRows).catch((e: Error) => toast.error(e.message))
@@ -1867,7 +1883,7 @@ function Sessions() {
                   {/* 当前会话没有删除按钮：右上角的退出登录做的就是这件事，而在这里删
                       只会让已经渲染好的面板以为自己还登着。 */}
                   {!s.current && (
-                    <Button size="icon" variant="ghost" disabled={!!busy} onClick={() => remove(s.id)} title="退出该设备" aria-label="退出该设备">
+                    <Button size="icon" variant="ghost" disabled={!!busy} onClick={() => setDoomed(s)} title="退出该设备" aria-label="退出该设备">
                       <Trash2 />
                     </Button>
                   )}
@@ -1877,6 +1893,16 @@ function Sessions() {
           </TableBody>
         </Table>
       </div>
+      {doomed && (
+        <ConfirmDialog
+          title="退出该设备？"
+          description="该设备下一次请求就会被登出。它在 14 天内本来也会自然过期。"
+          confirmLabel="退出该设备"
+          busy={!!busy}
+          onClose={() => setDoomed(null)}
+          onConfirm={() => remove(doomed.id)}
+        />
+      )}
     </Card>
   )
 }
