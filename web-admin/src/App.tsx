@@ -147,7 +147,7 @@ export default function App() {
           {/* Name then version, as separate spans so the name can truncate without
               taking the version with it. Collapsed, both go together. */}
           <span className={`flex min-w-0 items-baseline gap-1.5 ${navOpen ? "" : "md:hidden"}`}>
-            <span className="truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
+            <span className="truncate text-base font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
             {me.version && (
               <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={`monitor-hub v${me.version}`}>
                 v{me.version}
