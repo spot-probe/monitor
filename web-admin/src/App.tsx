@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
-type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; login: string }
+type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; login: string; version: string }
 
 // `/admin` alone is not a page; it is normalised to the first section so that a
 // bookmark and the OAuth redirect both resolve to a real route.
@@ -144,8 +144,15 @@ export default function App() {
           <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
           {/* Name only: the badge that used to sit under it made a two-line block in a
               one-line bar, and the breadcrumb beside this already says 后台. */}
-          <span className={`min-w-0 truncate text-sm font-semibold tracking-tight ${navOpen ? "" : "md:hidden"}`}>
-            {me.site_name || "Monitor"}
+          {/* Name then version, as separate spans so the name can truncate without
+              taking the version with it. Collapsed, both go together. */}
+          <span className={`flex min-w-0 items-baseline gap-1.5 ${navOpen ? "" : "md:hidden"}`}>
+            <span className="truncate text-sm font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
+            {me.version && (
+              <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={`monitor-hub v${me.version}`}>
+                v{me.version}
+              </span>
+            )}
           </span>
         </div>
         {/* Below md this is a horizontal scroller, and group headings would be words
