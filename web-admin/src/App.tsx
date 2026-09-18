@@ -187,12 +187,14 @@ export default function App() {
             the header's right end is for the page's own actions (状态面板, 主题切换), and
             this is the one place in the layout that is about you and not the page. */}
         <div className="hidden border-t p-2 md:mt-auto md:block">
-          {/* One card rather than a tinted tile plus two bare items: colouring the icon
-              alone put all the weight at the left end of the row. The fill is the content
-              area's own off-white -- the panel's existing second surface -- instead of
-              another grey, and the icon needs no tile of its own to sit on it. */}
-          <div className={`flex items-center gap-2.5 rounded-lg bg-background px-3 py-2.5 ${navOpen ? "" : "md:flex-col md:gap-1.5 md:px-0"}`}>
-            <span className="grid size-7 shrink-0 place-items-center text-muted-foreground" aria-hidden>
+          {/* The whole footer is one card, and it is deliberately the one tinted surface
+              in the sidebar: this is the account, and which door it came through is a
+              security fact. Off-white on white had no edge at all -- the card dissolved
+              into the column -- so it carries the accent fill and a primary-toned border,
+              which is also what makes the key icon legible as a credential rather than
+              decoration. All three are theme tokens, so dark mode follows. */}
+          <div className={`flex items-center gap-2.5 rounded-lg border border-primary/20 bg-accent px-3 py-2.5 ${navOpen ? "" : "md:flex-col md:gap-1.5 md:px-0"}`}>
+            <span className="grid size-7 shrink-0 place-items-center text-primary" aria-hidden>
               {me.login ? <UserRound className="size-4" /> : <KeyRound className="size-4" />}
             </span>
             {/* Collapsed, the icon is the identity and the title attribute is the label.
@@ -212,7 +214,7 @@ export default function App() {
               onClick={signOut}
               title="退出登录"
               aria-label="退出登录"
-              className="shrink-0 text-muted-foreground hover:bg-muted hover:text-destructive"
+              className="shrink-0 text-muted-foreground hover:bg-background hover:text-destructive"
             >
               <LogOut />
             </Button>
