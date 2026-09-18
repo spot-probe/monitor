@@ -141,18 +141,28 @@ export default function App() {
         <div className="flex h-14 items-center gap-2 px-4 md:h-[60px]">
           {/* The same mark the browser tab carries, so the panel and its tab are one
               product rather than two that happen to share a name. */}
-          <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
-          {/* Name only: the badge that used to sit under it made a two-line block in a
-              one-line bar, and the breadcrumb beside this already says 后台. */}
-          {/* Name then version, as separate spans so the name can truncate without
-              taking the version with it. Collapsed, both go together. */}
-          <span className={`flex min-w-0 items-baseline gap-1.5 ${navOpen ? "" : "md:hidden"}`}>
-            <span className="truncate text-base font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
-            {me.version && (
-              <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={`monitor-hub v${me.version}`}>
-                v{me.version}
+          {/* The logo and the text sit on one baseline -- an image's baseline is its own
+              bottom edge, so this puts the letters' feet on the logo's feet rather than
+              centring two boxes of different heights, which never lines them up. The row
+              keeps its fixed height and centres this wrapper, so the bar stays put. */}
+          <span className="flex min-w-0 items-baseline gap-2">
+            <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+            {/* Name then version, as separate spans so the name can truncate without
+                taking the version with it. Collapsed, both go together. */}
+            <span className={`flex min-w-0 items-baseline gap-1.5 ${navOpen ? "" : "md:hidden"}`}>
+              {/* `truncate` means overflow:hidden, and a box that clips reports its bottom
+                  edge as its baseline -- which is the 6px that kept the name off the logo's
+                  feet. Truncation is nested one level down instead, so the flex item keeps
+                  the text's own baseline. */}
+              <span className="min-w-0">
+                <span className="block truncate text-base font-semibold tracking-tight">{me.site_name || "Monitor"}</span>
               </span>
-            )}
+              {me.version && (
+                <span className="shrink-0 text-[10px] font-normal text-muted-foreground" title={`monitor-hub v${me.version}`}>
+                  v{me.version}
+                </span>
+              )}
+            </span>
           </span>
         </div>
         {/* Below md this is a horizontal scroller, and group headings would be words
