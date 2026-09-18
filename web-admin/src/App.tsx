@@ -122,6 +122,12 @@ export default function App() {
   const pageTitle = ADMIN_ITEMS.find((item) => item.path === path)?.label ?? ""
   const pageGroup = ADMIN_SECTIONS.find((section) => section.items.some((item) => item.path === path))?.group ?? ""
 
+  // The provisioning hint has to stay put while the content scrolls, so it belongs to
+  // the shell's band rather than to the page -- and its condition is already the shell's
+  // (canProvision below is the same expression).
+  const canProvision = me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)
+  const hint = path === "/admin/nodes" && !canProvision ? "请通过 HTTPS 域名访问面板后添加或安装节点。" : ""
+
   return (
     // Two panes. The brand and the nav are a full-height column whose header sits on the
     // same line as the page tools; the brand used to sit inside the nav's scroll area,
@@ -181,8 +187,10 @@ export default function App() {
             the header's right end is for the page's own actions (状态面板, 主题切换), and
             this is the one place in the layout that is about you and not the page. */}
         <div className="hidden border-t p-2 md:mt-auto md:block">
-          <div className={`flex items-center gap-2 ${navOpen ? "" : "md:flex-col md:gap-1.5"}`}>
-            <span className="grid size-8 shrink-0 place-items-center rounded-md bg-tag text-tag-foreground" aria-hidden>
+          {/* One card, not a tinted tile plus two bare items: colouring the icon alone
+              put all the weight at the left end of the row. The container is the card. */}
+          <div className={`flex items-center gap-2.5 rounded-lg bg-muted px-3 py-2.5 ${navOpen ? "" : "md:flex-col md:gap-1.5 md:px-0"}`}>
+            <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground" aria-hidden>
               {me.login ? <UserRound className="size-4" /> : <KeyRound className="size-4" />}
             </span>
             {/* Collapsed, the icon is the identity and the title attribute is the label.
@@ -190,10 +198,10 @@ export default function App() {
                 a hover popover would mean a new dependency for one label. */}
             {navOpen && (
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium">{me.login || "应急密码"}</span>
-                {/* The second line only when it adds something: "应急密码" over
-                    "应急密码登入" would be the same words twice. */}
-                {me.login && <span className="block truncate text-[11px] text-muted-foreground">GitHub OAuth</span>}
+                <span className="block truncate text-xs font-semibold">{me.login || "应急密码"}</span>
+                <span className="block truncate text-[10px] text-muted-foreground">
+                  {me.login ? "GitHub OAuth" : "备用登录方式"}
+                </span>
               </span>
             )}
             <Button
@@ -202,7 +210,7 @@ export default function App() {
               onClick={signOut}
               title="退出登录"
               aria-label="退出登录"
-              className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              className="shrink-0 text-muted-foreground hover:bg-background hover:text-destructive"
             >
               <LogOut />
             </Button>
@@ -293,7 +301,10 @@ export default function App() {
         <main className="min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6">
           {/* The page's heading lives with the page. In the bar it had to share a line
               with the breadcrumb, and the bar is what should stay one line. */}
-          <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
+          <div className="sticky top-0 z-[1] -mx-4 border-b bg-background px-4 pt-4 pb-3 md:-mx-6 md:px-6">
+            <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
+            {hint && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>}
+          </div>
           {error && <p className="text-sm text-danger-fg">{error}</p>}
           {!nodes ? (
             <Skeleton className="h-64" />
@@ -306,7 +317,7 @@ export default function App() {
               // panel is frequently reached over a loopback port behind a proxy,
               // while the install command and OAuth callback need the real one.
               site={me.site || location.origin}
-              canProvision={me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)}
+              canProvision={canProvision}
             />
           )}
         </main>

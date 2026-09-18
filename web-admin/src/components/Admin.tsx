@@ -669,7 +669,6 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
 
   return (
     <div className="space-y-4">
-      {!canProvision && <p className="text-sm text-muted-foreground">请通过 HTTPS 域名访问面板后添加或安装节点。</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
         {groups.length > 0 && (
           <Select value={group} onValueChange={setGroup}>
