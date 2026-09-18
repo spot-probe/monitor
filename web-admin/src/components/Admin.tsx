@@ -1025,30 +1025,54 @@ function Ping({ nodes }: { nodes: Node[] }) {
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label className="text-sm font-medium">运行节点</Label>
-                  <div className="flex items-center gap-0.5">
+                  <div className="flex items-center gap-1">
                     <span className="mr-1 text-xs text-muted-foreground">
-                      已选 {editing.nodes?.length ?? 0} / {nodes.length}
+                      已选 <span className="font-medium text-foreground">{editing.nodes?.length ?? 0}</span> / {nodes.length}
                     </span>
                     {/* 清空 rather than 取消: the dialog's own 取消 sits just below and
-                        closes the dialog, so the same word would mean two things. */}
+                        closes the dialog, so the same word would mean two things. The rest
+                        state carries a background so they read as buttons before you hover
+                        them -- bare ghost buttons look like stray words. */}
                     {([
                       ["全选", () => setAll(true), nodes.length === 0 || (editing.nodes?.length ?? 0) === nodes.length],
                       ["清空", () => setAll(false), (editing.nodes?.length ?? 0) === 0],
                       ["反选", invert, nodes.length === 0],
                     ] as const).map(([label, onClick, disabled]) => (
-                      <Button key={label} type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onClick} disabled={disabled}>
+                      <Button
+                        key={label}
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 rounded-md bg-muted/60 px-2 text-xs font-normal hover:bg-muted"
+                        onClick={onClick}
+                        disabled={disabled}
+                      >
                         {label}
                       </Button>
                     ))}
                   </div>
                 </div>
-                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border bg-muted/20 p-2">
-                  {nodes.map((n) => (
-                    <label key={n.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-background">
-                      <input type="checkbox" checked={editing.nodes?.includes(n.id) ?? false} onChange={() => toggle(n.id)} className="accent-primary" />
-                      {n.name}
-                    </label>
-                  ))}
+                {/* Cards in a grid rather than bare checkboxes: the country is what makes a
+                    name recognisable in a long list, and once most of the fleet is selected
+                    the checked state has to be visible at a glance rather than hunted for. */}
+                <div className="grid max-h-72 gap-1.5 overflow-y-auto rounded-lg border bg-muted/20 p-2 sm:grid-cols-2">
+                  {nodes.map((n) => {
+                    const on = editing.nodes?.includes(n.id) ?? false
+                    return (
+                      <label
+                        key={n.id}
+                        className={`flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-2 text-sm transition-colors ${
+                          on ? "border-primary bg-accent text-foreground" : "border-border bg-background hover:bg-muted/60"
+                        }`}
+                      >
+                        <input type="checkbox" checked={on} onChange={() => toggle(n.id)} className="size-3.5 shrink-0 accent-primary" />
+                        <span className="min-w-0 flex-1 truncate">{n.name}</span>
+                        {n.country && (
+                          <span className="shrink-0 rounded bg-tag px-1 py-0.5 text-[10px] leading-none text-tag-foreground">{n.country}</span>
+                        )}
+                      </label>
+                    )
+                  })}
                   {nodes.length === 0 && <p className="p-2 text-xs text-muted-foreground">先添加节点</p>}
                 </div>
               </div>
@@ -1725,7 +1749,11 @@ function Sessions() {
           每次登录一条，14 天后过期。删除后该设备下一次请求就被登出。
         </p>
       </div>
-      <div className="divide-y">
+      {/* The list grew without limit: a dozen logins pushed 应急密码 and GitHub 单点登录
+          off the first screen. Capped and scrolled instead. The rows say everything the
+          backend knows -- the table stores a token hash and an expiry, nothing else -- so
+          this is not a place where more columns can come from. */}
+      <div className="max-h-72 divide-y overflow-y-auto">
         {rows.map((s) => (
           <div key={s.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
             <div className="flex min-w-0 items-center gap-2 text-sm">
