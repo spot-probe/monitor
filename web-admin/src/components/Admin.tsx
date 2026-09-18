@@ -591,6 +591,45 @@ function InstallDialog({ node, site, onClose, onRotated }: {
   )
 }
 
+/// Whole days until a date, counted the way a person counts them: the day itself is 0,
+/// yesterday is -1. Parsed as local midnight, matching how the panel's own date input
+/// writes the value.
+function daysUntil(date: string | null): number | null {
+  if (!date) return null
+  const at = new Date(`${date}T00:00:00`)
+  return Number.isNaN(at.getTime()) ? null : Math.floor((at.getTime() - Date.now()) / 86_400_000)
+}
+
+/// Three states, and the point is telling them apart at a glance in a long table: an
+/// ordinary date is secondary text, under a month turns amber, past it turns red. The
+/// colours are the theme's darker twins -- warn-fg is 5.02:1 and danger-fg 4.83:1 --
+/// because the amber and red fills do not carry as words on white.
+function Expiry({ date }: { date: string | null }) {
+  const days = daysUntil(date)
+  if (days === null) return <span className="text-muted-foreground">{FOREVER}</span>
+  if (days < 0) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="tnum text-danger-fg">{date}</span>
+        <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] leading-none text-danger-fg">
+          已过期 {-days} 天
+        </span>
+      </span>
+    )
+  }
+  if (days <= 30) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="tnum text-warn-fg">{date}</span>
+        <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] leading-none text-warn-fg">
+          {days === 0 ? "今天到期" : `${days} 天后到期`}
+        </span>
+      </span>
+    )
+  }
+  return <span className="tnum text-muted-foreground">{date}</span>
+}
+
 function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh: () => void; site: string; canProvision: boolean }) {
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<Node | null>(null)
@@ -758,7 +797,9 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                     >
                       <GripVertical className="size-4" />
                     </button>
-                    <div className="min-w-0 font-medium">{n.name}</div>
+                    <div className="min-w-0 max-w-[200px] truncate font-medium" title={n.name}>
+                      {n.name}
+                    </div>
                     {n.group && (
                       <Badge variant="outline" className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground">
                         {n.group}
@@ -805,7 +846,9 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                 <TableCell className="tnum text-sm">
                   {n.price > 0 ? money(n.price, n.currency) : "免费"}
                 </TableCell>
-                <TableCell className="text-sm">{n.expires_at || FOREVER}</TableCell>
+                <TableCell className="text-sm">
+                  <Expiry date={n.expires_at} />
+                </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
                   <div className="flex items-center justify-end gap-1">
                   <Button variant="ghost" size="icon" disabled={!canProvision} onClick={() => setInstalling(n)} title="安装 Agent" aria-label="安装 Agent">
