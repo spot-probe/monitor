@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
-type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean }
+type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; login: string }
 
 // `/admin` alone is not a page; it is normalised to the first section so that a
 // bookmark and the OAuth redirect both resolve to a real route.
@@ -232,14 +232,21 @@ export default function App() {
             <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
               {dark ? <Sun /> : <Moon />}
             </Button>
-            {/* One admin, reached by password or by GitHub, so there is no profile page to
-                link to and no menu worth opening. The identity and the way out are shown
-                side by side instead. */}
+            {/* There is one level of access, so "管理员" said nothing: every signed-in
+                browser is one. What the hub does know is which of the two doors was used,
+                and an empty login is how it reports the emergency password. That answers
+                a real question -- how am I signed in -- instead of restating the only
+                possibility. */}
             <span className="hidden items-center gap-2 rounded-full border py-1 pr-2.5 pl-1 sm:flex">
               <span className="grid size-6 place-items-center rounded-full bg-tag text-tag-foreground" aria-hidden>
                 <UserRound className="size-3.5" />
               </span>
-              <span className="text-xs text-muted-foreground">管理员</span>
+              <span
+                className="max-w-32 truncate text-xs text-muted-foreground"
+                title={me.login ? `GitHub · ${me.login}` : "应急密码登入"}
+              >
+                {me.login || "应急密码"}
+              </span>
             </span>
             <Button variant="ghost" size="icon" onClick={signOut} title="退出登录">
               <LogOut />
