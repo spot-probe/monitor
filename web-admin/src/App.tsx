@@ -141,17 +141,13 @@ export default function App() {
         <div className="flex h-14 items-center gap-2 px-4 md:h-[60px]">
           {/* The same mark the browser tab carries, so the panel and its tab are one
               product rather than two that happen to share a name. */}
-          {/* The logo and the text sit on one baseline -- an image's baseline is its own
-              bottom edge, so this puts the letters' feet on the logo's feet rather than
-              centring two boxes of different heights, which never lines them up. The row
-              keeps its fixed height and centres this wrapper, so the bar stays put. */}
-          <span className="flex min-w-0 items-baseline gap-2">
-            {/* The mark's own viewBox carries 12.5% empty space below the bars (bars span
-                y 2..14 of a 16-unit box), so its box bottom sits 3.5px below the bars at
-                28px. Baseline alignment would then put the text 3.5px under the bars --
-                which is what "文字在 logo 下部" was. Cancelling that padding makes the
-                image's effective bottom the bars' bottom, and the text lands on it. */}
-            <img src="/favicon.svg" alt="" className="-mb-[3.5px] size-7 shrink-0" />
+          {/* Centred, not baseline-aligned. The mark's own viewBox pads it 12.5% top and
+              bottom, so the image box is symmetric about the bars and its centre *is* the
+              bars' centre -- centring is what lines the wordmark up with them. Aligning
+              baselines instead puts the text at the image's bottom edge, which lands under
+              the bars and reads as the text having sunk. */}
+          <span className="flex min-w-0 items-center gap-2">
+            <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
             {/* Name then version, as separate spans so the name can truncate without
                 taking the version with it. Collapsed, both go together. */}
             <span className={`flex min-w-0 items-baseline gap-1.5 ${navOpen ? "" : "md:hidden"}`}>
