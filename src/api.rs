@@ -508,9 +508,20 @@ fn node_limits(reset_day: Option<u32>, price: Option<f64>, limit: Option<i64>) -
     None
 }
 
-pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Json<Value> {
-    Json(json!({
-        "authed": authed(&app, &headers),
+pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
+    let authed = authed(&app, &headers);
+    // Which login this browser holds -- and only for the browser holding it. The public
+    // page calls this endpoint too, and an anonymous visitor gets an empty string. The
+    // response varies by cookie, so it must never be cached: `no-store` says exactly
+    // that to any proxy between here and the panel.
+    let login = if authed {
+        current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let body = json!({
+        "authed": authed,
+        "login": login,
         "github": app.db.get("github_client_id").is_some_and(|v| !v.is_empty()),
         "site_name": app.db.get("site_name").unwrap_or_else(|| "Monitor".into()),
         "public_page": app.public_page(),
@@ -521,7 +532,8 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Json<Value> {
         // default, in which case the browser's address is the only one available
         // and the panel falls back to its own origin.
         "site": app.site,
-    }))
+    });
+    ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 pub async fn create_node(
@@ -1102,7 +1114,11 @@ pub async fn db_restore(
             // those loops; each reconnects against the restored database.
             app.agents.write().unwrap_or_else(|e| e.into_inner()).clear();
             invalidate_snapshot(&app);
-            let cookie = match app.db.drop_all_sessions().and_then(|()| issue_session(&app, &headers)) {
+            // Read the caller's own login before the wipe: the replacement session is
+            // theirs, and telling someone who signed in with GitHub that they used the
+            // emergency password would be a lie the panel cannot detect.
+            let who = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
+            let cookie = match app.db.drop_all_sessions().and_then(|()| issue_session(&app, &headers, &who)) {
                 Ok(cookie) => cookie,
                 Err(e) => return fail(e),
             };
@@ -1358,11 +1374,12 @@ pub async fn sessions(_: Admin, State(app): State<Shared>, headers: HeaderMap) -
     match app.db.sessions() {
         Ok(rows) => Json(
             rows.into_iter()
-                .map(|(hash, expires_at)| {
+                .map(|(hash, expires_at, github_login)| {
                     json!({
                         "current": mine.as_deref() == Some(hash.as_str()),
                         "created_at": issued_at(expires_at),
                         "id": hash,
+                        "login": github_login,
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -1467,10 +1484,11 @@ pub async fn save_settings(
         // Changing the password logs out every existing session; the caller
         // receives a replacement.
         if key == "admin_password" {
+            let who = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
             match hash_password(value).and_then(|h| {
                 app.db.set("admin_password_hash", &h)?;
                 app.db.drop_all_sessions()?;
-                issue_session(&app, &headers)
+                issue_session(&app, &headers, &who)
             }) {
                 Ok(cookie) => reissued = cookie,
                 Err(e) => return fail(e),
@@ -2117,7 +2135,7 @@ mod tests {
     fn a_stream_re_reads_both_answers_its_handshake_tested() {
         let app = app();
         let hash = sha256("live-token");
-        app.db.create_session(&hash, Utc::now().timestamp() + 3_600).unwrap();
+        app.db.create_session(&hash, Utc::now().timestamp() + 3_600, "").unwrap();
 
         assert_eq!(stream_audience(&app, Some(&hash)), Some(true), "a live session gets the admin frame");
         assert_eq!(stream_audience(&app, None), Some(false), "an anonymous stream gets the public one");
@@ -2130,7 +2148,7 @@ mod tests {
         // The other half. `live_ws` refuses a new anonymous connection from here
         // and `nodes` answers 401, so a stream that continued was the only
         // remaining route, for as long as the tab stayed open.
-        app.db.create_session(&hash, Utc::now().timestamp() + 3_600).unwrap();
+        app.db.create_session(&hash, Utc::now().timestamp() + 3_600, "").unwrap();
         app.db.set("public_page", "off").unwrap();
         assert_eq!(stream_audience(&app, None), None, "closing the status page must end anonymous streams");
         assert_eq!(stream_audience(&app, Some(&hash)), Some(true), "a signed-in operator still gets theirs");
@@ -2469,7 +2487,7 @@ mod tests {
     async fn changing_the_password_kills_other_sessions_but_not_the_caller() {
         let app = std::sync::Arc::new(app());
         let stale = random_token();
-        app.db.create_session(&sha256(&stale), Utc::now().timestamp() + 3_600).unwrap();
+        app.db.create_session(&sha256(&stale), Utc::now().timestamp() + 3_600, "").unwrap();
 
         let body = Json(json!({"admin_password": "a-long-enough-password"}));
         let response = save_settings(Admin, axum::extract::State(app.clone()), HeaderMap::new(), body).await;
@@ -2489,15 +2507,16 @@ mod tests {
     }
 
     /// The panel hides the delete button on the caller's own row, so the mark is
-    /// all that prevents an admin from signing themselves out.
+    /// all that prevents an admin from signing themselves out. The row also carries
+    /// which login it belongs to, so the list can say 应急密码 or a GitHub user.
     #[tokio::test]
     async fn the_session_list_marks_the_caller_and_hides_expired_rows() {
         let app = std::sync::Arc::new(app());
         let (mine, theirs, stale) = (random_token(), random_token(), random_token());
         let now = Utc::now().timestamp();
-        app.db.create_session(&sha256(&mine), now + 3_600).unwrap();
-        app.db.create_session(&sha256(&theirs), now + 7_200).unwrap();
-        app.db.create_session(&sha256(&stale), now - 1).unwrap();
+        app.db.create_session(&sha256(&mine), now + 3_600, "jacob-bytes").unwrap();
+        app.db.create_session(&sha256(&theirs), now + 7_200, "").unwrap();
+        app.db.create_session(&sha256(&stale), now - 1, "jacob-bytes").unwrap();
 
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, format!("monitor_session={mine}").parse().unwrap());
@@ -2515,6 +2534,8 @@ mod tests {
         assert_eq!(rows[1]["id"], sha256(&mine));
         assert_eq!(rows[1]["current"], true, "the caller's own row must be marked");
         assert_eq!(rows[1]["created_at"].as_i64().unwrap(), now + 3_600 - 14 * 86_400);
+        assert_eq!(rows[1]["login"], "jacob-bytes", "a GitHub session carries its user");
+        assert_eq!(rows[0]["login"], "", "the emergency password has no name to carry");
 
         delete_session(Admin, axum::extract::State(app.clone()), Path(sha256(&theirs))).await;
         assert!(!app.db.session_valid(&sha256(&theirs)), "the deleted device is signed out");
@@ -2525,7 +2546,7 @@ mod tests {
     async fn a_short_password_is_refused_and_changes_nothing() {
         let app = std::sync::Arc::new(app());
         let live = random_token();
-        app.db.create_session(&sha256(&live), Utc::now().timestamp() + 3_600).unwrap();
+        app.db.create_session(&sha256(&live), Utc::now().timestamp() + 3_600, "").unwrap();
 
         let body = Json(json!({"admin_password": "short"}));
         let response = save_settings(Admin, axum::extract::State(app.clone()), HeaderMap::new(), body).await;

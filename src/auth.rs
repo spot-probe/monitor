@@ -149,9 +149,9 @@ pub fn issued_at(expires_at: i64) -> i64 {
 
 /// The request's headers decide the Secure flag when the hub has no `--site`;
 /// see `App::secure_cookies`.
-pub fn issue_session(app: &App, headers: &HeaderMap) -> Result<String> {
+pub fn issue_session(app: &App, headers: &HeaderMap, github_login: &str) -> Result<String> {
     let token = random_token();
-    app.db.create_session(&sha256(&token), Utc::now().timestamp() + SESSION_DAYS * 86_400)?;
+    app.db.create_session(&sha256(&token), Utc::now().timestamp() + SESSION_DAYS * 86_400, github_login)?;
     Ok(set_cookie(COOKIE, &token, SESSION_DAYS * 86_400, app.secure_cookies(headers)))
 }
 
@@ -182,7 +182,9 @@ pub async fn login(
         return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
     }
     app.throttle.clear(ip);
-    match issue_session(&app, &headers) {
+    // Empty login: the emergency password has no name, and the panel reads that as
+    // 应急密码 -- a second column for the method would only restate this.
+    match issue_session(&app, &headers, "") {
         Ok(cookie) => {
             crate::notify::signed_in(&app, "应急密码", ip);
             with_cookies(Json(serde_json::json!({"ok": true})), [cookie])
@@ -256,7 +258,7 @@ pub async fn github_callback(
         Ok(user) => user,
         Err(e) => return sign_in_failed(&app, &headers, &e.to_string()),
     };
-    let session = match issue_session(&app, &headers) {
+    let session = match issue_session(&app, &headers, &user) {
         Ok(cookie) => cookie,
         Err(e) => return sign_in_failed(&app, &headers, &e.to_string()),
     };

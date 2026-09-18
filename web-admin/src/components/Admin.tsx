@@ -1718,7 +1718,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
 // The two ways into this panel, on their own page: the GitHub identity it trusts
 // and the password that works when GitHub does not.
-type Session = { id: string; current: boolean; created_at: number }
+type Session = { id: string; current: boolean; created_at: number; login: string }
 
 function Sessions() {
   const [rows, setRows] = useState<Session[] | null>(null)
@@ -1758,6 +1758,12 @@ function Sessions() {
           <div key={s.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="tnum">{new Date(s.created_at * 1000).toLocaleString()}</span>
+              {/* Which door this session came through. With the issue time that is
+                  everything a row can say -- the hub stores a token hash and an expiry
+                  and nothing else; see notes/backlog.md for what an IP would need. */}
+              <Badge variant="outline" className="font-normal">
+                {s.login ? `GitHub · ${s.login}` : "应急密码"}
+              </Badge>
               {s.current && <Badge variant="secondary">当前设备</Badge>}
             </div>
             {/* 当前会话没有删除按钮：右上角的退出登录做的就是这件事，而在这里删

@@ -126,14 +126,15 @@ CREATE TABLE IF NOT EXISTS ping_record (
 
 CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  github_login TEXT  NOT NULL DEFAULT ''
 );
 "#;
 
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
 /// database already in service.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -239,6 +240,13 @@ fn migrate_to_5(conn: &Connection) -> Result<()> {
     add_column(conn, "node", r#""group" TEXT NOT NULL DEFAULT ''"#)
 }
 
+/// Which login a session came from. Empty means the emergency password, which has no
+/// name to record -- and which is why the panel can say "应急密码" without a second
+/// column for the method.
+fn migrate_to_6(conn: &Connection) -> Result<()> {
+    add_column(conn, "session", "github_login TEXT NOT NULL DEFAULT ''")
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -260,6 +268,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 5 {
         migrate_to_5(conn)?;
+    }
+    if from < 6 {
+        migrate_to_6(conn)?;
     }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
@@ -1457,12 +1468,24 @@ impl Db {
 
     // ---- sessions ----
 
-    pub fn create_session(&self, token_hash: &str, expires_at: i64) -> Result<()> {
+    pub fn create_session(&self, token_hash: &str, expires_at: i64, github_login: &str) -> Result<()> {
         self.conn().execute(
-            "INSERT OR REPLACE INTO session (token_hash, expires_at) VALUES (?1, ?2)",
-            params![token_hash, expires_at],
+            "INSERT OR REPLACE INTO session (token_hash, expires_at, github_login) VALUES (?1, ?2, ?3)",
+            params![token_hash, expires_at, github_login],
         )?;
         Ok(())
+    }
+
+    /// The login behind one session, for the panel's own header. `None` when the hash
+    /// is not a live session, so a stale cookie asks for nothing.
+    pub fn session_login(&self, token_hash: &str) -> Option<String> {
+        self.conn()
+            .query_row(
+                "SELECT github_login FROM session WHERE token_hash = ?1 AND expires_at > ?2",
+                params![token_hash, Utc::now().timestamp()],
+                |r| r.get(0),
+            )
+            .ok()
     }
 
     pub fn session_valid(&self, token_hash: &str) -> bool {
@@ -1480,13 +1503,13 @@ impl Db {
 
     /// Live sessions, newest first. Expired rows are filtered here rather than
     /// left to `expire_sessions`, which sweeps only once an hour.
-    pub fn sessions(&self) -> Result<Vec<(String, i64)>> {
+    pub fn sessions(&self) -> Result<Vec<(String, i64, String)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT token_hash, expires_at FROM session WHERE expires_at > ?1 ORDER BY expires_at DESC",
+            "SELECT token_hash, expires_at, github_login FROM session WHERE expires_at > ?1 ORDER BY expires_at DESC",
         )?;
         let rows = stmt
-            .query_map([Utc::now().timestamp()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([Utc::now().timestamp()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }
