@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ChevronRight, ExternalLink, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react"
+import { ChevronRight, ExternalLink, KeyRound, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react"
 import { Toaster } from "sonner"
 
 import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin } from "@/components/Admin"
@@ -128,7 +128,7 @@ export default function App() {
     // which left the top-left corner empty and put two "Nvidia"s a few pixels apart.
     <div className="flex min-h-svh flex-col md:h-svh md:min-h-0 md:flex-row md:overflow-hidden">
       <aside
-        className={`border-b bg-card transition-[width] duration-200 ease-in-out md:shrink-0 md:overflow-y-auto md:border-r md:border-b-0 ${
+        className={`border-b bg-card transition-[width] duration-200 ease-in-out md:flex md:shrink-0 md:flex-col md:border-r md:border-b-0 ${
           navOpen ? "md:w-60" : "md:w-16"
         }`}
       >
@@ -144,7 +144,7 @@ export default function App() {
         </div>
         {/* Below md this is a horizontal scroller, and group headings would be words
             wedged in among the buttons. */}
-        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:gap-5 md:overflow-visible md:px-2.5 md:pt-6 md:pb-4">
+        <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:min-h-0 md:flex-1 md:flex-col md:gap-5 md:overflow-y-auto md:px-2.5 md:pt-6 md:pb-4">
           {ADMIN_SECTIONS.map((section) => (
             <div key={section.group} className="flex gap-1 md:flex-col md:gap-1">
               <span className={`hidden px-3 pb-2 text-[11px] font-medium tracking-wide text-muted-foreground md:block ${navOpen ? "" : "md:hidden"}`}>
@@ -177,6 +177,37 @@ export default function App() {
             </div>
           ))}
         </nav>
+        {/* Account controls belong at the foot of the column rather than in the header:
+            the header's right end is for the page's own actions (状态面板, 主题切换), and
+            this is the one place in the layout that is about you and not the page. */}
+        <div className="hidden border-t p-2 md:mt-auto md:block">
+          <div className={`flex items-center gap-2 ${navOpen ? "" : "md:flex-col md:gap-1.5"}`}>
+            <span className="grid size-8 shrink-0 place-items-center rounded-md bg-tag text-tag-foreground" aria-hidden>
+              {me.login ? <UserRound className="size-4" /> : <KeyRound className="size-4" />}
+            </span>
+            {/* Collapsed, the icon is the identity and the title attribute is the label.
+                lucide no longer ships brand marks, so there is no GitHub logo to use, and
+                a hover popover would mean a new dependency for one label. */}
+            {navOpen && (
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-medium">{me.login || "应急密码"}</span>
+                {/* The second line only when it adds something: "应急密码" over
+                    "应急密码登入" would be the same words twice. */}
+                {me.login && <span className="block truncate text-[11px] text-muted-foreground">GitHub OAuth</span>}
+              </span>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={signOut}
+              title="退出登录"
+              aria-label="退出登录"
+              className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            >
+              <LogOut />
+            </Button>
+          </div>
+        </div>
       </aside>
 
       {/* min-h-0 on both: a flex child will not shrink below its content without it, and
@@ -232,23 +263,28 @@ export default function App() {
             <Button variant="ghost" size="icon" onClick={toggleTheme} title="切换主题">
               {dark ? <Sun /> : <Moon />}
             </Button>
-            {/* There is one level of access, so "管理员" said nothing: every signed-in
-                browser is one. What the hub does know is which of the two doors was used,
-                and an empty login is how it reports the emergency password. That answers
-                a real question -- how am I signed in -- instead of restating the only
-                possibility. */}
-            <span className="hidden items-center gap-2 rounded-full border py-1 pr-2.5 pl-1 sm:flex">
-              <span className="grid size-6 place-items-center rounded-full bg-tag text-tag-foreground" aria-hidden>
-                <UserRound className="size-3.5" />
+            {/* Below md the sidebar has no footer to put these in -- the nav is a
+                horizontal scroller there -- so the account controls stay here, and the
+                two forms are never on screen at the same width. */}
+            <span className="flex items-center gap-1.5 sm:gap-2 md:hidden">
+              <span className="grid size-7 shrink-0 place-items-center rounded-md bg-tag text-tag-foreground" aria-hidden>
+                {me.login ? <UserRound className="size-3.5" /> : <KeyRound className="size-3.5" />}
               </span>
               <span
-                className="max-w-32 truncate text-xs text-muted-foreground"
+                className="hidden max-w-24 truncate text-xs text-muted-foreground sm:inline"
                 title={me.login ? `GitHub · ${me.login}` : "应急密码登入"}
               >
                 {me.login || "应急密码"}
               </span>
             </span>
-            <Button variant="ghost" size="icon" onClick={signOut} title="退出登录">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={signOut}
+              title="退出登录"
+              aria-label="退出登录"
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:hidden"
+            >
               <LogOut />
             </Button>
           </div>
