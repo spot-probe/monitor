@@ -151,8 +151,7 @@ pub fn issued_at(expires_at: i64) -> i64 {
 /// see `App::secure_cookies`.
 pub fn issue_session(app: &App, headers: &HeaderMap, github_login: &str) -> Result<String> {
     let token = random_token();
-    app.db
-        .create_session(&sha256(&token), Utc::now().timestamp() + SESSION_DAYS * 86_400, github_login)?;
+    app.db.create_session(&sha256(&token), Utc::now().timestamp() + SESSION_DAYS * 86_400, github_login)?;
     Ok(set_cookie(COOKIE, &token, SESSION_DAYS * 86_400, app.secure_cookies(headers)))
 }
 
