@@ -187,10 +187,12 @@ export default function App() {
             the header's right end is for the page's own actions (状态面板, 主题切换), and
             this is the one place in the layout that is about you and not the page. */}
         <div className="hidden border-t p-2 md:mt-auto md:block">
-          {/* One card, not a tinted tile plus two bare items: colouring the icon alone
-              put all the weight at the left end of the row. The container is the card. */}
-          <div className={`flex items-center gap-2.5 rounded-lg bg-muted px-3 py-2.5 ${navOpen ? "" : "md:flex-col md:gap-1.5 md:px-0"}`}>
-            <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground" aria-hidden>
+          {/* One card rather than a tinted tile plus two bare items: colouring the icon
+              alone put all the weight at the left end of the row. The fill is the content
+              area's own off-white -- the panel's existing second surface -- instead of
+              another grey, and the icon needs no tile of its own to sit on it. */}
+          <div className={`flex items-center gap-2.5 rounded-lg bg-background px-3 py-2.5 ${navOpen ? "" : "md:flex-col md:gap-1.5 md:px-0"}`}>
+            <span className="grid size-7 shrink-0 place-items-center text-muted-foreground" aria-hidden>
               {me.login ? <UserRound className="size-4" /> : <KeyRound className="size-4" />}
             </span>
             {/* Collapsed, the icon is the identity and the title attribute is the label.
@@ -210,7 +212,7 @@ export default function App() {
               onClick={signOut}
               title="退出登录"
               aria-label="退出登录"
-              className="shrink-0 text-muted-foreground hover:bg-background hover:text-destructive"
+              className="shrink-0 text-muted-foreground hover:bg-muted hover:text-destructive"
             >
               <LogOut />
             </Button>
@@ -301,7 +303,7 @@ export default function App() {
         <main className="min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6">
           {/* The page's heading lives with the page. In the bar it had to share a line
               with the breadcrumb, and the bar is what should stay one line. */}
-          <div className="sticky top-0 z-[1] -mx-4 border-b bg-background px-4 pt-4 pb-3 md:-mx-6 md:px-6">
+          <div className="sticky -top-4 z-[1] -mx-4 -mt-4 border-b bg-background px-4 pt-4 pb-3 md:-top-6 md:-mx-6 md:-mt-6 md:px-6 md:pt-6">
             <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
             {hint && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>}
           </div>
