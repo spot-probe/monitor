@@ -127,14 +127,18 @@ CREATE TABLE IF NOT EXISTS ping_record (
 CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
   expires_at INTEGER NOT NULL,
-  github_login TEXT  NOT NULL DEFAULT ''
+  github_login TEXT  NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  ip         TEXT    NOT NULL DEFAULT '',
+  user_agent TEXT    NOT NULL DEFAULT '',
+  last_seen  INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
 /// database already in service.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -247,6 +251,23 @@ fn migrate_to_6(conn: &Connection) -> Result<()> {
     add_column(conn, "session", "github_login TEXT NOT NULL DEFAULT ''")
 }
 
+/// What a login leaves behind: when it happened, from where, on what, and when it was
+/// last used.
+///
+/// `created_at` is stored rather than derived. It used to be computed as
+/// `expires_at - SESSION_DAYS`, which meant that changing the session lifetime silently
+/// rewrote the displayed sign-in time of every existing row.
+///
+/// The three text columns default to empty for rows that predate this, which is exactly
+/// how the panel reads "unknown": they are sessions from before the hub recorded it, and
+/// they expire within `SESSION_DAYS` either way.
+fn migrate_to_7(conn: &Connection) -> Result<()> {
+    add_column(conn, "session", "created_at INTEGER NOT NULL DEFAULT 0")?;
+    add_column(conn, "session", "ip TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "session", "user_agent TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "session", "last_seen INTEGER NOT NULL DEFAULT 0")
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -271,6 +292,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 6 {
         migrate_to_6(conn)?;
+    }
+    if from < 7 {
+        migrate_to_7(conn)?;
     }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
@@ -1468,10 +1492,31 @@ impl Db {
 
     // ---- sessions ----
 
-    pub fn create_session(&self, token_hash: &str, expires_at: i64, github_login: &str) -> Result<()> {
+    pub fn create_session(
+        &self,
+        token_hash: &str,
+        expires_at: i64,
+        github_login: &str,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<()> {
         self.conn().execute(
-            "INSERT OR REPLACE INTO session (token_hash, expires_at, github_login) VALUES (?1, ?2, ?3)",
-            params![token_hash, expires_at, github_login],
+            "INSERT OR REPLACE INTO session (token_hash, expires_at, github_login, created_at, ip, user_agent, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?4)",
+            params![token_hash, expires_at, github_login, Utc::now().timestamp(), ip, user_agent],
+        )?;
+        Ok(())
+    }
+
+    /// Records that a session was used, at most once a minute.
+    ///
+    /// The throttle is the `WHERE` clause rather than bookkeeping in Rust: every admin
+    /// request passes through here, and one write per request per session is a lot of
+    /// fsync for a column nothing acts on. A minute is finer than anyone reads it.
+    pub fn touch_session(&self, token_hash: &str, now: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE session SET last_seen = ?2 WHERE token_hash = ?1 AND ?2 - last_seen > 60",
+            params![token_hash, now],
         )?;
         Ok(())
     }
@@ -1503,13 +1548,19 @@ impl Db {
 
     /// Live sessions, newest first. Expired rows are filtered here rather than
     /// left to `expire_sessions`, which sweeps only once an hour.
-    pub fn sessions(&self) -> Result<Vec<(String, i64, String)>> {
+    /// One row per live session, newest first: hash, the two timestamps, and what the
+    /// login said about itself.
+    #[allow(clippy::type_complexity)]
+    pub fn sessions(&self) -> Result<Vec<(String, i64, String, i64, String, String, i64)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT token_hash, expires_at, github_login FROM session WHERE expires_at > ?1 ORDER BY expires_at DESC",
+            "SELECT token_hash, expires_at, github_login, created_at, ip, user_agent, last_seen
+             FROM session WHERE expires_at > ?1 ORDER BY expires_at DESC",
         )?;
         let rows = stmt
-            .query_map([Utc::now().timestamp()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([Utc::now().timestamp()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }

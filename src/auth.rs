@@ -124,7 +124,17 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// True when the request carries a live session cookie.
 pub fn authed(app: &App, headers: &HeaderMap) -> bool {
-    cookie_value(headers, COOKIE).is_some_and(|token| app.db.session_valid(&sha256(&token)))
+    cookie_value(headers, COOKIE).is_some_and(|token| {
+        let hash = sha256(&token);
+        if !app.db.session_valid(&hash) {
+            return false;
+        }
+        // Every admin request comes through here, so this is where "last used" belongs --
+        // and the write is throttled by its own WHERE clause, so it costs one row update
+        // a minute per session rather than one per request.
+        let _ = app.db.touch_session(&hash, Utc::now().timestamp());
+        true
+    })
 }
 
 fn set_cookie(name: &str, value: &str, max_age: i64, secure: bool) -> String {
@@ -149,9 +159,16 @@ pub fn issued_at(expires_at: i64) -> i64 {
 
 /// The request's headers decide the Secure flag when the hub has no `--site`;
 /// see `App::secure_cookies`.
-pub fn issue_session(app: &App, headers: &HeaderMap, github_login: &str) -> Result<String> {
+pub fn issue_session(app: &App, headers: &HeaderMap, github_login: &str, ip: &str) -> Result<String> {
     let token = random_token();
-    app.db.create_session(&sha256(&token), Utc::now().timestamp() + SESSION_DAYS * 86_400, github_login)?;
+    let agent = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    app.db.create_session(
+        &sha256(&token),
+        Utc::now().timestamp() + SESSION_DAYS * 86_400,
+        github_login,
+        ip,
+        agent,
+    )?;
     Ok(set_cookie(COOKIE, &token, SESSION_DAYS * 86_400, app.secure_cookies(headers)))
 }
 
@@ -184,7 +201,7 @@ pub async fn login(
     app.throttle.clear(ip);
     // Empty login: the emergency password has no name, and the panel reads that as
     // 应急密码 -- a second column for the method would only restate this.
-    match issue_session(&app, &headers, "") {
+    match issue_session(&app, &headers, "", &ip.to_string()) {
         Ok(cookie) => {
             crate::notify::signed_in(&app, "应急密码", ip);
             with_cookies(Json(serde_json::json!({"ok": true})), [cookie])
@@ -258,11 +275,12 @@ pub async fn github_callback(
         Ok(user) => user,
         Err(e) => return sign_in_failed(&app, &headers, &e.to_string()),
     };
-    let session = match issue_session(&app, &headers, &user) {
+    let ip = client_ip(&headers, peer.ip());
+    let session = match issue_session(&app, &headers, &user, &ip.to_string()) {
         Ok(cookie) => cookie,
         Err(e) => return sign_in_failed(&app, &headers, &e.to_string()),
     };
-    crate::notify::signed_in(&app, &format!("GitHub {user}"), client_ip(&headers, peer.ip()));
+    crate::notify::signed_in(&app, &format!("GitHub {user}"), ip);
     with_cookies(Redirect::to("/admin"), [clear_state(&app, &headers), session])
 }
 

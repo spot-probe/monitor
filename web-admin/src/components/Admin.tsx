@@ -1760,7 +1760,37 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
 // The two ways into this panel, on their own page: the GitHub identity it trusts
 // and the password that works when GitHub does not.
-type Session = { id: string; current: boolean; created_at: number; login: string }
+type Session = { id: string; current: boolean; created_at: number; login: string; ip: string; user_agent: string; last_seen: number }
+
+/// A coarse device label from a user agent, which is all the panel needs and all it can
+/// honestly claim: the string is whatever the client chose to send, so it is shown as a
+/// guess and the raw value stays in the title attribute.
+function device(ua: string): string {
+  if (!ua) return "—"
+  const os = /iPhone|iPad/.test(ua) ? "iOS"
+    : /Android/.test(ua) ? "Android"
+    : /Mac OS X/.test(ua) ? "macOS"
+    : /Windows/.test(ua) ? "Windows"
+    : /Linux/.test(ua) ? "Linux"
+    : ""
+  const browser = /Edg\//.test(ua) ? "Edge"
+    : /OPR\//.test(ua) ? "Opera"
+    : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari"
+    : "未知浏览器"
+  return os ? `${browser} · ${os}` : browser
+}
+
+/// How long ago, in the largest unit that still reads as a number a person uses.
+function since(ts: number): string {
+  if (!ts) return "—"
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts)
+  if (secs < 60) return "刚刚"
+  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟前`
+  if (secs < 86_400) return `${Math.floor(secs / 3600)} 小时前`
+  return `${Math.floor(secs / 86_400)} 天前`
+}
 
 function Sessions() {
   const [rows, setRows] = useState<Session[] | null>(null)
@@ -1795,28 +1825,57 @@ function Sessions() {
           off the first screen. Capped and scrolled instead. The rows say everything the
           backend knows -- the table stores a token hash and an expiry, nothing else -- so
           this is not a place where more columns can come from. */}
-      <div className="max-h-72 divide-y overflow-y-auto">
-        {rows.map((s) => (
-          <div key={s.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
-            <div className="flex min-w-0 items-center gap-2 text-sm">
-              <span className="tnum">{new Date(s.created_at * 1000).toLocaleString()}</span>
-              {/* Which door this session came through. With the issue time that is
-                  everything a row can say -- the hub stores a token hash and an expiry
-                  and nothing else; see notes/backlog.md for what an IP would need. */}
-              <Badge variant="outline" className="font-normal">
-                {s.login ? `GitHub · ${s.login}` : "应急密码"}
-              </Badge>
-              {s.current && <Badge variant="secondary">当前设备</Badge>}
-            </div>
-            {/* 当前会话没有删除按钮：右上角的退出登录做的就是这件事，而在这里删
-                只会让已经渲染好的面板以为自己还登着。 */}
-            {!s.current && (
-              <Button size="icon" variant="ghost" disabled={!!busy} onClick={() => remove(s.id)}>
-                <Trash2 />
-              </Button>
-            )}
-          </div>
-        ))}
+      {/* A table, not a row of loose text: side by side is what makes five facts
+          comparable down a list. Still capped and scrolled -- the card must not grow
+          with the number of sessions. */}
+      <div className="max-h-72 overflow-y-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>登录时间</TableHead>
+              <TableHead>方式</TableHead>
+              <TableHead>来源 IP</TableHead>
+              <TableHead>设备</TableHead>
+              <TableHead>最后活动</TableHead>
+              <TableHead className="text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((s) => (
+              <TableRow key={s.id}>
+                <TableCell className="tnum text-sm whitespace-nowrap">
+                  {new Date(s.created_at * 1000).toLocaleString()}
+                  {s.current && (
+                    <Badge variant="secondary" className="ml-2">
+                      当前设备
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell className="text-sm">
+                  <Badge variant="outline" className="font-normal">
+                    {s.login ? `GitHub · ${s.login}` : "应急密码"}
+                  </Badge>
+                </TableCell>
+                {/* Empty for sessions issued before the hub recorded any of this, and for
+                    the two paths that reissue one without a peer address. */}
+                <TableCell className="tnum text-sm text-muted-foreground">{s.ip || "—"}</TableCell>
+                <TableCell className="max-w-[12rem] truncate text-sm text-muted-foreground" title={s.user_agent || undefined}>
+                  {device(s.user_agent)}
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{since(s.last_seen)}</TableCell>
+                <TableCell className="text-right">
+                  {/* 当前会话没有删除按钮：右上角的退出登录做的就是这件事，而在这里删
+                      只会让已经渲染好的面板以为自己还登着。 */}
+                  {!s.current && (
+                    <Button size="icon" variant="ghost" disabled={!!busy} onClick={() => remove(s.id)} title="退出该设备" aria-label="退出该设备">
+                      <Trash2 />
+                    </Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       </div>
     </Card>
   )
