@@ -519,9 +519,13 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
     } else {
         String::new()
     };
+    // The panel shows which hub it is talking to. Reported only to a signed-in browser:
+    // an anonymous visitor has no use for it, and a version is worth not handing out.
+    let version = if authed { env!("CARGO_PKG_VERSION") } else { "" };
     let body = json!({
         "authed": authed,
         "login": login,
+        "version": version,
         "github": app.db.get("github_client_id").is_some_and(|v| !v.is_empty()),
         "site_name": app.db.get("site_name").unwrap_or_else(|| "Monitor".into()),
         "public_page": app.public_page(),
