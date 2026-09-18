@@ -153,4 +153,16 @@
   ::view-transition-group(*) {
     animation: none;
   }
+  /* The rest of the panel too. Everything stops except the busy spinner: a spinner that
+     does not spin reads as a broken control, and it is the only signal that a request is
+     in flight. This rule was missing entirely -- the one above only covered the
+     view-transition API, which the node list uses and nothing else does. */
+  :where(*):not(.animate-spin),
+  :where(*):not(.animate-spin)::before,
+  :where(*):not(.animate-spin)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
