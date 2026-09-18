@@ -1117,9 +1117,7 @@ pub async fn db_restore(
             // Read the caller's own login before the wipe: the replacement session is
             // theirs, and telling someone who signed in with GitHub that they used the
             // emergency password would be a lie the panel cannot detect.
-            let who = current_session(&headers)
-                .and_then(|h| app.db.session_login(&h))
-                .unwrap_or_default();
+            let who = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
             let cookie = match app.db.drop_all_sessions().and_then(|()| issue_session(&app, &headers, &who)) {
                 Ok(cookie) => cookie,
                 Err(e) => return fail(e),
@@ -1486,9 +1484,7 @@ pub async fn save_settings(
         // Changing the password logs out every existing session; the caller
         // receives a replacement.
         if key == "admin_password" {
-            let who = current_session(&headers)
-                .and_then(|h| app.db.session_login(&h))
-                .unwrap_or_default();
+            let who = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
             match hash_password(value).and_then(|h| {
                 app.db.set("admin_password_hash", &h)?;
                 app.db.drop_all_sessions()?;
