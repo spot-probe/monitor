@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { addresses, api, changes, GIB, provisioningSite, trafficCorrection, upload, type Node, type PingTask } from "@/lib/api"
@@ -69,7 +70,11 @@ function Addresses({ node }: { node: Node }) {
 function Field({ label, hint, suffix, className = "", children }: { label: string; hint?: string; suffix?: string; className?: string; children: React.ReactNode }) {
   return (
     <div className={`space-y-2 ${className}`}>
-      <Label className="text-sm font-medium">{label}</Label>
+      {/* The control goes inside the label, which is what associates the two. As
+          siblings they were merely adjacent: a screen reader announced the input with
+          no name, and clicking the label did not focus it. 27 inputs share this. */}
+      <Label className="flex flex-col items-start gap-2 text-sm font-medium">
+        {label}
       {/* The unit sits inside the control rather than in the label: "离线宽限期（分钟）"
           made the label do two jobs, and the reader had to parse past the parenthesis to
           find the field's name. */}
@@ -81,6 +86,7 @@ function Field({ label, hint, suffix, className = "", children }: { label: strin
       ) : (
         children
       )}
+      </Label>
       {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
     </div>
   )
@@ -1137,7 +1143,17 @@ function Ping({ nodes }: { nodes: Node[] }) {
             {loaded && tasks.length === 0 && (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
-                  还没有延迟监控。每个节点独立 TCP 连接目标端口并上报耗时。
+                  <p>还没有延迟监控。每个节点独立 TCP 连接目标端口并上报耗时。</p>
+                  {/* An empty state that only describes itself leaves the reader to hunt
+                      for the control; the toolbar's button is repeated here. */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-3"
+                    onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}
+                  >
+                    <Plus /> 添加监控
+                  </Button>
                 </TableCell>
               </TableRow>
             )}
@@ -1329,7 +1345,14 @@ function Themes() {
     }
   }
 
-  if (!themes) return null
+  if (!themes) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-28" />
+        <Skeleton className="h-64" />
+      </div>
+    )
+  }
   return (
     <div className="space-y-4">
       <Card className="gap-4 p-5">
@@ -1628,7 +1651,7 @@ function ChannelCard({ title, icon, configured, children }: { title: string; ico
             {/* Status as an icon plus tinted text, not as a bordered pill: the pill read
                 as a button, and it was the only thing on the row that looked pressable. */}
             <span className={configured ? "mt-0.5 flex items-center gap-1 text-xs text-ok-fg" : "mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"}>
-              {configured ? <CircleCheck className="size-3" /> : <CircleAlert className="size-3" />}
+              {configured ? <CircleCheck className="size-3.5" /> : <CircleAlert className="size-3.5" />}
               {configured ? "已配置" : "未配置"}
             </span>
           </span>
@@ -1926,7 +1949,14 @@ function Sessions() {
     }
   }
 
-  if (!rows) return null
+  if (!rows) {
+    return (
+      <Card className="gap-4 p-5">
+        <Skeleton className="h-5 w-24" />
+        <Skeleton className="h-40" />
+      </Card>
+    )
+  }
   return (
     <Card className="gap-4 p-5">
       <div>
