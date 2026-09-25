@@ -75,26 +75,54 @@ pub(crate) const PUBLIC_METRICS: [&str; 18] = [
     "month_tx",
 ];
 
-/// Fraction of each uptime window a node was reporting in.
+/// Fraction of each uptime window a node was reporting in, and the window it was
+/// measured over.
 ///
 /// This is *node* availability -- whether the agent was talking to the hub --
 /// and not probe availability, which is whether a target answered and lives on
 /// `ping_record` instead. The two are different questions and the page keeps
 /// them apart.
+///
+/// The window travels with the figure because it is not always the nominal seven
+/// or thirty days: it is clamped to the node's own life and to the history the
+/// hub still retains, and a fraction quoted against a window the reader did not
+/// expect is the one way this number can lie. A caller that prints "last 30
+/// days" from `d30` alone would be claiming a span the hub may not have; it has
+/// `from30`/`to` to say how much was actually measured.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Uptime {
     pub d7: f64,
     pub d30: f64,
+    /// The minute each window starts at, for this node.
+    pub from7: i64,
+    pub from30: i64,
+    /// The minute the windows end at: the start of the minute in progress. The
+    /// same for both, and for every node, since it is the clock and not the
+    /// node that sets it.
+    pub to: i64,
+}
+
+/// The earliest minute the hub still holds rows for.
+///
+/// `housekeeping` prunes `metric` every hour to `retention_days`, so a window
+/// reaching further back than this divides a numerator that has been deleted by
+/// a denominator that has not. With the default seven days that reads as
+/// twenty-three percent available over thirty days for every node on the page --
+/// exactly the shape of a wrong number a status page cannot afford. The
+/// denominator is therefore clamped to the retained history as well, and
+/// `Uptime` carries the window that resulted.
+fn retained_from(app: &App, now: i64) -> i64 {
+    now - app.db.retention_days() * 86_400
 }
 
 /// The half-open minute grid a node's uptime is measured over.
 ///
-/// The start is the later of the window's own start and the moment the node was
-/// added, rounded up to the next whole minute; the end is the start of the
-/// minute now in progress. Both ends land on the grid the metric rows are
-/// stamped on, so the rows counted and the minutes divided by are the same kind
-/// of thing and a node added mid-window cannot be charged for time before it
-/// existed.
+/// The start is the later of `since` -- which the caller has already clamped to
+/// the history the hub retains -- and the moment the node was added, rounded up
+/// to the next whole minute; the end is the start of the minute now in progress.
+/// Both ends land on the grid the metric rows are stamped on, so the rows counted
+/// and the minutes divided by are the same kind of thing and a node added
+/// mid-window cannot be charged for time before it existed.
 ///
 /// The minute in progress is excluded on purpose: the agent may not have
 /// reported for it yet, and counting it would make every node's uptime fall
@@ -144,9 +172,13 @@ fn uptime_map(app: &App, now: i64, nodes: &[Node]) -> HashMap<i64, Uptime> {
     // differs and the query cannot know it. Passing a zero birthday here instead
     // was a real bug: it divides a node added three days ago by thirty days and
     // shows it at ten percent, which is the failure this whole clamp exists to
-    // prevent.
-    let (since7, to) = uptime_window(0, now - 7 * 86_400, now);
-    let (since30, _) = uptime_window(0, now - 30 * 86_400, now);
+    // prevent. `kept` is the other clamp, and it is what stops a pruned database
+    // from answering "thirty days" with seven days of rows.
+    let kept = retained_from(app, now);
+    let week = (now - 7 * 86_400).max(kept);
+    let month = (now - 30 * 86_400).max(kept);
+    let (since7, to) = uptime_window(0, week, now);
+    let (since30, _) = uptime_window(0, month, now);
     let counts = match app.db.uptime_counts(since7, since30, to) {
         Ok(counts) => counts,
         // A failed read leaves every node at the same figure rather than the
@@ -162,11 +194,17 @@ fn uptime_map(app: &App, now: i64, nodes: &[Node]) -> HashMap<i64, Uptime> {
         // Absent from the aggregate means the node reported nothing in either
         // window, which is a real answer and not a missing one.
         let (c7, c30) = counts.get(&node.id).copied().unwrap_or((0, 0));
-        let (from7, to7) = uptime_window(node.created_at, now - 7 * 86_400, now);
-        let (from30, to30) = uptime_window(node.created_at, now - 30 * 86_400, now);
+        let (from7, to7) = uptime_window(node.created_at, week, now);
+        let (from30, _) = uptime_window(node.created_at, month, now);
         map.insert(
             node.id,
-            Uptime { d7: uptime_fraction(c7, from7, to7), d30: uptime_fraction(c30, from30, to30) },
+            Uptime {
+                d7: uptime_fraction(c7, from7, to7),
+                d30: uptime_fraction(c30, from30, to7),
+                from7,
+                from30,
+                to: to7,
+            },
         );
     }
     cache.0 = now;
@@ -286,9 +324,16 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, uptime: Up
         // the public page already shows, so this one is public as well.
         "day_rx": traffic.day_rx,
         "day_tx": traffic.day_tx,
-        // Reporting fraction over the two windows the public page quotes. A
+        // Reporting fraction over the two windows the public page quotes, and
+        // the windows themselves so the page can say which span it is quoting. A
         // fraction rather than a percentage so the rounding is the reader's.
-        "uptime": {"d7": uptime.d7, "d30": uptime.d30},
+        "uptime": {
+            "d7": uptime.d7,
+            "d30": uptime.d30,
+            "from7": uptime.from7,
+            "from30": uptime.from30,
+            "to": uptime.to,
+        },
     });
     // An allowlist rather than a denylist: the agent ships from its own
     // repository, so a field added there would otherwise reach anonymous visitors
@@ -462,13 +507,14 @@ pub async fn metrics(
         // leave it out.
         let availability = if want_availability {
             // The node's own start, so the bar cannot darken the part of the
-            // window before it existed. One row by primary key, inside the permit
-            // rather than before it: read outside, this lookup would lengthen the
-            // pre-gate path for *every* caller, including the refused ones, and
-            // `HISTORY_GATE` is what decides how long a refusal is pinned to the
-            // agents' write connection.
+            // window before it existed, and the retention boundary, so it cannot
+            // either paint history the hub has pruned as an outage. One row by
+            // primary key, inside the permit rather than before it: read outside,
+            // this lookup would lengthen the pre-gate path for *every* caller,
+            // including the refused ones, and `HISTORY_GATE` is what decides how
+            // long a refusal is pinned to the agents' write connection.
             let created = app.db.node(id).ok().flatten().map(|n| n.created_at).unwrap_or(0);
-            let (from, to) = uptime_window(created, since, now);
+            let (from, to) = uptime_window(created, since.max(retained_from(&app, now)), now);
             let minutes = app.db.reported_minutes(id, from, to)?;
             availability(&minutes, from, to)
         } else {
@@ -2683,6 +2729,10 @@ mod tests {
         // Minute-aligned, so the expectation below is exact.
         let now = Utc::now().timestamp().div_euclid(60) * 60;
         app.db.set_created_at(id, now - 40 * 86_400).unwrap();
+        // A month of history is only measurable if the hub is keeping a month:
+        // the windows are clamped to the retention setting, and the default of
+        // seven days would make the thirty-day figure the week's.
+        app.db.set("retention_days", "30").unwrap();
         // Every minute of the month but ten hours in the last week, so both
         // windows are measured from the same fixture.
         for i in 0..30 * 1_440 {
@@ -2750,6 +2800,49 @@ mod tests {
         let d7 = view["uptime"]["d7"].as_f64().unwrap();
         assert!(d30 > 0.999, "three days of life, every minute of it reported, got {d30}");
         assert!(d7 > 0.999, "and the same over the week, got {d7}");
+    }
+
+    /// A window longer than the retained history is shortened to fit it, and the
+    /// window that resulted is reported so no reader is told a span the hub
+    /// cannot back with rows.
+    ///
+    /// Pruning to the default seven days is what makes this matter: unclamped,
+    /// the thirty-day figure divides seven days of surviving rows by thirty days
+    /// of minutes, and every node on a stock hub reads as twenty-three percent
+    /// available. The clamp is what makes that unrepresentable. The test is here
+    /// because the acceptance fixture sets retention to thirty -- as it must, or
+    /// pruning would eat most of it -- and so would never catch this.
+    #[test]
+    fn a_window_longer_than_the_retained_history_shrinks_to_fit() {
+        let app = app();
+        let id = node(&app, "n", true);
+        let now = Utc::now().timestamp().div_euclid(60) * 60;
+        app.db.set_created_at(id, now - 40 * 86_400).unwrap();
+        // A month of rows, which the hub would not have been keeping.
+        for i in 0..30 * 1_440 {
+            app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
+        }
+
+        // The default is a week, so thirty days is not answerable -- and is not
+        // claimed to have been answered.
+        let view = visible_nodes(&app, false).unwrap();
+        let u = &view[0]["uptime"];
+        assert_eq!(u["from30"], u["from7"], "the month is not longer than the history kept");
+        assert_eq!(u["d30"], u["d7"], "so both figures are the same measurement");
+        let span = u["to"].as_i64().unwrap() - u["from7"].as_i64().unwrap();
+        assert!((7 * 86_400 - 60..=7 * 86_400).contains(&span), "and it is a week, got {span}s");
+
+        // Raised to thirty, the month is there to be measured.
+        app.db.set("retention_days", "30").unwrap();
+        invalidate_snapshot(&app);
+        let view = visible_nodes(&app, false).unwrap();
+        let u = &view[0]["uptime"];
+        let to = u["to"].as_i64().unwrap();
+        let span7 = to - u["from7"].as_i64().unwrap();
+        let span30 = to - u["from30"].as_i64().unwrap();
+        assert!((7 * 86_400 - 60..=7 * 86_400).contains(&span7), "a week, got {span7}s");
+        assert!((30 * 86_400 - 60..=30 * 86_400).contains(&span30), "a month, got {span30}s");
+        assert!(u["d30"].as_f64().unwrap() > 0.999, "and every minute of it was reported in");
     }
 
     /// The bar arrives with the chart on one request, can be asked for alone, and
