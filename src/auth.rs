@@ -431,6 +431,23 @@ pub fn client_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
         .map_or(peer, |ip| ip.to_canonical())
 }
 
+/// Where a node's connection came from: its exit on the panel, and the address
+/// its country falls back to. Called only once the node's token has checked out.
+///
+/// Cloudflare in front of the hub, by proxy or tunnel, writes the node's address
+/// into `CF-Connecting-IP`, while [`client_ip`] sees its edge or the local proxy.
+/// The header is not read for throttling: anyone reaching the origin from
+/// Cloudflare's network -- a Worker's raw socket, for one -- can write it. A
+/// token holder, the only caller here, can report any address of its own
+/// already.
+pub fn node_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        .map_or_else(|| client_ip(headers, peer), |ip| ip.to_canonical())
+}
+
 /// Loopback or a private network, where a reverse proxy resides.
 fn behind_local_proxy(ip: IpAddr) -> bool {
     match ip {
@@ -604,5 +621,16 @@ mod tests {
         assert_eq!(client_ip(&forged, ip("2001:db8::5")), ip("2001:db8::5"));
         // No header at all: the peer address is used.
         assert_eq!(client_ip(&HeaderMap::new(), ip("10.0.0.1")), ip("10.0.0.1"));
+
+        // Cloudflare in front of the local proxy: the tail is its edge. The
+        // throttle stays on it, as anyone on Cloudflare's network can write
+        // CF-Connecting-IP; a node's address follows the header.
+        let mut edge = xff("10.0.0.2, 203.0.113.7, 162.158.88.126");
+        edge.insert("cf-connecting-ip", "::ffff:203.0.113.7".parse().unwrap());
+        assert_eq!(client_ip(&edge, ip("127.0.0.1")), ip("162.158.88.126"));
+        assert_eq!(node_ip(&edge, ip("127.0.0.1")), ip("203.0.113.7"));
+        // Without the header a node's address is the same as the throttle's.
+        assert_eq!(node_ip(&forged, ip("127.0.0.1")), ip("198.51.100.9"));
+        assert_eq!(node_ip(&forged, ip("203.0.113.5")), ip("203.0.113.5"));
     }
 }
