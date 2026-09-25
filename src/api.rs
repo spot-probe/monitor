@@ -10,6 +10,7 @@ use axum::Json;
 use chrono::{Local, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tracing::debug;
 
 use crate::agent_ws::Agent;
@@ -74,9 +75,198 @@ pub(crate) const PUBLIC_METRICS: [&str; 18] = [
     "month_tx",
 ];
 
+/// Fraction of each uptime window a node was reporting in, and the window it was
+/// measured over.
+///
+/// This is *node* availability -- whether the agent was talking to the hub --
+/// and not probe availability, which is whether a target answered and lives on
+/// `ping_record` instead. The two are different questions and the page keeps
+/// them apart.
+///
+/// The window travels with the figure because it is not always the nominal seven
+/// or thirty days: it is clamped to the node's own life and to the history the
+/// hub still retains, and a fraction quoted against a window the reader did not
+/// expect is the one way this number can lie. A caller that prints "last 30
+/// days" from `d30` alone would be claiming a span the hub may not have; it has
+/// `from30`/`to` to say how much was actually measured.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Uptime {
+    pub d7: f64,
+    pub d30: f64,
+    /// The minute each window starts at, for this node.
+    pub from7: i64,
+    pub from30: i64,
+    /// The minute the windows end at: the start of the minute in progress. The
+    /// same for both, and for every node, since it is the clock and not the
+    /// node that sets it.
+    pub to: i64,
+}
+
+/// The earliest minute the hub still holds rows for.
+///
+/// `housekeeping` prunes `metric` every hour to `retention_days`, so a window
+/// reaching further back than this divides a numerator that has been deleted by
+/// a denominator that has not. With the default seven days that reads as
+/// twenty-three percent available over thirty days for every node on the page --
+/// exactly the shape of a wrong number a status page cannot afford. The
+/// denominator is therefore clamped to the retained history as well, and
+/// `Uptime` carries the window that resulted.
+fn retained_from(app: &App, now: i64) -> i64 {
+    now - app.db.retention_days() * 86_400
+}
+
+/// The half-open minute grid a node's uptime is measured over.
+///
+/// The start is the later of `since` -- which the caller has already clamped to
+/// the history the hub retains -- and the moment the node was added, rounded up
+/// to the next whole minute; the end is the start of the minute now in progress.
+/// Both ends land on the grid the metric rows are stamped on, so the rows counted
+/// and the minutes divided by are the same kind of thing and a node added
+/// mid-window cannot be charged for time before it existed.
+///
+/// The minute in progress is excluded on purpose: the agent may not have
+/// reported for it yet, and counting it would make every node's uptime fall
+/// by one minute every minute until its next report.
+fn uptime_window(created_at: i64, since: i64, now: i64) -> (i64, i64) {
+    let to = now.div_euclid(60) * 60;
+    // `+ 59` then truncate is a ceiling for the positive seconds these always
+    // are, and it leaves an already-aligned boundary where it is: a node added
+    // on the minute keeps that minute, which it did report in.
+    let from = (created_at.max(since) + 59).div_euclid(60) * 60;
+    (from.min(to), to)
+}
+
+/// Reported minutes over the minutes the node was expected to report.
+///
+/// A window with nothing expected -- a node added within the current minute --
+/// reads as fully available rather than as a failure: there is no missing report
+/// to hold against it. Capped at one because a restored database can carry a
+/// report stamped after the window it is being counted in.
+fn uptime_fraction(count: i64, from: i64, to: i64) -> f64 {
+    let expected = (to - from) / 60;
+    if expected <= 0 {
+        return 1.0;
+    }
+    (count as f64 / expected as f64).min(1.0)
+}
+
+/// Every node's reporting fraction, rebuilt at most once a minute.
+///
+/// Cached because the two figures move on a scale of days while this runs on the
+/// path every browser stream takes twice a second. Measured on a 17-node,
+/// 30-day fixture (652k rows) the aggregate is a full scan at 28 ms, since the
+/// metric table is keyed `(node_id, ts)` and a range on `ts` alone cannot seek;
+/// the same query per snapshot would spend that scan to move the second decimal
+/// of a number nobody reads to that precision. A minute is the resolution the
+/// rows underneath are written at.
+fn uptime_map(app: &App, now: i64, nodes: &[Node]) -> HashMap<i64, Uptime> {
+    const TTL: i64 = 60;
+    let mut cache = app.uptime.lock().unwrap_or_else(|e| e.into_inner());
+    // Non-negative age, for the reason `live_snapshot` gives: a wall clock that
+    // steps backwards would otherwise read as young and pin a stale map.
+    if (0..TTL).contains(&now.saturating_sub(cache.0)) {
+        return cache.1.clone();
+    }
+    // The windows the *rows* are filtered by are the full ones; each node's own
+    // clamp is applied below, per node, because it is the denominator that
+    // differs and the query cannot know it. Passing a zero birthday here instead
+    // was a real bug: it divides a node added three days ago by thirty days and
+    // shows it at ten percent, which is the failure this whole clamp exists to
+    // prevent. `kept` is the other clamp, and it is what stops a pruned database
+    // from answering "thirty days" with seven days of rows.
+    let kept = retained_from(app, now);
+    let week = (now - 7 * 86_400).max(kept);
+    let month = (now - 30 * 86_400).max(kept);
+    let (since7, to) = uptime_window(0, week, now);
+    let (since30, _) = uptime_window(0, month, now);
+    let counts = match app.db.uptime_counts(since7, since30, to) {
+        Ok(counts) => counts,
+        // A failed read leaves every node at the same figure rather than the
+        // whole node list failing with it: uptime is an addition to this view,
+        // and a hub that cannot count minutes should still show its nodes.
+        Err(e) => {
+            tracing::warn!("uptime counts failed: {e:#}");
+            HashMap::new()
+        }
+    };
+    let mut map: HashMap<i64, Uptime> = HashMap::with_capacity(nodes.len());
+    for node in nodes {
+        // Absent from the aggregate means the node reported nothing in either
+        // window, which is a real answer and not a missing one.
+        let (c7, c30) = counts.get(&node.id).copied().unwrap_or((0, 0));
+        let (from7, to7) = uptime_window(node.created_at, week, now);
+        let (from30, _) = uptime_window(node.created_at, month, now);
+        map.insert(
+            node.id,
+            Uptime {
+                d7: uptime_fraction(c7, from7, to7),
+                d30: uptime_fraction(c30, from30, to7),
+                from7,
+                from30,
+                to: to7,
+            },
+        );
+    }
+    cache.0 = now;
+    cache.1 = map.clone();
+    map
+}
+
+/// The hourly bar and the outage list a node's detail page draws.
+///
+/// `minutes` is every reported minute in `[from, to)`, ascending. A bucket
+/// carries `{ts, n, m}`: `n` reported minutes inside it, and `m` the minutes of
+/// it that fell inside the node's own life in the window. `m` is carried rather
+/// than assumed to be 60 because the first and last buckets are partial -- a
+/// node added mid-hour, or the hour in progress -- and a bar that assumed a full
+/// hour would draw either of them as an outage.
+///
+/// The outages are computed here rather than left to the theme because an hourly
+/// bucket cannot say *where* inside the hour the missing minutes were, and an
+/// outage is shown to the minute. Each is `{start, minutes}`; consecutive
+/// missing minutes are one entry, and a silent node has one entry spanning the
+/// whole window rather than none.
+fn availability(minutes: &[i64], from: i64, to: i64) -> Value {
+    const HOUR: i64 = 3_600;
+    let mut buckets = Vec::new();
+    let mut cursor = from.div_euclid(HOUR) * HOUR;
+    let mut i = 0;
+    while cursor < to {
+        let lo = cursor.max(from);
+        let hi = (cursor + HOUR).min(to);
+        // Every minute in the slice is already within [from, to), so this only
+        // has to consume the ones belonging to this bucket.
+        let start = i;
+        while i < minutes.len() && minutes[i] < cursor + HOUR {
+            i += 1;
+        }
+        if hi > lo {
+            buckets.push(json!({"ts": cursor, "n": i - start, "m": (hi - lo) / 60}));
+        }
+        cursor += HOUR;
+    }
+
+    // Gaps between consecutive reported minutes, plus the run before the first
+    // and after the last, which are outages too: a node that stopped reporting
+    // half an hour ago is still down, and one that was added and stayed silent
+    // was never up.
+    let mut incidents = Vec::new();
+    let mut prev = from;
+    for &t in minutes {
+        if t - prev >= 60 {
+            incidents.push(json!({"start": prev, "minutes": (t - prev) / 60}));
+        }
+        prev = t + 60;
+    }
+    if to - prev >= 60 {
+        incidents.push(json!({"start": prev, "minutes": (to - prev) / 60}));
+    }
+    json!({"from": from, "to": to, "buckets": buckets, "incidents": incidents})
+}
+
 /// One node as the UI consumes it: stored config, live metrics and the hub's
 /// accumulated traffic in a single object.
-fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, full: bool) -> Value {
+fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, uptime: Uptime, full: bool) -> Value {
     // The three capacities arrive twice: once in `Facts`, sent at the handshake
     // and stored, and again in every `Metrics`. A machine that gains a disk while
     // the agent is running -- the agent re-reads its mount table every sample so
@@ -134,6 +324,16 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, full: bool
         // the public page already shows, so this one is public as well.
         "day_rx": traffic.day_rx,
         "day_tx": traffic.day_tx,
+        // Reporting fraction over the two windows the public page quotes, and
+        // the windows themselves so the page can say which span it is quoting. A
+        // fraction rather than a percentage so the rounding is the reader's.
+        "uptime": {
+            "d7": uptime.d7,
+            "d30": uptime.d30,
+            "from7": uptime.from7,
+            "from30": uptime.from30,
+            "to": uptime.to,
+        },
     });
     // An allowlist rather than a denylist: the agent ships from its own
     // repository, so a field added there would otherwise reach anonymous visitors
@@ -158,16 +358,27 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, full: bool
 }
 
 fn visible_nodes(app: &App, full: bool) -> Result<Vec<Value>, anyhow::Error> {
-    // One traffic query and one lock for the whole list, since this is what every
-    // visitor to the public page loads.
+    // One traffic query, one uptime aggregate and one lock for the whole list,
+    // since this is what every visitor to the public page loads. Uptime is keyed
+    // on each node's `created_at`, so the map is built from the node list just
+    // read rather than from the aggregate alone.
     let nodes = app.db.nodes()?;
     let traffic = app.db.all_traffic();
+    let uptime = uptime_map(app, Utc::now().timestamp(), &nodes);
     let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
     let none = Traffic::default();
     Ok(nodes
         .iter()
         .filter(|n| full || n.public)
-        .map(|n| node_view(n, agents.get(&n.id), traffic.get(&n.id).unwrap_or(&none), full))
+        .map(|n| {
+            node_view(
+                n,
+                agents.get(&n.id),
+                traffic.get(&n.id).unwrap_or(&none),
+                uptime.get(&n.id).copied().unwrap_or_default(),
+                full,
+            )
+        })
         .collect())
 }
 
@@ -189,9 +400,17 @@ pub struct Window {
     hours: i64,
     /// How many points the caller can draw. Absent means the full budget.
     points: Option<i64>,
-    /// Which half the caller will draw, `metrics` or `ping`. Each tab draws one,
-    /// and the other accounted for a third to two thirds of every response. Absent
-    /// means both.
+    /// Which series the caller will draw, comma-separated: `metrics`, `ping`,
+    /// `availability`. Each tab draws a subset, and the rest accounted for a
+    /// third to two thirds of every response. Absent means all of them, which is
+    /// what a bare curl gets.
+    ///
+    /// A list rather than one name because a tab can draw more than one: the
+    /// detail page draws the availability bar over whichever chart it is showing,
+    /// and asking twice would open the page with a bar that follows the chart.
+    /// Naming the series also matters for reproducibility -- `availability`
+    /// carries the minute the window ends on, so a caller comparing two
+    /// responses byte for byte must be able to leave it out.
     series: Option<String>,
 }
 
@@ -248,10 +467,15 @@ pub async fn metrics(
             .into_response();
     };
     let hours = w.hours.clamp(1, if full { ADMIN_HOURS } else { PUBLIC_HOURS });
-    let since = Utc::now().timestamp() - hours * 3_600;
+    let now = Utc::now().timestamp();
+    let since = now - hours * 3_600;
     let step = sample_step(hours, w.points);
-    let wants = |name: &str| w.series.as_deref().is_none_or(|s| s == name);
-    let (want_metrics, want_ping) = (wants("metrics"), wants("ping"));
+    // Comma-separated, so a tab that draws two series can name both and get them
+    // on one request. Empty (the field absent) means every series.
+    let series: Vec<&str> = w.series.as_deref().unwrap_or("").split(',').filter(|s| !s.is_empty()).collect();
+    let wants = |name: &str| series.is_empty() || series.contains(&name);
+    let (want_metrics, want_ping, want_availability) =
+        (wants("metrics"), wants("ping"), wants("availability"));
     // Off the runtime, for the reason given in `db_stats` below: this reads every
     // probe result the node has retained within the window and holds the
     // connection the agents report through throughout. That route is behind
@@ -276,7 +500,28 @@ pub async fn metrics(
         // continues to work.
         let (ping, loss) =
             if want_ping { app.db.ping_records(id, since, step)? } else { (vec![], json!({})) };
-        anyhow::Ok(json!({"metrics": metrics, "ping": ping, "probes": probes, "loss": loss}))
+        // The bar rides with whichever chart is drawn, and is skipped for a
+        // caller that did not name it: unlike the charts it is a few hundred
+        // numbers, but it is also the one series stamped with the minute the
+        // window ends on, so a caller comparing responses needs to be able to
+        // leave it out.
+        let availability = if want_availability {
+            // The node's own start, so the bar cannot darken the part of the
+            // window before it existed, and the retention boundary, so it cannot
+            // either paint history the hub has pruned as an outage. One row by
+            // primary key, inside the permit rather than before it: read outside,
+            // this lookup would lengthen the pre-gate path for *every* caller,
+            // including the refused ones, and `HISTORY_GATE` is what decides how
+            // long a refusal is pinned to the agents' write connection.
+            let created = app.db.node(id).ok().flatten().map(|n| n.created_at).unwrap_or(0);
+            let (from, to) = uptime_window(created, since.max(retained_from(&app, now)), now);
+            let minutes = app.db.reported_minutes(id, from, to)?;
+            availability(&minutes, from, to)
+        } else {
+            Value::Null
+        };
+        anyhow::Ok(json!({"metrics": metrics, "ping": ping, "probes": probes, "loss": loss,
+                   "availability": availability}))
     })
     .await;
     match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
@@ -368,10 +613,16 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
 
 /// Drops the cached frames so the next push rebuilds. Without it a node just
 /// added in the panel would disappear from the list until the frame expires.
+///
+/// The uptime aggregate is dropped with them despite its longer life: a node
+/// added now has a `created_at` the cached map was built without, and waiting a
+/// minute for a new node to be counted is exactly the window in which its
+/// figures are being checked.
 fn invalidate_snapshot(app: &App) {
     for slot in app.snapshot.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
         slot.0 = 0;
     }
+    app.uptime.lock().unwrap_or_else(|e| e.into_inner()).0 = 0;
 }
 
 /// What one tick of a browser stream may send: the admin frame while the session
@@ -2361,13 +2612,297 @@ mod tests {
         assert_eq!(app.db.node(id).unwrap().unwrap().disk_total, 30i64 << 30, "and no extra write to get it");
     }
 
+    /// The history gate is process-wide while tests are not: the harness runs
+    /// every test in its own thread at once, so the two tests that drive
+    /// `metrics` have to take turns. Held for the whole test, not just around the
+    /// assertions, since the gate is held across an await and the interference is
+    /// exactly that overlap.
+    ///
+    /// A blocking mutex across an await is what `clippy::await_holding_lock`
+    /// warns about, and the callers allow it deliberately: these run on
+    /// `#[tokio::test]`'s current-thread runtime, where no other task can need
+    /// this thread while it waits, and the alternative -- a `tokio` mutex shared
+    /// between two independent runtimes -- trades a real guarantee for a lint.
+    fn gate_tests() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The window starts when the node did, not when the window did. Without the
+    /// clamp a node added yesterday divides its day of reports by thirty days and
+    /// reads as three percent available.
+    #[test]
+    fn an_uptime_window_starts_when_the_node_did() {
+        // Minute-aligned, so every expectation below is exact rather than
+        // "within a minute".
+        let now = 1_800_000_000;
+        let (from7, to) = uptime_window(0, now - 7 * 86_400, now);
+        assert_eq!(to, now, "the end is the start of the minute in progress");
+        assert_eq!(from7, now - 7 * 86_400, "a node that predates the window gets all of it");
+        assert_eq!(uptime_fraction(7 * 1_440, from7, to), 1.0);
+
+        // Added three days ago: three days of denominator, not the week's.
+        let born = now - 3 * 86_400;
+        let (from, _) = uptime_window(born, now - 7 * 86_400, now);
+        assert_eq!(from, born);
+        assert_eq!(uptime_fraction(3 * 1_440, from, to), 1.0);
+        assert_eq!(
+            uptime_fraction(3 * 1_440, from7, to),
+            (3 * 1_440) as f64 / (7 * 1_440) as f64,
+            "which is what the un-clamped denominator would have reported"
+        );
+
+        // Born mid-minute: the whole minute it was born in is one it could have
+        // reported in, so the window starts at the next.
+        let (from, _) = uptime_window(born + 30, now - 7 * 86_400, now);
+        assert_eq!(from, born + 60);
+        assert_eq!(uptime_fraction(3 * 1_440 - 1, from, to), 1.0);
+
+        // Added this minute: nothing was expected yet, so nothing was missed.
+        let (from, _) = uptime_window(now, now - 7 * 86_400, now);
+        assert_eq!(from, to, "an empty window is clamped to empty");
+        assert_eq!(uptime_fraction(0, from, to), 1.0);
+
+        // A restored database can hold a report stamped inside a window the
+        // node's own life does not reach; a fraction above one is not meaningful.
+        assert_eq!(uptime_fraction(20_000, from7, to), 1.0);
+    }
+
+    /// The bar and the outage list come from the same minute list, and the
+    /// partial hours at either end must not be drawn as downtime.
+    #[test]
+    fn availability_marks_partial_hours_full_and_merges_gaps() {
+        let from = 1_800_000_000;
+        let to = from + 7_200;
+        // Hour zero: every minute but two, ten minutes in. Hour one: the first
+        // half only, so the node is still down when the window ends.
+        let mut minutes: Vec<i64> =
+            (0..60).filter(|i| !(10..12).contains(i)).map(|i| from + i * 60).collect();
+        minutes.extend((0..30).map(|i| from + 3_600 + i * 60));
+
+        let a = availability(&minutes, from, to);
+        assert_eq!(a["from"], from);
+        assert_eq!(a["to"], to);
+        let buckets = a["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 2, "two whole hours");
+        assert_eq!((buckets[0]["n"].as_i64().unwrap(), buckets[0]["m"].as_i64().unwrap()), (58, 60));
+        assert_eq!((buckets[1]["n"].as_i64().unwrap(), buckets[1]["m"].as_i64().unwrap()), (30, 60));
+
+        let incidents = a["incidents"].as_array().unwrap();
+        assert_eq!(incidents.len(), 2, "the dug run, and the run still going at the end");
+        assert_eq!(incidents[0]["start"], from + 10 * 60);
+        assert_eq!(incidents[0]["minutes"], 2);
+        assert_eq!(incidents[1]["start"], from + 3_600 + 30 * 60, "from the first minute it missed");
+        assert_eq!(incidents[1]["minutes"], 30);
+
+        // A node added mid-hour that reports every minute since: the first bucket
+        // is short, and `m` says so -- read as a full hour it would draw a
+        // brand-new node as already half an hour down.
+        let from = 1_800_000_000 + 25 * 60;
+        let to = from + 3_600;
+        let minutes: Vec<i64> = (0..60).map(|i| from + i * 60).collect();
+        let a = availability(&minutes, from, to);
+        let buckets = a["buckets"].as_array().unwrap();
+        assert_eq!(buckets.len(), 2);
+        for bucket in buckets {
+            assert_eq!(bucket["n"], bucket["m"], "every expected minute of each bucket was reported");
+            assert!(bucket["m"].as_i64().unwrap() < 60, "and the bucket really is partial");
+        }
+        assert!(a["incidents"].as_array().unwrap().is_empty());
+
+        // A node that never reported has one outage covering the window, not an
+        // empty list, which would read as a node with a clean record.
+        let a = availability(&[], from, to);
+        let incidents = a["incidents"].as_array().unwrap();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0]["start"], from);
+        assert_eq!(incidents[0]["minutes"], 60);
+    }
+
+    /// The card's figure is reported minutes over the minutes the node was
+    /// expected to report, and it comes from one aggregate rather than a query
+    /// per node.
+    #[test]
+    fn a_node_view_carries_the_share_of_the_window_it_reported() {
+        let app = app();
+        let id = node(&app, "n", true);
+        // Minute-aligned, so the expectation below is exact.
+        let now = Utc::now().timestamp().div_euclid(60) * 60;
+        app.db.set_created_at(id, now - 40 * 86_400).unwrap();
+        // A month of history is only measurable if the hub is keeping a month:
+        // the windows are clamped to the retention setting, and the default of
+        // seven days would make the thirty-day figure the week's.
+        app.db.set("retention_days", "30").unwrap();
+        // Every minute of the month but ten hours in the last week, so both
+        // windows are measured from the same fixture.
+        for i in 0..30 * 1_440 {
+            if (0..600).contains(&i) {
+                continue;
+            }
+            app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
+        }
+
+        let view = &visible_nodes(&app, false).unwrap()[0];
+        let d7 = view["uptime"]["d7"].as_f64().unwrap();
+        // 600 minutes of 10080. The window's own ends can drift by a minute while
+        // the test runs, which is 6e-6 of the answer.
+        assert!(
+            (d7 - (1.0 - 600.0 / (7.0 * 1_440.0))).abs() < 1e-4,
+            "600 missing minutes of a week is 94.05%, got {d7}"
+        );
+        let d30 = view["uptime"]["d30"].as_f64().unwrap();
+        assert!(
+            (d30 - (1.0 - 600.0 / (30.0 * 1_440.0))).abs() < 1e-4,
+            "over thirty days the same 600 minutes is 98.61%, got {d30}"
+        );
+        assert_eq!(visible_nodes(&app, true).unwrap()[0]["uptime"], view["uptime"], "same answer either way");
+    }
+
+    /// A node with no history is measured against its own life: one added this
+    /// minute has missed nothing, and one silent for a day is down for the day.
+    #[test]
+    fn a_node_that_never_reported_is_measured_against_its_own_life() {
+        let app = app();
+        let id = node(&app, "n", true);
+        let now = Utc::now().timestamp();
+        let view = visible_nodes(&app, false).unwrap();
+        assert_eq!(view[0]["uptime"]["d7"], 1.0, "created this minute, so nothing was expected yet");
+
+        app.db.set_created_at(id, now - 86_400).unwrap();
+        // The map is cached for a minute, and this node's birthday just moved.
+        invalidate_snapshot(&app);
+        let view = visible_nodes(&app, false).unwrap();
+        assert_eq!(view[0]["uptime"]["d7"], 0.0, "a day of silence against a day of life");
+        assert_eq!(view[0]["uptime"]["d30"], 0.0);
+    }
+
+    /// A node that has reported since it was added reads as fully available, and
+    /// not as a fraction of a window it was not alive for.
+    ///
+    /// This is the failure the aggregate alone cannot see: one query counts every
+    /// node's rows, and only each node's own birthday makes its denominator
+    /// right. Taken as the window, a node added three days ago reads as ten
+    /// percent available over a month -- which is what the live preview showed
+    /// before this test existed.
+    #[test]
+    fn a_node_added_days_ago_is_not_measured_against_the_whole_month() {
+        let app = app();
+        let id = node(&app, "new", true);
+        let now = Utc::now().timestamp().div_euclid(60) * 60;
+        app.db.set_created_at(id, now - 3 * 86_400).unwrap();
+        // Every minute since it was added, and nothing before it.
+        for i in 1..=3 * 1_440 {
+            app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
+        }
+
+        let view = &visible_nodes(&app, false).unwrap()[0];
+        let d30 = view["uptime"]["d30"].as_f64().unwrap();
+        let d7 = view["uptime"]["d7"].as_f64().unwrap();
+        assert!(d30 > 0.999, "three days of life, every minute of it reported, got {d30}");
+        assert!(d7 > 0.999, "and the same over the week, got {d7}");
+    }
+
+    /// A window longer than the retained history is shortened to fit it, and the
+    /// window that resulted is reported so no reader is told a span the hub
+    /// cannot back with rows.
+    ///
+    /// Pruning to the default seven days is what makes this matter: unclamped,
+    /// the thirty-day figure divides seven days of surviving rows by thirty days
+    /// of minutes, and every node on a stock hub reads as twenty-three percent
+    /// available. The clamp is what makes that unrepresentable. The test is here
+    /// because the acceptance fixture sets retention to thirty -- as it must, or
+    /// pruning would eat most of it -- and so would never catch this.
+    #[test]
+    fn a_window_longer_than_the_retained_history_shrinks_to_fit() {
+        let app = app();
+        let id = node(&app, "n", true);
+        let now = Utc::now().timestamp().div_euclid(60) * 60;
+        app.db.set_created_at(id, now - 40 * 86_400).unwrap();
+        // A month of rows, which the hub would not have been keeping.
+        for i in 0..30 * 1_440 {
+            app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
+        }
+
+        // The default is a week, so thirty days is not answerable -- and is not
+        // claimed to have been answered.
+        let view = visible_nodes(&app, false).unwrap();
+        let u = &view[0]["uptime"];
+        assert_eq!(u["from30"], u["from7"], "the month is not longer than the history kept");
+        assert_eq!(u["d30"], u["d7"], "so both figures are the same measurement");
+        let span = u["to"].as_i64().unwrap() - u["from7"].as_i64().unwrap();
+        assert!((7 * 86_400 - 60..=7 * 86_400).contains(&span), "and it is a week, got {span}s");
+
+        // Raised to thirty, the month is there to be measured.
+        app.db.set("retention_days", "30").unwrap();
+        invalidate_snapshot(&app);
+        let view = visible_nodes(&app, false).unwrap();
+        let u = &view[0]["uptime"];
+        let to = u["to"].as_i64().unwrap();
+        let span7 = to - u["from7"].as_i64().unwrap();
+        let span30 = to - u["from30"].as_i64().unwrap();
+        assert!((7 * 86_400 - 60..=7 * 86_400).contains(&span7), "a week, got {span7}s");
+        assert!((30 * 86_400 - 60..=30 * 86_400).contains(&span30), "a month, got {span30}s");
+        assert!(u["d30"].as_f64().unwrap() > 0.999, "and every minute of it was reported in");
+    }
+
+    /// The bar arrives with the chart on one request, can be asked for alone, and
+    /// is left out when it was not named -- two windows that differ only in the
+    /// minute they end on must still compare equal byte for byte.
+    #[allow(clippy::await_holding_lock)] // see `gate_tests`
+    #[tokio::test]
+    async fn a_history_window_carries_the_availability_bar_only_when_asked() {
+        let _serial = gate_tests();
+        let app = std::sync::Arc::new(app());
+        let id = node(&app, "n", true);
+        let now = Utc::now().timestamp().div_euclid(60) * 60;
+        app.db.set_created_at(id, now - 40 * 86_400).unwrap();
+        // A few minutes either side of the window, so its ends cannot fall
+        // outside the rows while the test runs.
+        for i in -5..=7 * 1_440 + 5 {
+            app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
+        }
+        let body = async |series: &str| {
+            let query = format!("hours=168&series={series}");
+            let asked = metrics(
+                State(app.clone()),
+                HeaderMap::new(),
+                Path(id),
+                Query(serde_urlencoded::from_str::<Window>(&query).unwrap()),
+            );
+            let bytes = axum::body::to_bytes(asked.await.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        };
+
+        let with = body("metrics,availability").await;
+        let buckets = with["availability"]["buckets"].as_array().unwrap();
+        assert!(buckets.len() >= 167, "a week of hours, got {}", buckets.len());
+        assert!(with["availability"]["incidents"].as_array().unwrap().is_empty());
+        assert!(with["availability"]["from"].as_i64().unwrap() <= now - 7 * 86_400 + 60);
+        assert!(!with["metrics"].as_array().unwrap().is_empty(), "and the chart came too");
+
+        assert!(body("metrics").await["availability"].is_null(), "not named, not sent");
+
+        let only = body("availability").await;
+        assert!(only["metrics"].as_array().unwrap().is_empty());
+        assert!(!only["availability"]["buckets"].as_array().unwrap().is_empty());
+    }
+
     /// `PUBLIC_HOURS` bounds one window; this bounds how many are built
     /// concurrently. Each holds the connection the agents report through for its
     /// entire scan, and the path takes no credentials -- the same arrangement
     /// `RELAY_GATE` and `PASSWORD_GATE` enforce on the other two anonymous paths
     /// that make this process work hard.
+    ///
+    /// Serialised against the other test that drives the handler, because the
+    /// gate is one process-wide semaphore while the test harness runs every test
+    /// at once: this one takes all four permits, so any other test inside
+    /// `metrics` at that instant either steals one from it or is refused by it.
+    /// Measured at one run in ten failing before the lock, which is a failing CI
+    /// run for whoever pushed next.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // see `gate_tests`
     async fn history_queries_past_the_gate_are_refused_rather_than_queued() {
+        let _serial = gate_tests();
         let app = std::sync::Arc::new(app());
         let id = node(&app, "n", true);
         let ask = || {
@@ -2463,7 +2998,9 @@ mod tests {
     /// thinning already limits the row count, while a quarter-year still reads
     /// every row behind it holding the write connection.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // see `gate_tests`
     async fn an_anonymous_history_window_stops_at_a_week() {
+        let _serial = gate_tests();
         let app = std::sync::Arc::new(app());
         let id = node(&app, "n", true);
         let now = Utc::now().timestamp();
