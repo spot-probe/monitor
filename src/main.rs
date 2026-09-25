@@ -42,6 +42,10 @@ pub struct App {
     /// millisecond it was built. Shared by every browser stream so viewers do
     /// not multiply the query load. See `api::live_snapshot`.
     pub snapshot: Mutex<[(i64, axum::extract::ws::Utf8Bytes); 2]>,
+    /// Reporting fraction per node with the second it was built, `{id: (7d,
+    /// 30d)}`. Longer-lived than the frames above because the figures move on a
+    /// scale of days; see `api::uptime_map`.
+    pub uptime: Mutex<(i64, HashMap<i64, api::Uptime>)>,
     pub throttle: auth::Throttle,
     /// Failed agent registrations, counted separately from failed sign-ins: the
     /// two have different threat models, and a batch install run with a stale
@@ -66,6 +70,7 @@ impl App {
             db,
             agents: RwLock::default(),
             snapshot: Mutex::new([(0, Default::default()), (0, Default::default())]),
+            uptime: Mutex::new((0, HashMap::new())),
             throttle: auth::Throttle::default(),
             registrations: auth::Throttle::default(),
             http: reqwest::Client::builder()

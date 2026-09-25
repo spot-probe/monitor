@@ -379,6 +379,13 @@ pub struct Node {
     pub notify: bool,
     #[serde(default)]
     pub down_since: i64,
+    /// When the node was added to the hub, in seconds. This is the start of the
+    /// node's own history: a node cannot have been reporting before it existed,
+    /// so uptime divides by the part of the window since this moment rather than
+    /// by the whole window. Without the clamp a node added yesterday reads as
+    /// three percent available over thirty days.
+    #[serde(default)]
+    pub created_at: i64,
     /// What the agent authenticates with. Readable so the panel can display an
     /// install command on demand; it never leaves the admin view.
     #[serde(default)]
@@ -609,6 +616,17 @@ impl Db {
     /// window can add; see `api::REGISTER_LIMIT`.
     pub fn nodes_created_since(&self, ts: i64) -> Result<i64> {
         Ok(self.conn().query_row("SELECT COUNT(*) FROM node WHERE created_at >= ?1", [ts], |r| r.get(0))?)
+    }
+
+    /// Backdates a node, for tests that need one older than the window it is
+    /// measured over. `create_node` always stamps the moment it runs, and a node
+    /// created during a test is by definition younger than every window -- which
+    /// is the one case uptime does not divide over, so the clamp needs a node
+    /// whose birthday is in the past to be exercised at all.
+    #[cfg(test)]
+    pub fn set_created_at(&self, id: i64, ts: i64) -> Result<()> {
+        self.conn().execute("UPDATE node SET created_at=?2 WHERE id=?1", params![id, ts])?;
+        Ok(())
     }
 
     /// Records that the node reported. Written on the same cadence as the metric
@@ -1020,6 +1038,45 @@ impl Db {
                 "net_rx": r.get::<_, i64>(4)?, "net_tx": r.get::<_, i64>(5)?,
             }))
         })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every minute each node reported within each of the two uptime windows,
+    /// counted in one pass.
+    ///
+    /// The absence is the signal: a row is written once per reported minute and
+    /// never for a minute the node was silent, so the count of rows is the count
+    /// of minutes the node was up. One query for both windows because the node
+    /// list is what every anonymous visitor to the status page loads, and a
+    /// second scan of the same rows would double what that page costs.
+    ///
+    /// `since7` must be the later of the two boundaries. A node silent across
+    /// both windows simply has no row here, which the caller reads as zero.
+    pub fn uptime_counts(&self, since7: i64, since30: i64, until: i64) -> Result<HashMap<i64, (i64, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT node_id, SUM(ts >= ?1), COUNT(*) FROM metric
+             WHERE ts >= ?2 AND ts < ?3 GROUP BY node_id",
+        )?;
+        let rows = stmt.query_map(params![since7, since30, until], |r| {
+            Ok((r.get::<_, i64>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every minute one node reported inside `[since, until)`, oldest first.
+    ///
+    /// The timestamps alone, read from the primary key, so this is an index-only
+    /// seek into the node's own rows. `count(*) GROUP BY hour` would answer the
+    /// availability bar more cheaply, but it cannot say *where inside an hour*
+    /// the missing minutes were, and an outage is reported to the minute -- a
+    /// twelve-minute gap leaves an hour that is 80% full, which a bare count
+    /// cannot tell from a gap of twelve minutes somewhere else in it.
+    pub fn reported_minutes(&self, node_id: i64, since: i64, until: i64) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare_cached("SELECT ts FROM metric WHERE node_id=?1 AND ts>=?2 AND ts<?3 ORDER BY ts")?;
+        let rows = stmt.query_map(params![node_id, since, until], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -1656,6 +1713,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         last_seen: n("last_seen"),
         notify: n("notify") != 0,
         down_since: n("down_since"),
+        created_at: n("created_at"),
         token: s("token"),
     }
 }
@@ -2480,5 +2538,45 @@ mod tests {
         // Editing an existing probe does not count as adding one.
         let first = db.ping_tasks().unwrap()[0].id;
         save(first, vec![id]).expect("an existing probe can still be edited at the cap");
+    }
+
+    /// The two windows come from one scan and are distinguished by `ts >=`, and
+    /// both ends are half-open: a row stamped on a boundary belongs to the window
+    /// that starts there and not to the one that ends there.
+    #[test]
+    fn uptime_counts_split_the_two_windows_and_bounds_both_ends() {
+        let db = db();
+        let id = node(&db, 1);
+        let idle = node(&db, 1);
+        let now = 1_800_000_000;
+        let since7 = now - 7 * 86_400;
+        let since30 = now - 30 * 86_400;
+
+        // Ten minutes inside the week, five in the one before it, and eight days
+        // back for the idle node -- inside the month and outside the week.
+        for i in 1..=10 {
+            db.insert_metric(id, now - i * 60, &serde_json::json!({"cpu": 1.0})).unwrap();
+        }
+        for i in 7 * 1_440 + 1..=7 * 1_440 + 5 {
+            db.insert_metric(id, now - i * 60, &serde_json::json!({"cpu": 1.0})).unwrap();
+        }
+        db.insert_metric(idle, now - 8 * 86_400, &serde_json::json!({"cpu": 1.0})).unwrap();
+
+        let counts = db.uptime_counts(since7, since30, now).unwrap();
+        assert_eq!(counts[&id], (10, 15), "the second figure counts the whole month");
+        assert_eq!(counts[&idle], (0, 1));
+        assert!(!counts.contains_key(&9_999), "a node that never reported has no row at all");
+
+        // A row stamped exactly at the end belongs to the window that begins
+        // there; the minute in progress is not counted as expected.
+        db.insert_metric(id, now, &serde_json::json!({"cpu": 1.0})).unwrap();
+        assert_eq!(db.uptime_counts(since7, since30, now).unwrap()[&id], (10, 15));
+        assert_eq!(db.uptime_counts(since7, since30, now + 60).unwrap()[&id], (11, 16));
+
+        let minutes = db.reported_minutes(id, since7, now).unwrap();
+        assert_eq!(minutes.len(), 10);
+        assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
+        assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
+        assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
     }
 }
