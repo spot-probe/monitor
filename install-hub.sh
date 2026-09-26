@@ -177,6 +177,17 @@ fetch_theme() {
 	ok "主题" "${THEME_TAG:-latest}${version:+ · $version}"
 }
 
+# The new emergency password, straight from the binary's stdout.
+#
+# Not from the journal: some hosts keep none, and on a first install the password
+# has to be in place before the service starts anyway, or the hub generates a
+# second one. Empty output means the binary predates `--reset-password`, which the
+# caller handles by reading the journal of that older release's start instead.
+new_password() {
+	"$BIN" --db "$DATA/monitor.db" --reset-password 2>/dev/null |
+		sed -n 's/^Emergency password: //p' | tail -n 1
+}
+
 install_hub() {
 	case "$(uname -m)" in
 	x86_64 | amd64) arch=x86_64 ;;
@@ -321,17 +332,37 @@ MemoryMax=256M
 WantedBy=multi-user.target
 UNIT
 
+	# A reset refuses a database that does not exist, so a first install creates
+	# the file first, under the service user: SQLite reads an empty file as a new
+	# database and the hub then finds a password already in place. Quiet, because
+	# a release predating the flag is handled after the start below.
+	pw=""
+	if [ -n "$first" ]; then
+		install -m 0600 -o "$USER_NAME" /dev/null "$DATA/monitor.db"
+		pw="$(new_password)"
+	fi
+
 	systemctl daemon-reload
 	systemctl enable "$SERVICE" >/dev/null 2>&1 || true
 	# Not left to set -e: a binary that cannot exec fails the job itself, which is
 	# precisely the case the rollback below exists for. Unguarded, the script
 	# would exit here with a raw systemd error and leave the hub down on the
 	# binary that just failed.
+	started="$(date '+%Y-%m-%d %H:%M:%S')"
 	systemctl restart "$SERVICE" || true
 	# is-active answers before a unit that exits immediately has done so, and the
 	# first run also computes an argon2 hash. Wait, then query.
 	sleep 3
 	if ! systemctl is-active --quiet "$SERVICE"; then
+		# A first install has nothing to keep serving, and the database it just
+		# created holds a password that was never shown: leaving it would make the
+		# next run an upgrade, which prints none. Removed and disabled, so a rerun
+		# is a first install again.
+		if [ -n "$first" ] && [ -z "$backup" ]; then
+			systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+			rm -f "$DATA/monitor.db" "$DATA/monitor.db-wal" "$DATA/monitor.db-shm"
+			die "服务启动失败。日志：journalctl -u $SERVICE -n 50"
+		fi
 		if [ -n "$backup" ]; then
 			install -m 0755 "$backup" "$BIN"
 			rm -f "$backup"
@@ -343,19 +374,25 @@ UNIT
 	rm -f "$BIN.old"
 	ok "服务" "已启动并开机自启"
 
+	# A release predating `--reset-password` refuses it and sets the password on
+	# its first start instead, printing it to the journal. Only this run's lines:
+	# an earlier failed attempt printed a password for a database since removed.
+	if [ -n "$first" ] && [ -z "$pw" ]; then
+		pw="$(journalctl -u "$SERVICE" --since "$started" --no-pager 2>/dev/null |
+			sed -n 's/.*Emergency password: //p' | tail -n 1)"
+	fi
+
 	if [ -n "$first" ]; then done_title="安装完成"; else done_title="升级完成"; fi
 	printf '\n  %s%s%s\n' "$B" "$done_title" "$N"
 	rule
 	printf '\n'
 	field "面板" "${SITE:-http://127.0.0.1:$PORT}/admin"
 	if [ -n "$first" ]; then
-		pw="$(journalctl -u "$SERVICE" --since '-2 min' --no-pager 2>/dev/null |
-			sed -n 's/.*Emergency password: //p' | tail -1)"
 		if [ -n "$pw" ]; then
 			field "密码" "$pw"
-			field "    " "${D}只显示这一次，登录后到「设置」里改掉${N}"
+			field "    " "${D}只显示这一次，登录后到「安全」页的应急密码里改掉${N}"
 		else
-			field "密码" "journalctl -u $SERVICE | grep Emergency"
+			field "密码" "没取到，重跑安装器选「重置密码」"
 		fi
 	fi
 	field "数据" "$DATA/monitor.db"
@@ -467,6 +504,7 @@ menu() {
 		printf '    2  卸载\n'
 		printf '    3  状态\n'
 		printf '    4  日志\n'
+		printf '    5  重置密码\n'
 		printf '    q  退出\n\n'
 		printf '  %s›%s ' "$B" "$N"
 		read -r choice || exit 0
@@ -488,6 +526,7 @@ menu() {
 		2) uninstall_hub; press ;;
 		3) systemctl status "$SERVICE" --no-pager || true; press ;;
 		4) journalctl -u "$SERVICE" -f --no-pager ;;
+		5) reset_password; press ;;
 		q | Q | exit | "") exit 0 ;;
 		*) ;;
 		esac
@@ -501,6 +540,7 @@ monitor hub 安装器
   sudo ./install-hub.sh                有终端时给菜单，否则按默认安装
   sudo ./install-hub.sh --port 8443    指定端口安装
   sudo ./install-hub.sh --uninstall    卸载，保留数据
+  sudo ./install-hub.sh --reset-password  重新生成应急密码并登出所有会话
   sudo ./install-hub.sh --purge        卸载并删除数据库
 
   --port <n>     本机监听端口，默认 $PORT
@@ -533,6 +573,7 @@ while [ $# -gt 0 ]; do
 	--port) [ $# -ge 2 ] || die "--port 后面要跟端口号"; PORT="$2"; PORT_SET=1; shift 2 ;;
 	--site) [ $# -ge 2 ] || die "--site 后面要跟地址"; SITE="$2"; SITE_SET=1; shift 2 ;;
 	--uninstall) ACTION=uninstall; shift ;;
+	--reset-password) ACTION=reset-password; shift ;;
 	--purge) ACTION=uninstall; PURGE=1; shift ;;
 	--theme-tag) [ $# -ge 2 ] || die "--theme-tag 后面要跟标签，例如 v1.7.0"; THEME_TAG="$2"; shift 2 ;;
 	--no-theme) THEME_SKIP=1; shift ;;
@@ -574,8 +615,28 @@ command -v sha256sum >/dev/null 2>&1 || die "需要 sha256sum（装 coreutils）
 command -v systemctl >/dev/null 2>&1 ||
 	die "这个安装器只装 systemd 服务。手动运行：$BIN --listen 127.0.0.1:$PORT --db $DATA/monitor.db"
 
+# Resets the emergency password and reports it. Its own function because the menu
+# and `--reset-password` both reach it, and because the failure to explain (no
+# database yet, or a binary too old to know the flag) is the same one.
+reset_password() {
+	if [ ! -f "$DATA/monitor.db" ]; then
+		warn "还没有数据库：先安装一次"
+		return 0
+	fi
+	pw="$(new_password)"
+	printf '\n'
+	if [ -n "$pw" ]; then
+		field "新密码" "$pw"
+		field "    " "${D}已登出所有会话，登录后到「安全」页里改掉${N}"
+	else
+		warn "重置失败：二进制不支持 --reset-password，或数据库不可写"
+	fi
+	printf '\n'
+}
+
 case "$ACTION" in
 uninstall) banner; uninstall_hub ;;
+reset-password) banner; reset_password ;;
 *)
 	if [ -t 0 ]; then
 		menu
