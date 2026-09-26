@@ -10,6 +10,7 @@ mod auth;
 mod db;
 mod frontend;
 mod notify;
+mod theme;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -51,6 +52,15 @@ pub struct App {
     /// two have different threat models, and a batch install run with a stale
     /// key must not lock the operator out of the panel.
     pub registrations: auth::Throttle,
+    /// The theme API level each installed theme's manifest asks for, keyed by the
+    /// manifest's path and invalidated by that file's stamp. Read on every
+    /// request the public page makes; see `frontend::required_api`.
+    pub theme_api: frontend::ApiCache,
+    /// What the last theme update check found. In memory rather than stored: it
+    /// is a fact about a repository somewhere else, it is re-read at every
+    /// startup, and a stale answer kept across an upgrade would be worse than
+    /// none.
+    pub theme_check: Mutex<theme::Check>,
     pub http: reqwest::Client,
     /// Public base URL when `--site` was given, empty otherwise. In the default
     /// case the hub is reached at whatever ip:port the browser used and the
@@ -73,6 +83,8 @@ impl App {
             uptime: Mutex::new((0, HashMap::new())),
             throttle: auth::Throttle::default(),
             registrations: auth::Throttle::default(),
+            theme_api: Mutex::default(),
+            theme_check: Mutex::default(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
@@ -382,6 +394,11 @@ async fn main() -> Result<()> {
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(notify::deliver(app.clone(), inbox));
     tokio::spawn(notify::watch(app.clone()));
+    // The hub embeds a theme, so a fresh install needs no network. That copy is
+    // frozen at build time, though, and this is what tells the operator a newer
+    // one exists without either of them releasing a hub version. It only
+    // reports: installing stays a button in the panel.
+    tokio::spawn(theme::watch(app.clone()));
 
     let router = Router::new()
         // Agents.
