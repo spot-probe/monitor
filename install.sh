@@ -2,6 +2,7 @@
 # Installs monitor-agent as a systemd or OpenRC service.
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --token TOKEN [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --register KEY [options]
+#   curl -fsSL https://hub.example.com/install.sh | sh -s -- --uninstall
 set -eu
 # useradd and rc-update reside in sbin, which a root shell entered through `su`
 # without `-` lacks on Debian: su keeps the caller's PATH unless ALWAYS_SET_PATH
@@ -13,35 +14,96 @@ PATH="$PATH:/usr/sbin:/sbin"
 ROOT="/opt/monitor"
 BIN="$ROOT/monitor-agent"
 ENV_FILE="$ROOT/agent.env"
+UNIT_FILE="/etc/systemd/system/monitor-agent.service"
+RC_FILE="/etc/init.d/monitor-agent"
+LOG_FILE="/var/log/monitor-agent.log"
 SERVER=""
 TOKEN=""
 REGISTER=""
-INTERVAL=1
+IFACE=""
+IFACE_SET=""
+INTERVAL=""
 INSECURE=""
+UNINSTALL=""
 
 while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
 	# message rather than the usage below, and `shift 2` cannot proceed.
 	case "$1" in
-	--server | --token | --register | --interval)
+	--server | --token | --register | --iface | --interval)
 		[ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
 	esac
 	case "$1" in
 	--server) SERVER="$2"; shift 2 ;;
 	--token) TOKEN="$2"; shift 2 ;;
 	--register) REGISTER="$2"; shift 2 ;;
+	--iface) IFACE="$2"; IFACE_SET=1; shift 2 ;;
 	--interval) INTERVAL="$2"; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
+	--uninstall) UNINSTALL=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
 
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+# Removes exactly what an install writes and nothing else, for both init
+# systems: the one present now need not be the one the install found, and
+# systemctl fails outright where systemd is not PID 1 (WSL, containers) although
+# the install left its files there. Each step therefore tolerates failure. The
+# hub may be installed in $ROOT as well, so the directory is removed only once
+# empty.
+if [ -n "$UNINSTALL" ]; then
+	rc-service monitor-agent stop 2>/dev/null || true
+	rc-update del monitor-agent default >/dev/null 2>&1 || true
+	systemctl disable --now monitor-agent 2>/dev/null || true
+	rm -f "$UNIT_FILE" "$RC_FILE" "$LOG_FILE" "$BIN" "$BIN.old" "$ENV_FILE"
+	systemctl daemon-reload 2>/dev/null || true
+	userdel monitor-agent 2>/dev/null || true
+	rmdir "$ROOT" 2>/dev/null || true
+	echo "monitor-agent uninstalled"
+	exit 0
+fi
+
 [ -n "$SERVER" ] && { [ -n "$TOKEN" ] || [ -n "$REGISTER" ]; } || {
-	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--insecure]" >&2
+	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure]" >&2
+	echo "       install.sh --uninstall" >&2
 	exit 2
 }
+# A setting of this machine, kept by a rerun without the flag for the reason
+# given for --iface below: the batch command carries none. It is read back from
+# the service definition the last install wrote; a first install takes 1.
+if [ -z "$INTERVAL" ]; then
+	INTERVAL=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
+		-e 's/^ExecStart=.* --interval \([0-9][0-9]*\).*/\1/p' \
+		-e 's/^command_args="--interval \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+	if [ -n "$INTERVAL" ]; then echo "keeping --interval $INTERVAL from the previous install"; else INTERVAL=1; fi
+fi
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
 [ "$INTERVAL" -ge 1 ] && [ "$INTERVAL" -le 3600 ] || { echo "interval must be from 1 to 3600" >&2; exit 2; }
+# Which interfaces carry this machine's traffic is known only on the machine,
+# and the batch command a fleet shares cannot carry one value per machine. A
+# rerun without --iface, the documented upgrade, therefore keeps the value in
+# the env file; --iface '' clears it.
+#
+# A kept value is written back as found, the last assignment being the one
+# systemd and OpenRC apply: root wrote it, both already read it, and a hand edit
+# with quotes must not block every later upgrade. A value given here is held to
+# what the agent accepts -- full names separated by commas, each optionally led
+# by one `-` -- since the agent refuses anything else at startup and would
+# restart forever while this script reported success. The character set also
+# keeps it inert where OpenRC sources the file as shell.
+if [ -z "$IFACE_SET" ]; then
+	IFACE=$(sed -n 's/^MONITOR_IFACE=//p' "$ENV_FILE" 2>/dev/null | tail -n 1)
+	[ -z "$IFACE" ] || echo "keeping --iface $IFACE from the previous install"
+else
+	case ",$IFACE," in
+	*[!A-Za-z0-9._,-]* | *,-,* | *,--*)
+		echo "--iface takes full interface names separated by commas, each optionally led by -, not: $IFACE" >&2
+		exit 2
+		;;
+	esac
+fi
 # A bare host implies TLS, matching the upgrade the agent's ws_url() performs,
 # and the same reversal under --insecure where the hub has no TLS to upgrade to.
 # Without this the two diverge: the agent would dial wss:// while curl below
@@ -106,7 +168,6 @@ http://*)
 	fi
 	;;
 esac
-[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 if command -v systemctl >/dev/null; then
 	INIT=systemd
 elif command -v rc-update >/dev/null; then
@@ -141,7 +202,26 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
 echo "downloading monitor-agent ($ARCH)"
-curl -fsSL --max-time 300 "$URL" -o "$TMP"
+# The hub relays four downloads at once and queues the rest for 30 seconds. A
+# batch run on more machines than drain in that time is turned away with 503,
+# which is retried here rather than failing the machine. Any other refusal is
+# final and shown with the hub's own reason, which --fail would discard.
+TRIES=0
+while :; do
+	CODE=$(curl -sSL --max-time 300 -w '%{http_code}' "$URL" -o "$TMP") || exit 1
+	[ "$CODE" = 503 ] && [ "$TRIES" -lt 5 ] || break
+	TRIES=$((TRIES + 1))
+	echo "the hub is busy relaying to other machines; retrying in 5 seconds"
+	sleep 5
+done
+[ "$CODE" = 200 ] ||
+	{ printf 'download failed (HTTP %s): %s\n' "$CODE" "$(head -n 1 "$TMP" | cut -c1-500)" >&2; exit 1; }
+# A relay can answer 200 with something other than the program, such as a
+# mirror's error page. Checked before the running agent is stopped, so a batch
+# run through such a relay leaves each machine on the agent it had, rather than
+# on bytes that cannot start while this script reports success.
+[ "$(head -c 4 "$TMP")" = "$(printf '\177ELF')" ] ||
+	{ echo "the download is not a Linux executable: $(head -n 1 "$TMP" | tr -cd '[:print:]' | cut -c1-200)" >&2; exit 1; }
 
 # Downloaded before the registration below, because that step spends a node: the
 # key returns a token and the panel gains a row, while the env file recording it
@@ -194,6 +274,10 @@ else
 	systemctl stop monitor-agent 2>/dev/null || true
 fi
 install -d -m 0755 "$ROOT"
+# Kept until the new binary has proved it starts; see not_started. Never over
+# an existing copy: a run that died before that check left an unproven binary
+# in $BIN, and the copy is the one that ran before it.
+[ ! -f "$BIN" ] || [ -f "$BIN.old" ] || cp "$BIN" "$BIN.old"
 install -m 0755 "$TMP" "$BIN"
 
 # The token lives in a root-only environment file rather than the unit, keeping
@@ -207,18 +291,36 @@ install -m 0755 "$TMP" "$BIN"
 MONITOR_SERVER=$SERVER
 MONITOR_TOKEN=$TOKEN
 ENV
+	[ -z "$IFACE" ] || printf 'MONITOR_IFACE=%s\n' "$IFACE" >>"$ENV_FILE"
 )
 
+# The new agent is not running. The binary it replaced is put back and started
+# again, so a failed upgrade leaves the machine reporting as before; the unit
+# and env file just written suit that binary as well, since an upgrade keeps the
+# token and the settings. A first install has nothing to put back.
+not_started() {
+	echo "monitor-agent did not start; see: $1" >&2
+	[ -f "$BIN.old" ] || exit 1
+	mv -f "$BIN.old" "$BIN"
+	if [ "$INIT" = openrc ]; then
+		rc-service monitor-agent restart >/dev/null 2>&1 || true
+	else
+		systemctl restart monitor-agent || true
+	fi
+	echo "the previous monitor-agent binary is back in place and was restarted" >&2
+	exit 1
+}
+
 if [ "$INIT" = openrc ]; then
-	cat >/etc/init.d/monitor-agent <<RC
+	cat >"$RC_FILE" <<RC
 #!/sbin/openrc-run
 description="monitor agent"
 command="$BIN"
 command_args="--interval $INTERVAL${INSECURE:+ --insecure}"
 supervisor="supervise-daemon"
 respawn_delay=5
-output_log="/var/log/monitor-agent.log"
-error_log="/var/log/monitor-agent.log"
+output_log="$LOG_FILE"
+error_log="$LOG_FILE"
 
 depend() {
 	need net
@@ -231,14 +333,21 @@ start_pre() {
 	set +a
 }
 RC
-	chmod 0755 /etc/init.d/monitor-agent
+	chmod 0755 "$RC_FILE"
 	rc-update add monitor-agent default >/dev/null
 	rc-service monitor-agent restart
-	echo "monitor-agent installed; follow it with: tail -f /var/log/monitor-agent.log"
+	# supervise-daemon reports the service started while it respawns an agent
+	# that exits at once, so the process itself is what is looked for, inside
+	# the respawn delay. pidof rather than pgrep -x, which BusyBox matches
+	# against the full path.
+	sleep 3
+	pidof monitor-agent >/dev/null || not_started "$LOG_FILE"
+	rm -f "$BIN.old"
+	echo "monitor-agent installed; follow it with: tail -f $LOG_FILE"
 	exit 0
 fi
 
-cat >/etc/systemd/system/monitor-agent.service <<UNIT
+cat >"$UNIT_FILE" <<UNIT
 [Unit]
 Description=monitor agent
 After=network-online.target
@@ -277,4 +386,12 @@ systemctl enable monitor-agent >/dev/null
 # untouched, so reinstalling over a live agent would keep the old binary
 # running.
 systemctl restart monitor-agent
+# Type=simple counts the service started once it is forked, so `restart` above
+# succeeds also for one that fails at once -- a user it cannot resolve
+# (217/USER), a binary that exits -- and is then restarted every RestartSec.
+# Checked inside that window, so a batch run shows the failure on the machine
+# where it happened rather than a line reading "installed".
+sleep 3
+systemctl is-active --quiet monitor-agent || not_started "journalctl -u monitor-agent -n 20"
+rm -f "$BIN.old"
 echo "monitor-agent installed; follow it with: journalctl -u monitor-agent -f"
