@@ -13,8 +13,10 @@ cd "$(dirname "$0")/.."
 # newline produces; the fields are set either way. Unguarded, set -e would exit
 # here silently and build.rs would report only the empty output.
 read -r TAG SHA <web-theme.pin || true
-[ -n "${TAG:-}" ] && [ -n "${SHA:-}" ] ||
-  { echo "web-theme.pin must hold '<tag> <sha256>'" >&2; exit 1; }
+if [ -z "${TAG:-}" ] || [ -z "${SHA:-}" ]; then
+	echo "web-theme.pin must hold '<tag> <sha256>'" >&2
+	exit 1
+fi
 DEST=target/theme
 # This fork's own theme, not upstream's: the public page has been restyled here, and
 # the pinned release is the one that carries it.

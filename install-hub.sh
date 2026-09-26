@@ -98,7 +98,9 @@ press() {
 
 check_port() {
 	case "$1" in "" | *[!0-9]*) die "端口必须是 1-65535 的整数：$1" ;; esac
-	[ "$1" -ge 1 ] && [ "$1" -le 65535 ] || die "端口必须是 1-65535 的整数：$1"
+	if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+		die "端口必须是 1-65535 的整数：$1"
+	fi
 }
 
 # The `--listen ...` tail of the installed unit's ExecStart, empty when nothing
