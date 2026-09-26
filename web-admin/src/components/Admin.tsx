@@ -110,13 +110,14 @@ function Section({ title, hint, action, children }: { title: string; hint?: stri
 }
 
 
-function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose, onConfirm }: {
+function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose, onConfirm, children }: {
   title: string
   description: string
   confirmLabel: string
   busy?: boolean
   onClose: () => void
   onConfirm: () => void
+  children?: React.ReactNode
 }) {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -125,6 +126,7 @@ function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription className="leading-relaxed">{description}</DialogDescription>
         </DialogHeader>
+        {children}
         <DialogFooter className="border-t pt-4">
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button variant="destructive" onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
@@ -427,6 +429,14 @@ function registerCommand(site: string, key: string) {
   return `curl -fsSL ${site}/install.sh | sh -s -- ${args.join(" ")}`
 }
 
+// Carries no token, so it is the same for every node and remains valid after the
+// node is deleted.
+function uninstallCommand(site: string) {
+  site = provisioningSite(site)
+  if (!site) return ""
+  return `curl -fsSL ${site}/install.sh | sh -s -- --uninstall`
+}
+
 // The window lives on the hub; this reads it back and counts down, which is also
 // what makes an expired one disappear from the panel without interaction.
 function useRegisterWindow() {
@@ -668,6 +678,9 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   const visible = order
     .filter((n) => group === "all" || (group === "" ? !n.group : n.group === group))
     .filter((n) => !needle || [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
+  // Offered on the same terms as the install command: only where this panel is
+  // the https domain entry an install command can name.
+  const uninstall = canProvision ? uninstallCommand(site) : ""
 
   async function remove() {
     if (!deleting) return
@@ -925,7 +938,26 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
           busy={removing}
           onClose={() => setDeleting(null)}
           onConfirm={remove}
-        />
+        >
+          {/* Deleting the node leaves the agent running on the machine, retrying
+              with a token the hub no longer accepts. */}
+          {uninstall && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-sm font-medium">卸载 agent</Label>
+                <Button variant="ghost" size="sm" onClick={() => copy(uninstall)}>
+                  <Copy className="size-4" /> 复制
+                </Button>
+              </div>
+              <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed select-all">
+                {uninstall}
+              </pre>
+              <p className="text-xs text-muted-foreground">
+                在这台机器上以 root 执行，停止 agent，删除二进制、env 文件和服务文件。
+              </p>
+            </div>
+          )}
+        </ConfirmDialog>
       )}
     </div>
   )
