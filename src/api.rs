@@ -7,7 +7,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{Local, Utc};
+use chrono::{Local, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -266,7 +266,14 @@ fn availability(minutes: &[i64], from: i64, to: i64) -> Value {
 
 /// One node as the UI consumes it: stored config, live metrics and the hub's
 /// accumulated traffic in a single object.
-fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, uptime: Uptime, full: bool) -> Value {
+fn node_view(
+    node: &Node,
+    current: Option<&Agent>,
+    traffic: &Traffic,
+    uptime: Uptime,
+    full: bool,
+    today: NaiveDate,
+) -> Value {
     // The three capacities arrive twice: once in `Facts`, sent at the handshake
     // and stored, and again in every `Metrics`. A machine that gains a disk while
     // the agent is running -- the agent re-reads its mount table every sample so
@@ -312,6 +319,11 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, uptime: Up
         "currency": node.currency,
         "billing_cycle": node.billing_cycle,
         "expires_at": node.expires_at,
+        // Counted on the hub's calendar, the one renewal follows. A page counting
+        // on the visitor's clock would, with the hub on UTC and the visitor on
+        // UTC+8, show every online node expired for eight hours each cycle
+        // before the hub rolls its date forward.
+        "expires_in": node.expires_at.as_deref().and_then(|d| d.parse::<NaiveDate>().ok()).map(|d| (d - today).num_days()),
         "traffic_limit": node.traffic_limit,
         "traffic_mode": node.traffic_mode,
         "traffic_reset_day": node.traffic_reset_day,
@@ -367,6 +379,7 @@ fn visible_nodes(app: &App, full: bool) -> Result<Vec<Value>, anyhow::Error> {
     let uptime = uptime_map(app, Utc::now().timestamp(), &nodes);
     let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
     let none = Traffic::default();
+    let today = Local::now().date_naive();
     Ok(nodes
         .iter()
         .filter(|n| full || n.public)
@@ -377,6 +390,7 @@ fn visible_nodes(app: &App, full: bool) -> Result<Vec<Value>, anyhow::Error> {
                 traffic.get(&n.id).unwrap_or(&none),
                 uptime.get(&n.id).copied().unwrap_or_default(),
                 full,
+                today,
             )
         })
         .collect())
@@ -2464,6 +2478,21 @@ mod tests {
         // The live entry went with the connection, so "offline since" must come
         // from the node row.
         assert_eq!(view["last_seen"], 1_700_000_000);
+    }
+
+    /// Days to expiry are counted on the hub's calendar and are public, like the
+    /// date itself; no date counts nothing.
+    #[test]
+    fn days_to_expiry_follow_the_hubs_calendar() {
+        let app = app();
+        let id = node(&app, "a", true);
+        let expires_in = || visible_nodes(&app, false).unwrap()[0]["expires_in"].clone();
+        assert_eq!(expires_in(), Value::Null);
+        let today = Local::now().date_naive();
+        for days in [3, 0, -1] {
+            app.db.set_expiry(id, &(today + chrono::Duration::days(days)).to_string()).unwrap();
+            assert_eq!(expires_in(), json!(days));
+        }
     }
 
     /// A capacity arrives twice -- once in the facts stored at the handshake, and

@@ -66,10 +66,15 @@ pub struct Theme {
 /// The theme API level this binary implements.
 ///
 /// 1 is the surface the theme has always been written against; 2 added
-/// `swap_used` to a history row, 3 added `load1`. Checked against a manifest's
-/// `api` when a theme is installed, listed and served -- see `required_api` for
-/// why serving checks it on every request.
-pub const THEME_API: u32 = 3;
+/// `swap_used` to a history row, 3 added `load1`, 4 added `expires_in` to a node
+/// view. Checked against a manifest's `api` when a theme is installed, listed
+/// and served -- see `required_api` for why serving checks it on every request.
+///
+/// The shipped theme declares `api: 1`: `expires_in` is not something it
+/// requires, since it counts the days browser-side from `expires_at` and falls
+/// back to that when the field is absent. The level is recorded so a future
+/// theme that cannot degrade can ask for it instead of guessing.
+pub const THEME_API: u32 = 4;
 
 fn level_one() -> u32 {
     1
