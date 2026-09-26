@@ -355,6 +355,11 @@ const MAX_ENTRIES: usize = 2_000;
 const MAX_FILE: u64 = 8 << 20;
 const MAX_EXPANDED: u64 = 64 << 20;
 
+/// What may follow tar's end marker, which is padding to a whole record: 10 KiB
+/// by default, and a mebibyte covers any blocking factor in use. Unbounded,
+/// zeros there would inflate at 1 GiB per MiB uploaded, 1.4 s of CPU each.
+const MAX_PADDING: u64 = 1 << 20;
+
 /// Installs a theme from its published `theme.tar.gz`, under the name its own
 /// manifest carries.
 ///
@@ -407,6 +412,18 @@ fn unpack<R: Read>(archive: R, into: &Path) -> Result<()> {
         if !entry.unpack_in(into)? {
             bail!("主题包里的路径越出了主题目录");
         }
+    }
+    // Read to the end, where gzip keeps the checksum over everything before it.
+    // The entries stop at tar's end marker, short of it, so an archive whose
+    // bytes changed in transit -- or that lost the few after the marker -- would
+    // otherwise install as long as its headers survived.
+    let mut rest = archive.into_inner();
+    std::io::copy(&mut (&mut rest).take(MAX_PADDING), &mut std::io::sink())
+        .context("主题包不是有效的 tar.gz")?;
+    // Past the end marker there is padding only, and only up to a point: left
+    // unbounded, zeros there inflate at 1 GiB per MiB uploaded.
+    if rest.read(&mut [0]).context("主题包不是有效的 tar.gz")? != 0 {
+        bail!("主题包在 tar 结尾之后还有超过 1 MiB 的数据，包本身有问题，请联系主题作者");
     }
     Ok(())
 }
@@ -607,6 +624,31 @@ mod tests {
         ] {
             assert!(install(&base, bad, None).is_err());
         }
+
+        // Cut past tar's end marker, or with one byte changed on the way: every
+        // header reads in both, so only the gzip trailer can refuse either.
+        let _ = pack(&[("theme.json", manifest), ("dist/index.html", b"v3")], None);
+        let whole = fs::read(&archive).unwrap();
+        let mut altered = whole.clone();
+        let crc = altered.len() - 8;
+        altered[crc] ^= 1;
+        for damaged in [&whole[..whole.len() - 4], &altered[..]] {
+            let Err(e) = install(&base, damaged, None) else { panic!("a damaged archive installed") };
+            assert!(e.to_string().contains("主题包不是有效的 tar.gz"), "{e:#}");
+        }
+        // Past the end marker, padding and nothing more.
+        let mut padded = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o644);
+        padded.append_data(&mut header, "theme.json", &b"{}"[..]).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &padded.into_inner().unwrap()).unwrap();
+        std::io::Write::write_all(&mut gz, &vec![0; (MAX_PADDING + 1) as usize]).unwrap();
+        let Err(e) = install(&base, &gz.finish().unwrap()[..], None) else {
+            panic!("an oversized tail installed")
+        };
+        assert!(e.to_string().contains("tar 结尾之后"), "{e:#}");
 
         // None of that affected the theme being served or left a staging
         // directory behind.
