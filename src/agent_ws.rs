@@ -90,9 +90,11 @@ impl Agent {
 /// reading that landed on the boundary. A 30-second spike between two samples is
 /// real load that a point sample would report as idle.
 ///
-/// `load` is absent because no history row carries it: it is a live figure read
-/// from the report. `net_rx` and `net_tx` are absent because [`report`] fills
-/// them from the accumulator, which is exact.
+/// `load` is not one of them: the report carries it as an array of three
+/// figures -- 1, 5 and 15 minutes -- so it has no scalar under its own name for
+/// a keyed loop to read, and the row keeps only its first element, as `load1`.
+/// [`Minute`] folds it separately. `net_rx` and `net_tx` are absent because
+/// [`report`] fills them from the accumulator, which is exact.
 const MEAN_FLOAT: [&str; 1] = ["cpu"];
 const MEAN_INT: [&str; 6] = ["mem_used", "swap_used", "disk_used", "tcp", "udp", "procs"];
 
@@ -101,12 +103,34 @@ const MEAN_INT: [&str; 6] = ["mem_used", "swap_used", "disk_used", "tcp", "udp",
 struct Minute {
     sums: [f64; MEAN_FLOAT.len() + MEAN_INT.len()],
     reports: f64,
+    /// `load[0]` summed over the reports that carried a readable load array,
+    /// and how many of them there were. Counted apart from `reports` so a
+    /// report without a load drags no mean toward zero: with no sample at all
+    /// the row must carry no `load1`, which stores NULL, rather than the zero a
+    /// chart would draw as an idle machine.
+    load1: f64,
+    loads: f64,
 }
 
 impl Minute {
     fn add(&mut self, metrics: &serde_json::Value) {
         for (slot, key) in MEAN_FLOAT.iter().chain(&MEAN_INT).enumerate() {
             self.sums[slot] += metrics.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        // Read `load[0]` by hand rather than through the lists above: those
+        // index a scalar under the name they write, while this one takes the
+        // first element of a named array and writes it as `load1`. The array is
+        // checked the way `report` checks it -- three finite, non-negative
+        // figures -- so a malformed one contributes no sample rather than
+        // whatever its first element happens to be.
+        let load1 = metrics
+            .get("load")
+            .and_then(|v| v.as_array())
+            .filter(|a| a.len() == 3)
+            .and_then(|a| a.first().and_then(|v| v.as_f64()).filter(|n| n.is_finite() && *n >= 0.0));
+        if let Some(load1) = load1 {
+            self.load1 += load1;
+            self.loads += 1.0;
         }
         self.reports += 1.0;
     }
@@ -126,6 +150,12 @@ impl Minute {
             let mean = self.sums[slot] / self.reports;
             let mean = if slot < MEAN_FLOAT.len() { json!(mean) } else { json!(mean.round() as i64) };
             obj.insert((*key).to_owned(), mean);
+        }
+        // Written only when the minute held a sample. `insert_metric` stores an
+        // absent `load1` as NULL, which the history query averages as the
+        // absence of load rather than a minute spent idle.
+        if self.loads > 0.0 {
+            obj.insert("load1".to_owned(), json!(self.load1 / self.loads));
         }
     }
 }
@@ -668,6 +698,39 @@ mod tests {
         // The live view still shows the instantaneous reading, which is its
         // purpose.
         assert_eq!(app.agents.read().unwrap()[&id].metrics["net_rx"], 0);
+    }
+
+    /// `load` rides in an array, so the minute folds it by hand rather than
+    /// through the keyed lists. This checks the two properties those lists
+    /// cannot express: the row gets the mean of the minute's `load[0]`, and a
+    /// minute no report gave a load carries no key at all, so the column stores
+    /// NULL instead of a zero the chart would draw.
+    #[test]
+    fn the_minute_folds_load_as_a_mean_and_writes_nothing_when_silent() {
+        let mut minute = Minute::default();
+        minute.add(&json!({"cpu": 10.0, "load": [1.0, 5.0, 15.0]}));
+        minute.add(&json!({"cpu": 20.0, "load": [3.0, 5.0, 15.0]}));
+        let mut row = json!({"cpu": 20.0, "load": [3.0, 5.0, 15.0]});
+        minute.write_into(&mut row);
+        assert_eq!(row["load1"], 2.0, "the mean of load[0], not the last report's");
+        assert_eq!(row["cpu"], 15.0, "the keyed fold is unaffected");
+
+        // No report carried a load: the key must be absent, which is what makes
+        // `insert_metric` store NULL.
+        let mut minute = Minute::default();
+        minute.add(&json!({"cpu": 1.0}));
+        let mut row = json!({"cpu": 1.0});
+        minute.write_into(&mut row);
+        assert!(row.get("load1").is_none(), "a minute with no load sample writes no key");
+
+        // A load `report` would have rejected never reaches the minute, but the
+        // fold is defensive: an unusable one is no sample rather than a zero.
+        let mut minute = Minute::default();
+        minute.add(&json!({"cpu": 1.0, "load": [1.0, 2.0]}));
+        minute.add(&json!({"cpu": 1.0, "load": null}));
+        let mut row = json!({"cpu": 1.0});
+        minute.write_into(&mut row);
+        assert!(row.get("load1").is_none(), "an unusable load is no sample, not a zero");
     }
 
     /// A reconnect arrives mid-minute, and that minute's row already holds the
