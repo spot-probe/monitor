@@ -773,6 +773,23 @@ fn node_limits(reset_day: Option<u32>, price: Option<f64>, limit: Option<i64>) -
     None
 }
 
+/// A theme shows the group as a tab label or a card title, so it is held to a
+/// length that fits one line on a 390 px phone: 32 Chinese characters at 14 px
+/// are about 450 px, wider than the screen.
+const MAX_GROUP: usize = 13;
+
+/// Trims a group name, or refuses it. Refused rather than truncated: the panel
+/// would otherwise report saved a name that is not the one stored. Kept apart
+/// from [`node_limits`] because it rewrites the value it checks, while that one
+/// only reads scalars -- and called from both writers, so the two cannot drift.
+fn group_error(group: &mut String) -> Option<&'static str> {
+    *group = group.trim().to_owned();
+    if group.chars().count() > MAX_GROUP || group.chars().any(char::is_control) {
+        return Some("group must be at most 13 characters, without control characters");
+    }
+    None
+}
+
 pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
     let authed = authed(&app, &headers);
     // Which login this browser holds -- and only for the browser holding it. The public
@@ -821,6 +838,9 @@ pub async fn create_node(
     if let Some(message) =
         node_limits(Some(node.traffic_reset_day), Some(node.price), Some(node.traffic_limit))
     {
+        return bad(message);
+    }
+    if let Some(message) = group_error(&mut node.group) {
         return bad(message);
     }
     node.name = node.name.trim().to_owned();
@@ -961,6 +981,9 @@ pub async fn update_node(
         }
     }
     if let Some(message) = node_limits(node.traffic_reset_day, node.price, node.traffic_limit) {
+        return bad(message);
+    }
+    if let Some(message) = node.group.as_mut().and_then(group_error) {
         return bad(message);
     }
     match app.db.update_node(id, &node) {
@@ -2293,6 +2316,47 @@ mod tests {
             assert_eq!(updated.status(), StatusCode::BAD_REQUEST, "update accepted {bad}");
         }
         assert_eq!(app.db.nodes().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// A theme shows the group as a tab label or a card title, so it is held to
+    /// what fits one line on a 390 px phone: 32 Chinese characters at 14 px are
+    /// about 450 px, wider than the screen. Counted in characters, not bytes --
+    /// thirteen Chinese characters take 39 bytes and must pass. Both writers
+    /// share the one check, so the create path cannot drift past what the update
+    /// path refuses.
+    #[tokio::test]
+    async fn group_names_are_bounded_in_characters_on_both_write_paths() {
+        let app = std::sync::Arc::new(app());
+        let id = node(&app, "n", true);
+        let create = |value: &str| {
+            let node: Node = serde_json::from_value(json!({"name": "g", "group": value})).unwrap();
+            create_node(Admin, axum::extract::State(app.clone()), domain_headers(), Ok(Json(node)))
+        };
+        let update = |value: &str| {
+            let patch: NodePatch = serde_json::from_value(json!({"group": value})).unwrap();
+            update_node(Admin, axum::extract::State(app.clone()), Path(id), Ok(Json(patch)))
+        };
+
+        // At the limit: accepted by both, and trimmed to what is stored.
+        let longest = "港".repeat(MAX_GROUP);
+        assert_eq!(longest.len(), MAX_GROUP * 3, "the fixture is not measured in bytes");
+        assert_eq!(create(&format!("  {longest}  ")).await.status(), StatusCode::OK);
+        assert_eq!(update(&longest).await.status(), StatusCode::OK);
+        let stored = app.db.nodes().unwrap();
+        assert_eq!(
+            stored.iter().find(|n| n.name == "g").unwrap().group,
+            longest,
+            "the trimmed name is what is stored"
+        );
+
+        // One past it: refused by both.
+        let too_long = "港".repeat(MAX_GROUP + 1);
+        assert_eq!(create(&too_long).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(update(&too_long).await.status(), StatusCode::BAD_REQUEST);
+
+        // A control character is refused however few characters there are.
+        assert_eq!(create("建\n站").await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(update("建\n站").await.status(), StatusCode::BAD_REQUEST);
     }
 
     /// A stream outlives the request that opened it, so everything the handshake

@@ -250,8 +250,8 @@ function NodeForm({ node, onClose, onSaved }: {
               the node is grouped, not what it costs. The public page derives its tabs
               from the values in use, so there is nothing to pick from -- only to type.
               Empty means the node appears under every tab. */}
-          <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。留空则只在「全部节点」下出现">
-            <Input value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
+          <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。最多 13 字。留空则只在「全部节点」下出现">
+            <Input maxLength={13} value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="每月流量额度 (GB)" hint="留空或 0 不限">
