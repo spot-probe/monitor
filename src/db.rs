@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS traffic (
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
-  cpu REAL NOT NULL,
+  cpu REAL NOT NULL, load1 REAL,
   mem_used INTEGER NOT NULL, swap_used INTEGER NOT NULL, disk_used INTEGER NOT NULL,
   net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
   tcp INTEGER NOT NULL, udp INTEGER NOT NULL, procs INTEGER NOT NULL,
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
 /// database already in service.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -268,6 +268,18 @@ fn migrate_to_7(conn: &Connection) -> Result<()> {
     add_column(conn, "session", "last_seen INTEGER NOT NULL DEFAULT 0")
 }
 
+/// Puts `metric.load1`, the 1-minute load average, back. `migrate_to_2` dropped
+/// it because nothing read it; the CPU panel now draws the load curve beside the
+/// CPU curve, so history has to carry it again.
+///
+/// Nullable, unlike the column `migrate_to_2` removed: only a minute whose
+/// reports carried a load has one to average, and a row that stored zero for a
+/// minute with no sample would draw an idle machine. Rows written before this
+/// migration keep NULL, which the history query returns as JSON null.
+fn migrate_to_8(conn: &Connection) -> Result<()> {
+    add_column(conn, "metric", "load1 REAL")
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -295,6 +307,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 7 {
         migrate_to_7(conn)?;
+    }
+    if from < 8 {
+        migrate_to_8(conn)?;
     }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
@@ -984,11 +999,17 @@ impl Db {
     pub fn insert_metric(&self, node_id: i64, ts: i64, m: &serde_json::Value) -> Result<()> {
         let f = |k: &str| m.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
         let n = |k: &str| m.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        // Not read with `f`: an absent `load1` must reach SQLite as NULL rather
+        // than the zero every other column defaults to, because the history
+        // query averages it and a minute with no load sample would otherwise
+        // drag the curve toward zero. Only `write_into` ever omits it, and only
+        // for a minute no report gave a load.
+        let load1 = m.get("load1").and_then(|v| v.as_f64());
         self.conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO metric
-               (node_id, ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, tcp, udp, procs)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+               (node_id, ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, tcp, udp, procs, load1)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?
             .execute(params![
                 node_id,
@@ -1001,7 +1022,8 @@ impl Db {
                 n("net_tx"),
                 n("tcp"),
                 n("udp"),
-                n("procs")
+                n("procs"),
+                load1
             ])?;
         Ok(())
     }
@@ -1017,11 +1039,16 @@ impl Db {
     /// the seven-day window integrated to 53.69 GB against the 27.52 GB the
     /// minutes hold, while averaging gives 28.02 GB, matching the accumulator.
     ///
-    /// `swap_used` is returned alongside `mem_used`, both averaged over the
-    /// bucket, since a memory chart draws them together. `tcp`, `udp` and
-    /// `procs` are stored but not returned, as nothing draws them from history.
-    /// The columns are retained deliberately; `load1` was the fifth and has been
-    /// removed, see `migrate_to_2`.
+    /// `swap_used` and `load1` are returned alongside `mem_used`, all averaged
+    /// over the bucket, since a memory chart draws the first two together and
+    /// the CPU panel draws the load curve beside the CPU curve. `tcp`, `udp`
+    /// and `procs` are stored but not returned, as nothing draws them from
+    /// history. The columns are retained deliberately.
+    ///
+    /// `load1` is a real number, so unlike `mem_used`/`swap_used` it is left as
+    /// `AVG` returns it; and `AVG` over a bucket whose rows are all NULL is
+    /// NULL, which reaches the JSON as null rather than as the zero a chart
+    /// would draw as an idle machine.
     ///
     /// The stamp is the bucket's start rather than a row inside it, so every
     /// series lands on one grid and the probe rows below can be shared.
@@ -1031,7 +1058,8 @@ impl Db {
             "SELECT (MIN(ts)/?3)*?3, AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
                     CAST(AVG(swap_used) AS INTEGER),
                     CAST(AVG(disk_used) AS INTEGER),
-                    CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER)
+                    CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER),
+                    AVG(load1)
              FROM metric WHERE node_id=?1 AND ts>=?2 GROUP BY ts/?3 ORDER BY ts/?3",
         )?;
         let rows = stmt.query_map(params![node_id, since, step], |r| {
@@ -1040,6 +1068,7 @@ impl Db {
                 "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
                 "disk_used": r.get::<_, i64>(4)?,
                 "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
+                "load1": r.get::<_, Option<f64>>(7)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -2365,6 +2394,38 @@ mod tests {
         assert_eq!(db.metrics(other, 0, 60).unwrap()[0]["swap_used"], 0, "zero, not null");
     }
 
+    /// The CPU panel draws load from history, so the bucket has to report the
+    /// mean of its own minute rather than the first or last row of it -- the same
+    /// reason `cpu` is averaged. A bucket no report gave a load must read as
+    /// null: the theme draws that as a gap, while a zero would draw the machine
+    /// idle for a minute nobody measured.
+    #[test]
+    fn history_reports_the_mean_load_of_a_bucket_and_no_load_as_null() {
+        let db = db();
+        let id = node(&db, 1);
+        // Three rows in one minute, no one of which is the mean.
+        for (ts, load1) in [(60, 1.0), (61, 2.0), (62, 3.0)] {
+            db.insert_metric(id, ts, &serde_json::json!({"cpu": 1.0, "load1": load1})).unwrap();
+        }
+        let row = &db.metrics(id, 0, 60).unwrap()[0];
+        assert_eq!(row["load1"], 2.0, "the bucket reports its mean, not a sample");
+        assert_eq!(row["cpu"], 1.0, "the rest of the row is unaffected");
+
+        // A row with no `load1` -- what a minute no report gave a load leaves --
+        // stores NULL, which averages over the bucket as null rather than zero.
+        let other = node(&db, 1);
+        db.insert_metric(other, 60, &serde_json::json!({"cpu": 1.0})).unwrap();
+        let row = &db.metrics(other, 0, 60).unwrap()[0];
+        assert_eq!(row["load1"], serde_json::Value::Null, "no sample is not a sample of zero");
+
+        // Mixed: the mean covers only the rows that have one, so a silent minute
+        // must not pull a measured one down.
+        let mixed = node(&db, 1);
+        db.insert_metric(mixed, 60, &serde_json::json!({"load1": 2.0})).unwrap();
+        db.insert_metric(mixed, 61, &serde_json::json!({"cpu": 1.0})).unwrap();
+        assert_eq!(db.metrics(mixed, 0, 60).unwrap()[0]["load1"], 2.0, "NULL is not a zero sample");
+    }
+
     /// The rekeying in `open()`: rows must survive it, and the chart's query must
     /// emerge able to seek. A migration that leaves every row on the old key fails
     /// silently, and stays silent while the query it exists for scans a node's
@@ -2420,10 +2481,15 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
-    /// Dropping `metric.load1` under a database in service. The column is
-    /// `NOT NULL` with no default, so a migration that silently failed to run
-    /// would not merely leave a stale column: it would prevent every history row
-    /// from being written.
+    /// `metric.load1` across the version history: `migrate_to_2` drops the
+    /// `NOT NULL` column a v1-era hub carried, and `migrate_to_8` puts it back as
+    /// the nullable one this build writes. The column being `NOT NULL` with no
+    /// default is why migration 2 is mandatory -- without it every insert this
+    /// build made against that file violated the constraint -- and the ordering
+    /// is why the re-add has to come after it rather than before.
+    ///
+    /// The old row survives; the load it carried does not, since dropping the
+    /// column discarded it and the re-add has nothing to refill it with.
     #[test]
     fn dropping_load1_keeps_the_history_and_lets_new_rows_in() {
         let file = std::env::temp_dir().join(format!("monitor-load1-{}.db", std::process::id()));
@@ -2449,17 +2515,74 @@ mod tests {
         drop(old);
 
         let db = Db::open(path).unwrap();
-        assert!(!schema_mentions(&db.conn(), "metric", "load1").unwrap(), "the column has to be gone");
-        // The row remains, along with everything else it carried.
+        // Migration 2 dropped it and migration 8 re-added it, nullable this time.
+        assert!(schema_mentions(&db.conn(), "metric", "load1").unwrap(), "the column has to be back");
+        // The row remains, along with everything else it carried -- but not the
+        // load, which the drop discarded and the re-add did not restore.
         let kept = &db.metrics(1, 0, 60).unwrap()[0];
         assert_eq!((kept["ts"].as_i64(), kept["cpu"].as_f64()), (Some(60), Some(12.5)));
-        // The shape this build inserts now fits the table.
-        db.insert_metric(1, 120, &serde_json::json!({"cpu": 2.0, "load": [0.5, 0.4, 0.3]})).unwrap();
-        assert_eq!(db.metrics(1, 0, 60).unwrap().len(), 2);
+        assert_eq!(kept["load1"], serde_json::Value::Null, "the dropped value is gone, not refilled");
+        // The shape this build inserts now fits the table. The loadless row is
+        // what proves the re-added column is nullable: the `NOT NULL` one
+        // migration 2 removed would have rejected it.
+        db.insert_metric(1, 120, &serde_json::json!({"cpu": 2.0, "load1": 0.5})).unwrap();
+        db.insert_metric(1, 180, &serde_json::json!({"cpu": 3.0})).unwrap();
+        let rows = db.metrics(1, 0, 60).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1]["load1"], 0.5, "a new row carries the load it was given");
+        assert_eq!(rows[2]["load1"], serde_json::Value::Null, "and one without a load stores NULL");
 
-        // Opening again must not attempt to drop a column already removed.
+        // Opening again must not attempt to drop a column already replaced, nor
+        // add one that is present.
         drop(db);
         assert!(Db::open(path).is_ok());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A database on the immediately preceding schema, whose `metric` table has
+    /// no `load1` at all. Migration 8 adds it, and every row already there reads
+    /// back NULL rather than a zero the chart would draw.
+    #[test]
+    fn a_v7_database_gains_a_nullable_load1_with_its_old_rows_null() {
+        let file = std::env::temp_dir().join(format!("monitor-v7-load1-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let path = file.to_str().unwrap();
+
+        // The metric table as a v7 hub created it: no load1.
+        let old = Connection::open(path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE metric (
+               node_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+               cpu REAL NOT NULL,
+               mem_used INTEGER NOT NULL, swap_used INTEGER NOT NULL, disk_used INTEGER NOT NULL,
+               net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
+               tcp INTEGER NOT NULL, udp INTEGER NOT NULL, procs INTEGER NOT NULL,
+               PRIMARY KEY (node_id, ts)
+             ) WITHOUT ROWID;
+             INSERT INTO metric VALUES (1,60,12.5,100,0,0,0,0,0,0,0);
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        drop(old);
+
+        let db = Db::open(path).unwrap();
+        assert!(schema_mentions(&db.conn(), "metric", "load1").unwrap(), "migration 8 adds the column");
+        // The row predates the column, so it reads back null rather than zero.
+        let kept = &db.metrics(1, 0, 60).unwrap()[0];
+        assert_eq!(kept["cpu"], 12.5, "the old row is untouched");
+        assert_eq!(kept["load1"], serde_json::Value::Null, "a row written before the column has no load");
+        // A row written after it carries a load, and one without a load still
+        // fits, which a `NOT NULL` column would not allow.
+        db.insert_metric(1, 120, &serde_json::json!({"cpu": 2.0, "load1": 1.25})).unwrap();
+        db.insert_metric(1, 180, &serde_json::json!({"cpu": 3.0})).unwrap();
+        assert_eq!(db.metrics(1, 120, 60).unwrap()[0]["load1"], 1.25);
+        assert_eq!(db.metrics(1, 180, 60).unwrap()[0]["load1"], serde_json::Value::Null);
+
+        // And the migration is idempotent across a reopen.
+        drop(db);
+        let db = Db::open(path).unwrap();
+        assert!(schema_mentions(&db.conn(), "metric", "load1").unwrap());
+        drop(db);
         let _ = std::fs::remove_file(&file);
     }
 
