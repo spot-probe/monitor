@@ -1017,9 +1017,11 @@ impl Db {
     /// the seven-day window integrated to 53.69 GB against the 27.52 GB the
     /// minutes hold, while averaging gives 28.02 GB, matching the accumulator.
     ///
-    /// `swap_used`, `tcp`, `udp` and `procs` are stored but not returned, as
-    /// nothing draws them from history. The columns are retained deliberately;
-    /// `load1` was the fifth and has been removed, see `migrate_to_2`.
+    /// `swap_used` is returned alongside `mem_used`, both averaged over the
+    /// bucket, since a memory chart draws them together. `tcp`, `udp` and
+    /// `procs` are stored but not returned, as nothing draws them from history.
+    /// The columns are retained deliberately; `load1` was the fifth and has been
+    /// removed, see `migrate_to_2`.
     ///
     /// The stamp is the bucket's start rather than a row inside it, so every
     /// series lands on one grid and the probe rows below can be shared.
@@ -1027,6 +1029,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
             "SELECT (MIN(ts)/?3)*?3, AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
+                    CAST(AVG(swap_used) AS INTEGER),
                     CAST(AVG(disk_used) AS INTEGER),
                     CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER)
              FROM metric WHERE node_id=?1 AND ts>=?2 GROUP BY ts/?3 ORDER BY ts/?3",
@@ -1034,8 +1037,9 @@ impl Db {
         let rows = stmt.query_map(params![node_id, since, step], |r| {
             Ok(serde_json::json!({
                 "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
-                "mem_used": r.get::<_, i64>(2)?, "disk_used": r.get::<_, i64>(3)?,
-                "net_rx": r.get::<_, i64>(4)?, "net_tx": r.get::<_, i64>(5)?,
+                "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
+                "disk_used": r.get::<_, i64>(4)?,
+                "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -2337,6 +2341,28 @@ mod tests {
         db.prune(30).unwrap();
         assert_eq!(db.metrics(id, 0, 60).unwrap().len(), 1);
         assert_eq!(db.all_traffic()[&id].total_rx, 800);
+    }
+
+    /// Swap reaches the chart through the same bucket as memory, so it has to be
+    /// the bucket's mean rather than a row from inside it: a chart that read one
+    /// report per bucket would draw a step the node never took, and a node with
+    /// no swap configured must read as zero rather than as a series the theme
+    /// cannot draw.
+    #[test]
+    fn history_reports_the_mean_swap_of_a_bucket_and_zero_as_zero() {
+        let db = db();
+        let id = node(&db, 1);
+        // Three reports in one minute, no one of which carries the mean.
+        for (ts, swap_used) in [(60, 100), (61, 200), (62, 300)] {
+            db.insert_metric(id, ts, &serde_json::json!({"swap_used": swap_used})).unwrap();
+        }
+        let row = &db.metrics(id, 0, 60).unwrap()[0];
+        assert_eq!(row["mem_used"], 0, "the rest of the row is unaffected");
+        assert_eq!(row["swap_used"], 200, "the bucket reports its mean, not a sample");
+
+        let other = node(&db, 1);
+        db.insert_metric(other, 60, &serde_json::json!({"swap_used": 0})).unwrap();
+        assert_eq!(db.metrics(other, 0, 60).unwrap()[0]["swap_used"], 0, "zero, not null");
     }
 
     /// The rekeying in `open()`: rows must survive it, and the chart's query must
