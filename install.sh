@@ -2,6 +2,7 @@
 # Installs monitor-agent as a systemd or OpenRC service.
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --token TOKEN [options]
 #   curl -fsSL https://hub.example.com/install.sh | sh -s -- --server URL --register KEY [options]
+#   curl -fsSL https://hub.example.com/install.sh | sh -s -- --uninstall
 set -eu
 # useradd and rc-update reside in sbin, which a root shell entered through `su`
 # without `-` lacks on Debian: su keeps the caller's PATH unless ALWAYS_SET_PATH
@@ -13,11 +14,15 @@ PATH="$PATH:/usr/sbin:/sbin"
 ROOT="/opt/monitor"
 BIN="$ROOT/monitor-agent"
 ENV_FILE="$ROOT/agent.env"
+UNIT_FILE="/etc/systemd/system/monitor-agent.service"
+RC_FILE="/etc/init.d/monitor-agent"
+LOG_FILE="/var/log/monitor-agent.log"
 SERVER=""
 TOKEN=""
 REGISTER=""
 INTERVAL=1
 INSECURE=""
+UNINSTALL=""
 
 while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
@@ -32,12 +37,34 @@ while [ $# -gt 0 ]; do
 	--register) REGISTER="$2"; shift 2 ;;
 	--interval) INTERVAL="$2"; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
+	--uninstall) UNINSTALL=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
 
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+# Removes exactly what an install writes and nothing else, for both init
+# systems: the one present now need not be the one the install found, and
+# systemctl fails outright where systemd is not PID 1 (WSL, containers) although
+# the install left its files there. Each step therefore tolerates failure. The
+# hub may be installed in $ROOT as well, so the directory is removed only once
+# empty.
+if [ -n "$UNINSTALL" ]; then
+	rc-service monitor-agent stop 2>/dev/null || true
+	rc-update del monitor-agent default >/dev/null 2>&1 || true
+	systemctl disable --now monitor-agent 2>/dev/null || true
+	rm -f "$UNIT_FILE" "$RC_FILE" "$LOG_FILE" "$BIN" "$ENV_FILE"
+	systemctl daemon-reload 2>/dev/null || true
+	userdel monitor-agent 2>/dev/null || true
+	rmdir "$ROOT" 2>/dev/null || true
+	echo "monitor-agent uninstalled"
+	exit 0
+fi
+
 [ -n "$SERVER" ] && { [ -n "$TOKEN" ] || [ -n "$REGISTER" ]; } || {
 	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--insecure]" >&2
+	echo "       install.sh --uninstall" >&2
 	exit 2
 }
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
@@ -106,7 +133,6 @@ http://*)
 	fi
 	;;
 esac
-[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 if command -v systemctl >/dev/null; then
 	INIT=systemd
 elif command -v rc-update >/dev/null; then
@@ -210,15 +236,15 @@ ENV
 )
 
 if [ "$INIT" = openrc ]; then
-	cat >/etc/init.d/monitor-agent <<RC
+	cat >"$RC_FILE" <<RC
 #!/sbin/openrc-run
 description="monitor agent"
 command="$BIN"
 command_args="--interval $INTERVAL${INSECURE:+ --insecure}"
 supervisor="supervise-daemon"
 respawn_delay=5
-output_log="/var/log/monitor-agent.log"
-error_log="/var/log/monitor-agent.log"
+output_log="$LOG_FILE"
+error_log="$LOG_FILE"
 
 depend() {
 	need net
@@ -231,14 +257,14 @@ start_pre() {
 	set +a
 }
 RC
-	chmod 0755 /etc/init.d/monitor-agent
+	chmod 0755 "$RC_FILE"
 	rc-update add monitor-agent default >/dev/null
 	rc-service monitor-agent restart
-	echo "monitor-agent installed; follow it with: tail -f /var/log/monitor-agent.log"
+	echo "monitor-agent installed; follow it with: tail -f $LOG_FILE"
 	exit 0
 fi
 
-cat >/etc/systemd/system/monitor-agent.service <<UNIT
+cat >"$UNIT_FILE" <<UNIT
 [Unit]
 Description=monitor agent
 After=network-online.target
