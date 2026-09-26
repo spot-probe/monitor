@@ -33,7 +33,7 @@ struct DefaultThemeAssets;
 #[include = "preview.png"]
 struct DefaultPreview;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Theme {
     pub name: String,
     pub short: String,
@@ -41,13 +41,42 @@ pub struct Theme {
     pub version: String,
     pub author: String,
     pub url: String,
+    /// The theme API level this manifest requires. Absent in manifests written
+    /// before the field existed; 1 is the surface those were written against.
+    ///
+    /// Levels are additive and describe only what a theme *cannot* work without.
+    /// A theme that draws a newer field when it is there and goes without it
+    /// otherwise keeps declaring the lower level, which is what lets a hub older
+    /// than the theme serve its page rather than refuse it.
+    #[serde(default = "level_one")]
+    pub api: u32,
     #[serde(default)]
     pub selected: bool,
+    /// Whether this binary implements the level the manifest asks for. Set when
+    /// a theme is listed, never read from the manifest.
+    #[serde(default = "yes", skip_deserializing)]
+    pub usable: bool,
     /// Set only for the copy embedded in the binary. Never read from a manifest:
     /// a theme installed on disk cannot present itself as the one that cannot be
     /// deleted.
     #[serde(skip_deserializing)]
     pub builtin: bool,
+}
+
+/// The theme API level this binary implements.
+///
+/// 1 is the surface the theme has always been written against; 2 added
+/// `swap_used` to a history row, 3 added `load1`. Checked against a manifest's
+/// `api` when a theme is installed, listed and served -- see `required_api` for
+/// why serving checks it on every request.
+pub const THEME_API: u32 = 3;
+
+fn level_one() -> u32 {
+    1
+}
+
+fn yes() -> bool {
+    true
 }
 
 pub async fn serve(State(app): State<Shared>, headers: HeaderMap, uri: Uri) -> Response {
@@ -67,7 +96,7 @@ pub async fn serve(State(app): State<Shared>, headers: HeaderMap, uri: Uri) -> R
     }
 
     let theme = app.db.get("theme").unwrap_or_default();
-    if let Some(root) = external_theme(&app.themes, &theme) {
+    if let Some(root) = external_theme(&app, &theme) {
         if let Some(response) = disk(&root, path, known) {
             return response;
         }
@@ -166,7 +195,30 @@ fn valid_short(short: &str) -> bool {
     !short.is_empty() && short.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
-fn external_theme(themes: &Path, short: &str) -> Option<PathBuf> {
+fn external_theme(app: &App, short: &str) -> Option<PathBuf> {
+    let dist = theme_dist(&app.themes, short)?;
+    let root = dist.parent()?;
+    if required_api(app, root) > THEME_API {
+        // Warned rather than silently skipped: the panel lists such a theme as
+        // unusable, and this is what the log says at the moment the page falls
+        // back to the built-in one.
+        tracing::warn!(
+            "{short}: manifest requires theme API {} and this binary implements {THEME_API}; serving the built-in theme instead",
+            required_api(app, root)
+        );
+        return None;
+    }
+    Some(dist)
+}
+
+/// Whether a short names a directory holding something serveable, and where its
+/// `dist/` is.
+///
+/// The API level is not consulted here: `themes()` lists a theme this binary
+/// cannot run, marked unusable, because a theme the operator installed should be
+/// visible with the reason rather than absent. `external_theme` is the gate that
+/// serving goes through.
+fn theme_dist(themes: &Path, short: &str) -> Option<PathBuf> {
     // The setting is empty until a theme is chosen, and names the default one.
     let short = if short.is_empty() { "default" } else { short };
     if !valid_short(short) {
@@ -185,6 +237,51 @@ fn external_theme(themes: &Path, short: &str) -> Option<PathBuf> {
         return None;
     }
     Some(dist)
+}
+
+/// What one manifest's remembered answer consists of: the stamp of the file it
+/// was read from, and the level that file declared.
+///
+/// The stamp is the file's length, inode and modification time together. Length
+/// and inode alone miss an edit in place that keeps the same size, and a
+/// modification time on its own misses one made within the same clock tick --
+/// which is exactly what an update a second after an install looks like.
+pub type ApiCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (u64, u64, u128, u32)>>;
+
+/// The theme API level the manifest in `root` asks for, 1 when it asks for
+/// nothing or cannot be read.
+///
+/// Read per request, because a directory can be replaced under a running hub by
+/// the installer, an unpacked archive or the update button, and a theme copied
+/// in by hand never passed through `publish` at all. The parse is therefore
+/// remembered against the file's stamp: a stat on the hot path, and a read only
+/// when the file has actually changed.
+fn required_api(app: &App, root: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = root.join("theme.json");
+    let Ok(meta) = fs::metadata(&path) else { return 1 };
+    let stamp = (
+        meta.len(),
+        meta.ino(),
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos()),
+    );
+    if let Some((len, ino, nanos, api)) = app.theme_api.lock().unwrap().get(&path) {
+        if (*len, *ino, *nanos) == stamp {
+            return *api;
+        }
+    }
+    // A manifest that does not parse is not this check's business: `manifest()`
+    // refuses it when the list is built, and a hand-made directory without one
+    // has been serveable all along.
+    let api = read_inside(root, "theme.json")
+        .and_then(|data| serde_json::from_slice::<Theme>(&data).ok())
+        .map_or(1, |theme| theme.api);
+    app.theme_api.lock().unwrap().insert(path, (stamp.0, stamp.1, stamp.2, api));
+    api
 }
 
 fn manifest(root: &Path, short: &str) -> Option<Theme> {
@@ -211,11 +308,15 @@ pub fn themes(app: &App) -> std::io::Result<Vec<Theme>> {
             let Ok(entry) = entry else { continue };
             let Ok(kind) = entry.file_type() else { continue };
             let Some(short) = entry.file_name().to_str().map(str::to_owned) else { continue };
-            if !kind.is_dir() || !valid_short(&short) || external_theme(&base, &short).is_none() {
+            if !kind.is_dir() || !valid_short(&short) || theme_dist(&base, &short).is_none() {
                 continue;
             }
             let Ok(root) = entry.path().canonicalize() else { continue };
-            if let Some(theme) = manifest(&root, &short) {
+            if let Some(mut theme) = manifest(&root, &short) {
+                // Listed even when this binary cannot run it: it is a directory
+                // the operator put there, and the panel says why it is inert
+                // rather than leaving them wondering where their theme went.
+                theme.usable = theme.api <= THEME_API;
                 // An installed copy of the built-in theme replaces it in the
                 // list rather than appearing beside it, matching `serve`, which
                 // reads the directory before the binary.
@@ -241,7 +342,7 @@ pub fn themes(app: &App) -> std::io::Result<Vec<Theme>> {
 pub fn selectable(app: &App, short: &str) -> bool {
     short.is_empty()
         || short == "default"
-        || themes(app).is_ok_and(|list| list.iter().any(|t| t.short == short))
+        || themes(app).is_ok_and(|list| list.iter().any(|t| t.short == short && t.usable))
 }
 
 // ---- installing a theme from an uploaded archive ----
@@ -320,6 +421,15 @@ fn publish(themes: &Path, staging: &Path, expect: Option<&str>) -> Result<Theme>
     let theme: Theme = serde_json::from_slice(&manifest).context("theme.json 格式不对")?;
     if !valid_short(&theme.short) {
         bail!("theme.json 里的 short 不能作为目录名：{:?}", theme.short);
+    }
+    // The one promise a manifest makes about what it needs. Installing a theme
+    // that asks for more would leave a directory this hub refuses to serve --
+    // and, for an update, would have replaced a working theme with an inert one.
+    if theme.api > THEME_API {
+        bail!(
+            "这个主题需要主题 API {}，当前 hub 只到 {THEME_API}；请先升级 hub，或安装更早的主题版本",
+            theme.api
+        );
     }
     // An update replaces the theme it was invoked for. A package whose manifest
     // carries a different `short` would instead install a second theme, or
@@ -491,6 +601,9 @@ mod tests {
             pack(&[("theme.json", r#"{"name":"x","short":"../evil","description":"","version":"1","author":"a","url":""}"#.as_bytes()), ("dist/index.html", b"x")], None),
             pack(&[("theme.json", manifest), ("dist/index.html", b"x")], Some(("dist/link", "/etc/passwd"))),
             pack(&[("dist/index.html", b"x")], None),
+            // A theme that asks for a level this binary does not implement:
+            // installing it would replace a working theme with an inert one.
+            pack(&[("theme.json", r#"{"name":"x","short":"aurora","description":"","version":"1","author":"a","url":"","api":99}"#.as_bytes()), ("dist/index.html", b"x")], None),
         ] {
             assert!(install(&base, bad, None).is_err());
         }
@@ -615,5 +728,122 @@ mod tests {
         let app = App::for_test(crate::db::Db::open(":memory:").unwrap());
         assert!(selectable(&app, "") && selectable(&app, "default"));
         assert!(!selectable(&app, "aurora"), "a theme that is not installed is not selectable");
+    }
+
+    /// The theme API level: what a manifest asks for, what this binary
+    /// implements, and what happens in between.
+    ///
+    /// The theme and the hub are released separately, so a theme can arrive from
+    /// a repository, from an uploaded archive, or from a directory someone copied
+    /// in -- and only the last of those never passed through `publish`. Serving
+    /// therefore checks on every request (`required_api`), and this is what that
+    /// check has to get right.
+    #[test]
+    fn a_theme_asking_for_more_than_this_binary_implements_is_listed_but_not_served() {
+        let base = std::env::temp_dir().join(format!(
+            "monitor-theme-api-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let write = |short: &str, manifest: String| {
+            let root = base.join(short);
+            fs::create_dir_all(root.join("dist")).unwrap();
+            fs::write(root.join("dist/index.html"), b"x").unwrap();
+            fs::write(root.join("theme.json"), manifest).unwrap();
+        };
+        // One this binary runs, one that asks for more, and one written before
+        // the field existed.
+        write(
+            "aurora",
+            r#"{"name":"a","short":"aurora","description":"","version":"1","author":"a","url":"","api":1}"#
+                .to_owned(),
+        );
+        write(
+            "future",
+            format!(
+                r#"{{"name":"f","short":"future","description":"","version":"1","author":"a","url":"","api":{}}}"#,
+                THEME_API + 1
+            ),
+        );
+        write(
+            "legacy",
+            r#"{"name":"l","short":"legacy","description":"","version":"1","author":"a","url":""}"#
+                .to_owned(),
+        );
+
+        let mut app = App::for_test(crate::db::Db::open(":memory:").unwrap());
+        app.themes = base.clone();
+
+        // All three are listed -- a theme the operator installed has to be
+        // visible with the reason it is inert, not silently absent.
+        let listed = themes(&app).unwrap();
+        let find = |short: &str| listed.iter().find(|t| t.short == short).unwrap().clone();
+        assert_eq!(find("aurora").api, 1);
+        assert_eq!(find("legacy").api, 1, "a manifest without the field is level 1");
+        assert!(find("aurora").usable && find("legacy").usable);
+        assert!(!find("future").usable);
+        assert_eq!(find("future").api, THEME_API + 1);
+
+        // Only the levels this binary implements are served or selectable. A
+        // refused theme falls back to the built-in copy rather than a blank page.
+        assert!(external_theme(&app, "aurora").is_some());
+        assert!(external_theme(&app, "legacy").is_some());
+        assert!(external_theme(&app, "future").is_none());
+        assert!(selectable(&app, "aurora"));
+        assert!(!selectable(&app, "future"));
+
+        // The level is read per request and remembered against the file's length
+        // and modification time, so a directory replaced under a running hub --
+        // which is how the installer and the update button both land -- takes
+        // effect without a restart.
+        write(
+            "aurora",
+            format!(
+                r#"{{"name":"a","short":"aurora","description":"","version":"1","author":"a","url":"","api":{}}}"#,
+                THEME_API + 1
+            ),
+        );
+        assert!(external_theme(&app, "aurora").is_none(), "a raised level has to be noticed");
+        write(
+            "aurora",
+            r#"{"name":"a","short":"aurora","description":"","version":"1","author":"a","url":"","api":1}"#
+                .to_owned(),
+        );
+        assert!(external_theme(&app, "aurora").is_some(), "and a lowered one too");
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The refusal has to name both numbers, or an operator cannot tell an
+    /// incompatible theme from a broken one.
+    #[test]
+    fn an_incompatible_theme_says_which_level_it_needs() {
+        let base = std::env::temp_dir().join(format!(
+            "monitor-theme-refuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let manifest = format!(
+            r#"{{"name":"f","short":"future","description":"","version":"1","author":"a","url":"","api":{}}}"#,
+            THEME_API + 1
+        );
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            fs::File::create(base.join("future.tar.gz")).unwrap(),
+            flate2::Compression::fast(),
+        ));
+        for (name, data) in [("theme.json", manifest.as_bytes()), ("dist/index.html", b"x".as_slice())] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            builder.append_data(&mut header, name, data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+        let error = install(&base, fs::File::open(base.join("future.tar.gz")).unwrap(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&(THEME_API + 1).to_string()), "{error}");
+        assert!(error.contains(&THEME_API.to_string()), "{error}");
+        fs::remove_dir_all(base).unwrap();
     }
 }

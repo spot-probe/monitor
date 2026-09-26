@@ -250,7 +250,7 @@ function NodeForm({ node, onClose, onSaved }: {
               the node is grouped, not what it costs. The public page derives its tabs
               from the values in use, so there is nothing to pick from -- only to type.
               Empty means the node appears under every tab. */}
-          <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。留空则出现在每个页签下">
+          <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。留空则只在「全部节点」下出现">
             <Input value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
@@ -1269,21 +1269,38 @@ type Theme = {
   version: string
   author: string
   url: string
+  // 主题自己声明的「至少需要哪一级主题 API」。hub 比它低的主题会被列出来但不能用，
+  // 也不会被服务（公开页回落到内置主题），所以面板要能说明原因。
+  api: number
+  usable: boolean
   selected: boolean
   // 内置主题在二进制里，没有目录可删。装上一份同名的会顶替它，那一份就是普通
   // 主题，删掉之后内置的重新顶上。
   builtin: boolean
 }
 
+// hub 每天读一次每个主题自己的仓库，结果随主题列表一起回来。这里只把「有新版」
+// 画成角标：真正写入的仍然只有 ⟳，检查本身不装任何东西。
+type Updates = {
+  checked_at: number
+  themes: Record<string, { latest?: string; newer: boolean; error?: string }>
+}
+
 function Themes() {
   const [themes, setThemes] = useState<Theme[] | null>(null)
+  const [updates, setUpdates] = useState<Updates | null>(null)
   const [busy, setBusy] = useState("")
   const [doomed, setDoomed] = useState<Theme | null>(null)
   const [zoomed, setZoomed] = useState<Theme | null>(null)
   const picker = useRef<HTMLInputElement>(null)
 
   const load = () =>
-    api<{ themes: Theme[] }>("/themes").then((data) => setThemes(data.themes)).catch(() => setThemes([]))
+    api<{ themes: Theme[]; updates: Updates }>("/themes")
+      .then((data) => {
+        setThemes(data.themes)
+        setUpdates(data.updates)
+      })
+      .catch(() => setThemes([]))
   useEffect(() => { load() }, [])
 
   async function select(short: string) {
@@ -1412,22 +1429,46 @@ function Themes() {
             </button>
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <h3 className="font-medium">{theme.name}</h3>
                   {theme.selected && <Badge>当前</Badge>}
                   {theme.builtin && <Badge variant="secondary" className="font-normal">内置</Badge>}
+                  {/* 有新版就画出来，这是这个页面唯一会主动提示的东西：hub 每天读一次
+                      仓库，装不装由人决定。 */}
+                  {updates?.themes[theme.short]?.newer && (
+                    <Badge className="tnum font-normal">
+                      {updates.themes[theme.short].latest} 可用
+                    </Badge>
+                  )}
+                  {/* 主题声明的 API 等级比 hub 高：它不会被服务（公开页用内置主题），
+                      所以既不能选也不该看起来正常。升级 hub 之后自动生效。 */}
+                  {!theme.usable && (
+                    <Badge variant="outline" className="font-normal text-muted-foreground">
+                      需要更新的 hub
+                    </Badge>
+                  )}
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">{theme.description}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <Button size="sm" variant={theme.selected ? "secondary" : "default"} disabled={theme.selected} onClick={() => select(theme.short)}>
+                <Button
+                  size="sm"
+                  variant={theme.selected ? "secondary" : "default"}
+                  disabled={theme.selected || !theme.usable}
+                  title={theme.usable ? undefined : "这个主题需要更新的 hub；升级后它会自动生效"}
+                  onClick={() => select(theme.short)}
+                >
                   {theme.selected ? "使用中" : "使用"}
                 </Button>
                 {updatable(theme) && (
                   <Button
                     size="icon"
                     variant="ghost"
-                    title="从 GitHub 更新"
+                    title={
+                      updates?.themes[theme.short]?.newer
+                        ? `从 GitHub 更新到 ${updates.themes[theme.short].latest}`
+                        : "从 GitHub 更新"
+                    }
                     disabled={!!busy}
                     onClick={() => update(theme)}
                   >
