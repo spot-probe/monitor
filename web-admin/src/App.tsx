@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react"
 import { ChevronRight, ExternalLink, KeyRound, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react"
 import { Toaster } from "sonner"
 
@@ -37,16 +37,42 @@ function usePath() {
   ] as const
 }
 
+const DARK_MEDIA = matchMedia("(prefers-color-scheme: dark)")
+
+/**
+ * The operator's own choice, or the system's while there is none. Only the toggle
+ * writes the choice down: persisting the system's answer at load would pin it, and
+ * the public theme is served from this same origin and reads this same key, so one
+ * visit to the panel would leave the status page in whichever mode the system
+ * happened to be in at that moment, no longer following it.
+ *
+ * The system's answer is subscribed to rather than copied into state: a flip
+ * landing between the first render and the effect that would have attached the
+ * listener is otherwise never heard, and the next one is a day away.
+ */
 function useTheme() {
-  const [dark, setDark] = useState(() => {
-    const saved = localStorage.getItem("theme")
-    return saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches
-  })
+  const [saved, setSaved] = useState(() => localStorage.getItem("theme"))
+  const system = useSyncExternalStore(
+    (notify) => {
+      DARK_MEDIA.addEventListener("change", notify)
+      return () => DARK_MEDIA.removeEventListener("change", notify)
+    },
+    () => DARK_MEDIA.matches,
+  )
+  const dark = saved ? saved === "dark" : system
+
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark)
-    localStorage.setItem("theme", dark ? "dark" : "light")
   }, [dark])
-  return [dark, () => setDark((d) => !d)] as const
+
+  return [
+    dark,
+    () => {
+      const next = dark ? "light" : "dark"
+      localStorage.setItem("theme", next)
+      setSaved(next)
+    },
+  ] as const
 }
 
 // Only meaningful at md and up, where the nav is a column; below that it is a

@@ -23,7 +23,7 @@ use axum::http::{header, Extensions, HeaderMap, StatusCode, Version};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
-use chrono::{Local, Months, NaiveDate};
+use chrono::{DateTime, Local, Months, NaiveDate, TimeZone, Timelike};
 use tokio::signal::unix::{signal, SignalKind};
 use tower_http::compression::Predicate;
 use tracing::{info, warn};
@@ -630,11 +630,19 @@ fn renew_online_nodes(app: &App) -> Result<()> {
 }
 
 /// Expires sessions, trims history, rolls over expiry dates and sends the daily
-/// expiry digest, once an hour.
+/// expiry digest: once at startup, then on the hour of the hub's clock.
+///
+/// On the hour because renewal falls due when the hub's date changes. Passes
+/// counted from startup would leave an online node shown expired for up to an
+/// hour after midnight; aligned, the midnight pass rolls it forward within
+/// seconds. A node that comes back online past its expiry date waits for the
+/// next hour.
 async fn housekeeping(app: Shared) {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3_600));
     loop {
-        ticker.tick().await;
+        // First, so the midnight pass does not wait on pruning.
+        if let Err(e) = renew_online_nodes(&app) {
+            warn!("rolling expiry dates failed: {e:#}");
+        }
         let keep = app.db.retention_days();
         if let Err(e) = app.db.prune(keep) {
             warn!("pruning history failed: {e:#}");
@@ -642,16 +650,20 @@ async fn housekeeping(app: Shared) {
         if let Err(e) = app.db.expire_sessions() {
             warn!("expiring sessions failed: {e:#}");
         }
-        if let Err(e) = renew_online_nodes(&app) {
-            warn!("rolling expiry dates failed: {e:#}");
-        }
         // After the roll-over, so the digest lists dates as they now stand.
         match notify::expiry_digest(&app, Local::now()) {
             Ok(Some(note)) => notify::send(&app, note),
             Ok(None) => {}
             Err(e) => warn!("expiry digest failed: {e:#}"),
         }
+        tokio::time::sleep(until_next_hour(Local::now())).await;
     }
+}
+
+/// Time from `now` to the start of the next hour on its clock. Read afresh on
+/// every pass, so a clock step or a daylight-saving change shifts no later one.
+fn until_next_hour<Tz: TimeZone>(now: DateTime<Tz>) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::from(3_600 - now.minute() * 60 - now.second()))
 }
 
 #[cfg(test)]
@@ -697,6 +709,15 @@ mod tests {
         // Not yet due, and one-off billing: both left unchanged.
         assert_eq!(renewed(d("2026-09-01"), "monthly", d("2026-08-28")), None);
         assert_eq!(renewed(d("2020-01-01"), "once", d("2026-08-28")), None);
+    }
+
+    /// The hour is the local one, which in a half-hour zone is not UTC's.
+    #[test]
+    fn housekeeping_wakes_on_the_local_hour() {
+        let india = chrono::FixedOffset::east_opt(5 * 3_600 + 1_800).unwrap();
+        let at = |h, m, s| until_next_hour(india.with_ymd_and_hms(2026, 9, 23, h, m, s).unwrap()).as_secs();
+        assert_eq!(at(23, 59, 30), 30, "the midnight pass lands as the date changes");
+        assert_eq!(at(10, 0, 0), 3_600);
     }
 
     #[tokio::test]
