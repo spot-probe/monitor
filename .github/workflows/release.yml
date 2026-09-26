@@ -17,6 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Checked before two cross builds rather than after: a v* tag cannot be
+      # moved without rewriting what the releases already point at, and one that
+      # disagrees with the manifest publishes binaries whose `--version` answers
+      # something else.
+      - if: startsWith(github.ref, 'refs/tags/')
+        name: the tag matches the manifest
+        run: |
+          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [ "$GITHUB_REF_NAME" = "v$manifest" ] ||
+            { echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $manifest"; exit 1; }
+
       # The default theme arrives as a published archive, verified against the
       # hash in web-theme.pin. Run on the runner rather than left to build.rs,
       # because the cross container below does not necessarily carry curl; it

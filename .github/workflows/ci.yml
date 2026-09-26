@@ -25,6 +25,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The shell is how a machine is first reached, and it runs where a mistake
+      # costs a node rather than a red test: the two installers and the theme
+      # fetcher. shellcheck ships on the runner; all three are POSIX sh.
+      - run: shellcheck install.sh install-hub.sh scripts/theme.sh
+
+      # The version lives in the manifest and in the lock, and one of them was
+      # forgotten once: v1.5.4 tagged a tree whose Cargo.lock still said 1.5.3, so
+      # `cargo build --locked` from that tag failed. A lockfile that disagrees is
+      # also what a hand-edit or a botched merge leaves behind, and it is cheaper
+      # to catch here than in a release.
+      - name: the version in Cargo.toml is the one in Cargo.lock
+        run: |
+          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          lock=$(sed -n '/^name = "monitor-hub"$/{n;s/^version = "\(.*\)"$/\1/p;q;}' Cargo.lock)
+          echo "Cargo.toml $manifest · Cargo.lock $lock"
+          [ -n "$manifest" ] && [ "$manifest" = "$lock" ] ||
+            { echo "::error::Cargo.toml says '$manifest', Cargo.lock says '$lock'"; exit 1; }
+
       # The default theme arrives as a published archive, verified against the
       # hash in web-theme.pin. Run here rather than left to build.rs so the
       # download happens on the runner: release builds go through cross, whose
