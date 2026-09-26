@@ -18,6 +18,11 @@ PATH="$PATH:/usr/sbin:/sbin"
 # theme and its node grouping, so installing upstream's build would be a different
 # program wearing the same name.
 REPO="spot-probe/monitor"
+# The default theme ships from its own repository and its own release, which is
+# what lets a theme change ship without a hub release. A fresh install fetches
+# the current one into the themes directory; the copy embedded in the binary
+# stays as the fallback for an install with no network.
+THEME_REPO="spot-probe/monitor-theme-default"
 SERVICE="monitor-hub"
 UNIT="/etc/systemd/system/monitor-hub.service"
 # Everything but the unit lives under one directory: the two binaries at the top,
@@ -33,6 +38,11 @@ USER_NAME="monitor"
 PORT="28080"
 PORT_SET=""
 SITE=""
+# Empty means "whatever the theme repository's latest release is"; --theme-tag
+# pins one. --no-theme skips the fetch entirely, which is what an air-gapped
+# install wants: the embedded copy needs nothing.
+THEME_TAG=""
+THEME_SKIP=""
 SITE_SET=""
 YES=""
 PURGE=""
@@ -108,6 +118,65 @@ old_port() {
 }
 
 # ---- install ----
+# The default theme's release, unpacked into <data>/themes/default/.
+#
+# That directory is exactly the layout the hub reads an installed theme from, so
+# the public page serves it from the next request on -- and it is also what makes
+# the theme updatable later from the panel.
+#
+# Every failure here is a warning rather than a stop. The binary already carries
+# a theme, an installer that died over an optional download would be an installer
+# that cannot run offline at all, and the operator would be left with no hub
+# rather than an older theme.
+fetch_theme() {
+	command -v tar >/dev/null 2>&1 || { warn "没有 tar，跳过主题下载（内置主题照常工作）"; return 0; }
+	base="https://github.com/$THEME_REPO/releases/latest/download"
+	[ -z "$THEME_TAG" ] || base="https://github.com/$THEME_REPO/releases/download/$THEME_TAG"
+	tmp="$(mktemp -d)"
+	curl -fsSL --max-time 300 "$base/theme.tar.gz" -o "$tmp/theme.tar.gz" || {
+		warn "主题下载失败，保留内置主题：$base/theme.tar.gz"
+		rm -rf "$tmp"
+		return 0
+	}
+	curl -fsSL --max-time 30 "$base/theme.tar.gz.sha256" -o "$tmp/theme.tar.gz.sha256" || {
+		warn "主题校验文件下载失败，保留内置主题"
+		rm -rf "$tmp"
+		return 0
+	}
+	want="$(sed -n 's/^\([0-9a-f]\{64\}\).*/\1/p' "$tmp/theme.tar.gz.sha256" | head -n 1)"
+	got="$(sha256sum "$tmp/theme.tar.gz" | cut -d' ' -f1)"
+	if [ -z "$want" ] || [ "$got" != "$want" ]; then
+		warn "主题校验不通过，保留内置主题（期望 ${want:-空}，实得 $got）"
+		rm -rf "$tmp"
+		return 0
+	fi
+	mkdir -p "$tmp/unpacked"
+	if ! tar xzf "$tmp/theme.tar.gz" -C "$tmp/unpacked"; then
+		warn "主题解包失败，保留内置主题"
+		rm -rf "$tmp"
+		return 0
+	fi
+	if [ ! -f "$tmp/unpacked/dist/index.html" ] || [ ! -f "$tmp/unpacked/theme.json" ]; then
+		warn "主题包里没有 dist/index.html 和 theme.json，保留内置主题"
+		rm -rf "$tmp"
+		return 0
+	fi
+	# Staged inside the themes directory, so the move into place is a rename on
+	# one filesystem rather than a copy that could be interrupted half-written.
+	install -d -m 0755 -o "$USER_NAME" "$DATA/themes"
+	stage="$DATA/themes/.stage-default"
+	rm -rf "$stage"
+	mv "$tmp/unpacked" "$stage"
+	rm -rf "$tmp"
+	# Replaced wholesale: a directory left over from an earlier install must not
+	# contribute a stale asset to the new one.
+	rm -rf "$DATA/themes/default"
+	mv "$stage" "$DATA/themes/default"
+	chown -R "$USER_NAME" "$DATA/themes/default"
+	version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$DATA/themes/default/theme.json" | head -n 1)"
+	ok "主题" "${THEME_TAG:-latest}${version:+ · $version}"
+}
+
 install_hub() {
 	case "$(uname -m)" in
 	x86_64 | amd64) arch=x86_64 ;;
@@ -205,6 +274,17 @@ install_hub() {
 	# the previous directory and its binary uncollected.
 	rm -rf "$tmp"
 	trap - EXIT
+
+	# Only when there is nothing there yet: an upgrade must not silently replace
+	# a theme the operator has since updated or replaced from the panel. The
+	# panel's own update check is what tells them a newer one exists.
+	if [ -n "$THEME_SKIP" ]; then
+		ok "主题" "按 --no-theme 跳过，用二进制内置的那一份"
+	elif [ -d "$DATA/themes/default" ]; then
+		ok "主题" "沿用已安装的 $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$DATA/themes/default/theme.json" 2>/dev/null | head -n 1)"
+	else
+		fetch_theme
+	fi
 
 	# Loopback only: the panel and the agent tokens never traverse a network in
 	# the clear, and there is no port to firewall. Reaching it is the reverse
@@ -428,6 +508,8 @@ monitor hub 安装器
                  用域名访问就自动对了。只有两种情况要填：你进面板的地址
                  不是节点能用的地址（比如走 SSH 隧道），或反代不发
                  X-Forwarded-Proto
+  --theme-tag <t>  装指定版本的主题，而不是该主题仓库的最新发布版
+  --no-theme     不下载主题，公开页用二进制内置的那一份（离线装机用）
   --yes, -y      跳过确认
   --help, -h     显示这段
 
@@ -436,6 +518,9 @@ hub 只监听 127.0.0.1，公网访问不到，需要自己配 nginx / caddy / C
 
 重跑一次就是升级：校验通过后才替换二进制，起不来会自动回滚到上一版；
 没写的参数沿用上次的，所以升级不会把端口和 --site 冲掉。
+
+首次安装会顺带把主题仓库当前发布版的主题装到 ${DATA}/themes/default/（校验 sha256），
+这样主题可以独立发版；升级不会动你已经装的主题。
 二进制和数据都在 $ROOT 下（数据库和主题在 ${DATA}），卸载默认保留数据。
 TXT
 }
@@ -449,6 +534,8 @@ while [ $# -gt 0 ]; do
 	--site) [ $# -ge 2 ] || die "--site 后面要跟地址"; SITE="$2"; SITE_SET=1; shift 2 ;;
 	--uninstall) ACTION=uninstall; shift ;;
 	--purge) ACTION=uninstall; PURGE=1; shift ;;
+	--theme-tag) [ $# -ge 2 ] || die "--theme-tag 后面要跟标签，例如 v1.7.0"; THEME_TAG="$2"; shift 2 ;;
+	--no-theme) THEME_SKIP=1; shift ;;
 	--yes | -y) YES=1; shift ;;
 	-h | --help) usage; exit 0 ;;
 	*) die "未知参数：$1（--help 看用法）" ;;
