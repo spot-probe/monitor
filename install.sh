@@ -65,11 +65,14 @@ if [ -n "$UNINSTALL" ]; then
 	exit 0
 fi
 
-[ -n "$SERVER" ] && { [ -n "$TOKEN" ] || [ -n "$REGISTER" ]; } || {
+# A server with neither a token nor a registration key has no way to join. Written
+# as one test rather than `A && B || C`, which reads as the same thing but is not:
+# the third command runs whenever the second fails, including when the first did.
+if [ -z "$SERVER" ] || { [ -z "$TOKEN" ] && [ -z "$REGISTER" ]; }; then
 	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure]" >&2
 	echo "       install.sh --uninstall" >&2
 	exit 2
-}
+fi
 # A setting of this machine, kept by a rerun without the flag for the reason
 # given for --iface below: the batch command carries none. It is read back from
 # the service definition the last install wrote; a first install takes 1.
@@ -80,7 +83,10 @@ if [ -z "$INTERVAL" ]; then
 	if [ -n "$INTERVAL" ]; then echo "keeping --interval $INTERVAL from the previous install"; else INTERVAL=1; fi
 fi
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
-[ "$INTERVAL" -ge 1 ] && [ "$INTERVAL" -le 3600 ] || { echo "interval must be from 1 to 3600" >&2; exit 2; }
+if [ "$INTERVAL" -lt 1 ] || [ "$INTERVAL" -gt 3600 ]; then
+	echo "interval must be from 1 to 3600" >&2
+	exit 2
+fi
 # Which interfaces carry this machine's traffic is known only on the machine,
 # and the batch command a fleet shares cannot carry one value per machine. A
 # rerun without --iface, the documented upgrade, therefore keeps the value in
@@ -209,7 +215,10 @@ echo "downloading monitor-agent ($ARCH)"
 TRIES=0
 while :; do
 	CODE=$(curl -sSL --max-time 300 -w '%{http_code}' "$URL" -o "$TMP") || exit 1
-	[ "$CODE" = 503 ] && [ "$TRIES" -lt 5 ] || break
+	# Anything other than a queue-full refusal is final; a 503 is retried five times.
+	if [ "$CODE" != 503 ] || [ "$TRIES" -ge 5 ]; then
+		break
+	fi
 	TRIES=$((TRIES + 1))
 	echo "the hub is busy relaying to other machines; retrying in 5 seconds"
 	sleep 5
