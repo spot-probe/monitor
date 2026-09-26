@@ -20,7 +20,9 @@ LOG_FILE="/var/log/monitor-agent.log"
 SERVER=""
 TOKEN=""
 REGISTER=""
-INTERVAL=1
+IFACE=""
+IFACE_SET=""
+INTERVAL=""
 INSECURE=""
 UNINSTALL=""
 
@@ -28,13 +30,14 @@ while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
 	# message rather than the usage below, and `shift 2` cannot proceed.
 	case "$1" in
-	--server | --token | --register | --interval)
+	--server | --token | --register | --iface | --interval)
 		[ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;;
 	esac
 	case "$1" in
 	--server) SERVER="$2"; shift 2 ;;
 	--token) TOKEN="$2"; shift 2 ;;
 	--register) REGISTER="$2"; shift 2 ;;
+	--iface) IFACE="$2"; IFACE_SET=1; shift 2 ;;
 	--interval) INTERVAL="$2"; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
@@ -63,12 +66,44 @@ if [ -n "$UNINSTALL" ]; then
 fi
 
 [ -n "$SERVER" ] && { [ -n "$TOKEN" ] || [ -n "$REGISTER" ]; } || {
-	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--insecure]" >&2
+	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure]" >&2
 	echo "       install.sh --uninstall" >&2
 	exit 2
 }
+# A setting of this machine, kept by a rerun without the flag for the reason
+# given for --iface below: the batch command carries none. It is read back from
+# the service definition the last install wrote; a first install takes 1.
+if [ -z "$INTERVAL" ]; then
+	INTERVAL=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
+		-e 's/^ExecStart=.* --interval \([0-9][0-9]*\).*/\1/p' \
+		-e 's/^command_args="--interval \([0-9][0-9]*\).*/\1/p' | tail -n 1)
+	if [ -n "$INTERVAL" ]; then echo "keeping --interval $INTERVAL from the previous install"; else INTERVAL=1; fi
+fi
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
 [ "$INTERVAL" -ge 1 ] && [ "$INTERVAL" -le 3600 ] || { echo "interval must be from 1 to 3600" >&2; exit 2; }
+# Which interfaces carry this machine's traffic is known only on the machine,
+# and the batch command a fleet shares cannot carry one value per machine. A
+# rerun without --iface, the documented upgrade, therefore keeps the value in
+# the env file; --iface '' clears it.
+#
+# A kept value is written back as found, the last assignment being the one
+# systemd and OpenRC apply: root wrote it, both already read it, and a hand edit
+# with quotes must not block every later upgrade. A value given here is held to
+# what the agent accepts -- full names separated by commas, each optionally led
+# by one `-` -- since the agent refuses anything else at startup and would
+# restart forever while this script reported success. The character set also
+# keeps it inert where OpenRC sources the file as shell.
+if [ -z "$IFACE_SET" ]; then
+	IFACE=$(sed -n 's/^MONITOR_IFACE=//p' "$ENV_FILE" 2>/dev/null | tail -n 1)
+	[ -z "$IFACE" ] || echo "keeping --iface $IFACE from the previous install"
+else
+	case ",$IFACE," in
+	*[!A-Za-z0-9._,-]* | *,-,* | *,--*)
+		echo "--iface takes full interface names separated by commas, each optionally led by -, not: $IFACE" >&2
+		exit 2
+		;;
+	esac
+fi
 # A bare host implies TLS, matching the upgrade the agent's ws_url() performs,
 # and the same reversal under --insecure where the hub has no TLS to upgrade to.
 # Without this the two diverge: the agent would dial wss:// while curl below
@@ -233,6 +268,7 @@ install -m 0755 "$TMP" "$BIN"
 MONITOR_SERVER=$SERVER
 MONITOR_TOKEN=$TOKEN
 ENV
+	[ -z "$IFACE" ] || printf 'MONITOR_IFACE=%s\n' "$IFACE" >>"$ENV_FILE"
 )
 
 if [ "$INIT" = openrc ]; then
