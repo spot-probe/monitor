@@ -2977,6 +2977,10 @@ mod tests {
         assert!(added.public);
         assert_eq!(added.billing_cycle, "monthly");
         assert_eq!(added.traffic_reset_day, 1);
+        // `billing_error` holds the currency to three letters, so this default is
+        // what keeps the panel's add-node request -- a name and nothing else --
+        // from being refused.
+        assert_eq!(added.currency, "USD");
 
         let created = create_node(Admin, State(app.clone()), domain_headers(), Ok(Json(added))).await;
         assert_eq!(created.status(), StatusCode::OK);
