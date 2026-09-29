@@ -51,7 +51,10 @@
   --chart-5: oklch(0.554 0.041 257.4); /* slate, for "other" */
 }
 
+/* `color-scheme` draws the browser's own controls -- the date picker icon,
+   number spinners, checkboxes, scrollbars -- in the dark palette as well. */
 .dark {
+  color-scheme: dark;
   --background: oklch(0.182 0.013 264.2); /* #0f1218 */
   --foreground: oklch(0.942 0.010 261.8); /* #e8ecf3 -- 14.7:1 on card */
   --card: oklch(0.217 0.017 264.1); /* #161a22 */

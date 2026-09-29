@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react"
 import { ChevronRight, ExternalLink, KeyRound, LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react"
 import { Toaster } from "sonner"
 
-import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin } from "@/components/Admin"
+import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin, updatesAvailable, useVersions } from "@/components/Admin"
 import { Login } from "@/components/Login"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -93,6 +93,10 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [meError, setMeError] = useState("")
   const { nodes, admin, agentLatest, error, refresh } = useNodes()
+  // Read here rather than on the update page alone: the navigation's dot and the
+  // page are the same answer, and reading it in both would ask the hub twice.
+  const { versions, reload: reloadVersions } = useVersions()
+  const updates = updatesAvailable(versions, nodes ?? [])
 
   const loadMe = useCallback(() => {
     // `|| "..."` because an empty message reads as no error: api() falls back to
@@ -217,6 +221,16 @@ export default function App() {
                     {/* Collapsed, the icon is the label and the title attribute is the
                         tooltip -- the alternative is a tooltip primitive for one case. */}
                     <span className={navOpen ? "" : "md:hidden"}>{label}</span>
+                    {/* One dot for both the hub and the agents; the page separates them.
+                        Absent when the owner switched the notice off, and when the lookup
+                        failed and there is nothing to say. */}
+                    {to === "/admin/update" && updates && (
+                      <span
+                        className="size-1.5 shrink-0 rounded-full bg-primary md:ml-auto"
+                        title="有新版本"
+                        aria-label="有新版本"
+                      />
+                    )}
                   </button>
                 )
               })}
@@ -362,6 +376,8 @@ export default function App() {
             <Admin
               path={path}
               agentLatest={agentLatest}
+              versions={versions}
+              reloadVersions={reloadVersions}
               nodes={sorted}
               refresh={refresh}
               // The hub's own public URL rather than this browser's address: the

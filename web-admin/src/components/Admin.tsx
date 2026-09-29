@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
+import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { addresses, api, changes, GIB, provisioningSite, trafficCorrection, upload, type Node, type PingTask } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask } from "@/lib/api"
 import { bytes, CYCLES, FOREVER, money, monthUsage, uptime } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -429,12 +429,48 @@ function registerCommand(site: string, key: string) {
   return `curl -fsSL ${site}/install.sh | sh -s -- ${args.join(" ")}`
 }
 
+// Also the same for every node, and carrying no credential: install.sh reads the
+// token and the hub address from the machine's own env file, so one command can
+// be sent to a whole fleet.
+function upgradeCommand(site: string) {
+  site = provisioningSite(site)
+  if (!site) return ""
+  return `curl -fsSL ${site}/install.sh | sh -s -- --upgrade`
+}
+
 // Carries no token, so it is the same for every node and remains valid after the
 // node is deleted.
 function uninstallCommand(site: string) {
   site = provisioningSite(site)
   if (!site) return ""
   return `curl -fsSL ${site}/install.sh | sh -s -- --uninstall`
+}
+
+export type Versions = { hub: string; hub_latest: string; agent_latest: string; notice: boolean }
+
+/**
+ * What is running and what is published. Read once per panel load: the hub holds
+ * the answer for six hours, so this costs a GitHub lookup a few times a day at
+ * most, and nothing at all while nobody opens the panel.
+ *
+ * A hub that cannot reach github.com answers with empty latest fields, which
+ * render as no update rather than as an error.
+ *
+ * It lives here and is passed down from `App` rather than read in both places:
+ * the navigation's dot and the page are the same answer, and reading it twice
+ * would make the panel ask twice.
+ */
+export function useVersions() {
+  const [versions, setVersions] = useState<Versions | null>(null)
+  const load = useCallback(() => api<Versions>("/version").then(setVersions).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+  return { versions, reload: load }
+}
+
+/** Whether anything is published that this hub or its agents are not running. */
+export function updatesAvailable(versions: Versions | null, nodes: Node[]): boolean {
+  if (!versions?.notice) return false
+  return behind(versions.hub, versions.hub_latest) || nodes.some((n) => n.agent_old)
 }
 
 // The window lives on the hub; this reads it back and counts down, which is also
@@ -561,6 +597,9 @@ function InstallDialog({ node, site, onClose, onRotated }: {
       <DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{node.name}</DialogTitle>
+          {/* The one place a single node's agent version is shown, and what an
+              issue report asks for. Empty until the node has reported once. */}
+          {node.agent_version && <DialogDescription>当前 agent v{node.agent_version}</DialogDescription>}
         </DialogHeader>
         <div className="space-y-5">
           <Field label="上报间隔（秒）" hint="1–3600，默认 1 秒">
@@ -646,6 +685,78 @@ function Expiry({ date }: { date: string | null }) {
   return <span className="tnum text-muted-foreground">{date}</span>
 }
 
+/**
+ * Ordering by drag or by ↑/↓, shared by the two tables that have one: the node
+ * list and the probe list. Both send the complete order on drop, because the hub
+ * refuses a list that does not name every row exactly once.
+ *
+ * `ids` is the order the hub returned. Rows are shown in the operator's own
+ * arrangement, with anything the hub has that it does not mention appended, so a
+ * tab left open across an insert cannot hide a row.
+ */
+function useDragOrder(ids: number[], url: string, refresh: () => void) {
+  const [manual, setManual] = useState<number[]>([])
+  const [dragging, setDragging] = useState<number | null>(null)
+  const before = useRef<number[]>([])
+  const order = [...manual.filter((id) => ids.includes(id)), ...ids.filter((id) => !manual.includes(id))]
+
+  // Rows are displaced while the pointer is down; the order is saved on drop.
+  function move(from: number, to: number) {
+    if (from < 0 || to < 0 || to >= order.length || from === to) return
+    const next = [...order]
+    next.splice(to, 0, ...next.splice(from, 1))
+    animate(() => setManual(next))
+    return next
+  }
+
+  // Dropped outside the table or cancelled with Escape: the order is restored.
+  function cancel() {
+    setDragging(null)
+    const rollback = before.current
+    if (rollback.length) animate(() => setManual(rollback))
+  }
+
+  function save(next: number[]) {
+    setDragging(null)
+    const rollback = before.current
+    if (!rollback.length || next.join() === rollback.join()) return
+    before.current = next
+    api(url, { method: "PUT", body: JSON.stringify({ ids: next }) }).then(refresh, (e: Error) => {
+      setManual(rollback)
+      toast.error(e.message)
+    })
+  }
+
+  return { order, dragging, setDragging, before, move, cancel, save }
+}
+
+/** The grip. `disabled` while the list is filtered: a drop sends every row's id,
+ *  and a filtered list only offers its own rows to drop onto. */
+function DragHandle({ onStart, onEnd, onKey, disabled, title, label }: {
+  onStart: (e: React.DragEvent) => void
+  onEnd: (e: React.DragEvent) => void
+  onKey: (e: React.KeyboardEvent) => void
+  disabled: boolean
+  title: string
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      draggable={!disabled}
+      disabled={disabled}
+      className="cursor-grab touch-none rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+      title={title}
+      aria-label={label}
+      onDragStart={onStart}
+      onDragEnd={onEnd}
+      onKeyDown={onKey}
+    >
+      <GripVertical className="size-4" />
+    </button>
+  )
+}
+
 function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
   nodes: Node[]
   refresh: () => void
@@ -662,17 +773,11 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
   const reg = useRegisterWindow()
   const [deleting, setDeleting] = useState<Node | null>(null)
   const [removing, setRemoving] = useState(false)
-  const [manualOrder, setManualOrder] = useState<number[]>([])
   const [query, setQuery] = useState("")
   const [group, setGroup] = useState("all")
-  const [dragging, setDragging] = useState<number | null>(null)
-  const orderBeforeDrag = useRef<number[]>([])
+  const drag = useDragOrder(nodes.map((node) => node.id), "/nodes/order", refresh)
   const byId = new Map(nodes.map((node) => [node.id, node]))
-  const orderedIds = new Set(manualOrder)
-  const order = [
-    ...manualOrder.map((id) => byId.get(id)).filter((node): node is Node => Boolean(node)),
-    ...nodes.filter((node) => !orderedIds.has(node.id)),
-  ]
+  const order = drag.order.map((id) => byId.get(id)).filter((node): node is Node => Boolean(node))
   // Name and address, the two things a row is looked up by. `order` itself stays
   // whole, because the order sent on drop is the order of every node.
   const needle = query.trim().toLowerCase()
@@ -702,34 +807,6 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
     } finally {
       setRemoving(false)
     }
-  }
-
-  // Rows are displaced while the pointer is down; the order is saved on drop.
-  function move(from: number, to: number) {
-    if (from < 0 || to < 0 || to >= order.length || from === to) return
-    const next = [...order]
-    next.splice(to, 0, ...next.splice(from, 1))
-    const ids = next.map((node) => node.id)
-    animate(() => setManualOrder(ids))
-    return ids
-  }
-
-  // Dropped outside the table or cancelled with Escape: the order is restored.
-  function cancel() {
-    setDragging(null)
-    const rollback = orderBeforeDrag.current
-    if (rollback.length) animate(() => setManualOrder(rollback))
-  }
-
-  function save(ids: number[]) {
-    setDragging(null)
-    const rollback = orderBeforeDrag.current
-    if (!rollback.length || ids.join() === rollback.join()) return
-    orderBeforeDrag.current = ids
-    api("/nodes/order", { method: "PUT", body: JSON.stringify({ ids }) }).then(refresh, (e: Error) => {
-      setManualOrder(rollback)
-      toast.error(e.message)
-    })
   }
 
   return (
@@ -789,43 +866,43 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
               <TableRow
                 key={n.id}
                 style={{ viewTransitionName: `node-${n.id}` }}
-                data-dragging={dragging === n.id || undefined}
+                data-dragging={drag.dragging === n.id || undefined}
                 className="transition-opacity data-[dragging]:opacity-40"
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move" }}
-                onDragEnter={() => dragging !== null && move(order.findIndex((node) => node.id === dragging), index)}
-                onDrop={(e) => { e.preventDefault(); save(order.map((node) => node.id)) }}
+                onDragEnter={() =>
+                  drag.dragging !== null &&
+                  drag.move(drag.order.findIndex((id) => id === drag.dragging), index)
+                }
+                onDrop={(e) => { e.preventDefault(); drag.save(drag.order) }}
               >
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      draggable={!needle}
+                    <DragHandle
                       // A drop sends the order of every node, and a filtered list
                       // offers only its own rows to drop onto, so the index below
                       // is the full one exactly while nothing is filtered out.
                       disabled={!!needle}
-                      className="cursor-grab touch-none rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
                       title={needle ? "清空搜索后可拖动排序" : "拖动排序"}
-                      aria-label={`拖动 ${n.name} 排序`}
-                      onDragStart={(e) => {
-                        orderBeforeDrag.current = order.map((node) => node.id)
-                        setDragging(n.id)
+                      label={`拖动 ${n.name} 排序`}
+                      onStart={(e) => {
+                        drag.before.current = drag.order
+                        drag.setDragging(n.id)
                         e.dataTransfer.effectAllowed = "move"
                         // Firefox refuses to start a drag without a payload.
                         e.dataTransfer.setData("text/plain", String(n.id))
                       }}
-                      onDragEnd={(e) => (e.dataTransfer.dropEffect === "none" ? cancel() : save(order.map((node) => node.id)))}
-                      onKeyDown={(e) => {
+                      onEnd={(e) =>
+                        e.dataTransfer.dropEffect === "none" ? drag.cancel() : drag.save(drag.order)
+                      }
+                      onKey={(e) => {
                         const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0
                         if (!delta) return
                         e.preventDefault()
-                        orderBeforeDrag.current = order.map((node) => node.id)
-                        const ids = move(index, index + delta)
-                        if (ids) save(ids)
+                        drag.before.current = drag.order
+                        const ids = drag.move(index, index + delta)
+                        if (ids) drag.save(ids)
                       }}
-                    >
-                      <GripVertical className="size-4" />
-                    </button>
+                    />
                     <div className="min-w-0 max-w-[200px] truncate font-medium" title={n.name}>
                       {n.name}
                     </div>
@@ -1027,12 +1104,18 @@ function Ping({ nodes }: { nodes: Node[] }) {
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState(false)
+  // The probe list is ordered the same way the node list is, and the order is the
+  // chart's: the public page draws its lines, colours and legend in this order.
+  const drag = useDragOrder(tasks.map((t) => t.id), "/ping-tasks/order", load)
+  const listed = new Map(tasks.map((t) => [t.id, t]))
+  const ordered = drag.order.map((id) => listed.get(id)).filter((t): t is PingTask => Boolean(t))
 
-  const load = () =>
-    api<{ tasks: PingTask[] }>("/ping-tasks")
+  function load() {
+    return api<{ tasks: PingTask[] }>("/ping-tasks")
       .then((d) => setTasks(d.tasks))
       .catch(() => {})
       .finally(() => setLoaded(true))
+  }
 
   // Fetched once the task list is known, and again whenever it changes. Samples from
   // several nodes are averaged per timestamp: each reports on its own clock, and a
@@ -1168,9 +1251,46 @@ function Ping({ nodes }: { nodes: Node[] }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {tasks.map((t) => (
-              <TableRow key={t.id}>
-                <TableCell className="font-medium">{t.name}</TableCell>
+            {ordered.map((t, index) => (
+              <TableRow
+                key={t.id}
+                data-dragging={drag.dragging === t.id || undefined}
+                className="transition-opacity data-[dragging]:opacity-40"
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move" }}
+                onDragEnter={() =>
+                  drag.dragging !== null &&
+                  drag.move(drag.order.findIndex((id) => id === drag.dragging), index)
+                }
+                onDrop={(e) => { e.preventDefault(); drag.save(drag.order) }}
+              >
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <DragHandle
+                      disabled={false}
+                      title="拖动排序"
+                      label={`拖动 ${t.name} 排序`}
+                      onStart={(e) => {
+                        drag.before.current = drag.order
+                        drag.setDragging(t.id)
+                        e.dataTransfer.effectAllowed = "move"
+                        // Firefox refuses to start a drag without a payload.
+                        e.dataTransfer.setData("text/plain", String(t.id))
+                      }}
+                      onEnd={(e) =>
+                        e.dataTransfer.dropEffect === "none" ? drag.cancel() : drag.save(drag.order)
+                      }
+                      onKey={(e) => {
+                        const delta = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0
+                        if (!delta) return
+                        e.preventDefault()
+                        drag.before.current = drag.order
+                        const ids = drag.move(index, index + delta)
+                        if (ids) drag.save(ids)
+                      }}
+                    />
+                    <span className="font-medium">{t.name}</span>
+                  </div>
+                </TableCell>
                 <TableCell className="tnum text-sm">{t.target}</TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
@@ -1340,6 +1460,8 @@ type Theme = {
   // 内置主题在二进制里，没有目录可删。装上一份同名的会顶替它，那一份就是普通
   // 主题，删掉之后内置的重新顶上。
   builtin: boolean
+  // theme.json 里声明的设置表单，原样转过来，由 configFields 挑出能画的字段。
+  config?: unknown
 }
 
 // hub 每天读一次每个主题自己的仓库，结果随主题列表一起回来。这里只把「有新版」
@@ -1349,12 +1471,212 @@ type Updates = {
   themes: Record<string, { latest?: string; newer: boolean; error?: string }>
 }
 
+// 主题在 theme.json 里声明的设置。hub 只存与默认值不同的项，其余由主题用自己的默认值
+// 补上，所以主题作者日后改了某个默认值，没动过这一项的站点会跟着变。
+//
+// 字段不多时是一列；多了改成宽对话框：按分组标题分节，左侧切换，右侧两列，否则几
+// 十项排成一条细长的列表。有改动的节在导航上带一个点。
+function ThemeSettings({ theme, saved, onClose }: {
+  theme: Theme
+  saved: Record<string, unknown>
+  onClose: () => void
+}) {
+  const form = configForm(theme.config)
+  const fields = configFields(theme.config)
+  const sections = configSections(form)
+  const large = fields.length > 6
+  const paged = large && sections.length > 1
+  const [current, setCurrent] = useState(0)
+  const [values, setValues] = useState(() => configValues(fields, saved))
+  // 保存时叠在什么之上。表单不认识的 key 会保留；只有「恢复默认」会把它们一起清掉
+  // ——那是从面板里丢掉一个已被新版主题移除的值的唯一办法。
+  const [base, setBase] = useState(saved)
+  const [saving, setSaving] = useState(false)
+  const set = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value }))
+  const label = (field: ConfigField) => field.label || field.key
+  // 数字框在编辑期间保留自己那段文本：空框表示「没有数字」，而 Number("") 会读成 0。
+  const typed = (f: ConfigField) =>
+    f.type !== "number" ? values[f.key] : values[f.key] === "" ? NaN : Number(values[f.key])
+  const differs = (f: ConfigField) => typed(f) !== f.default
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    const invalid = fields.find((f) => f.type === "number" && !fits(f, typed(f)))
+    if (invalid) {
+      // 浏览器只在屏幕上那些框上做 required/min/max 检查，而切走的分节已经不在
+      // 渲染里了 —— 所以这里自己查，并把出问题的那一节切回来。
+      setCurrent(Math.max(0, sections.findIndex((section) => section.fields.includes(invalid))))
+      const range =
+        invalid.min !== undefined && invalid.max !== undefined ? `${invalid.min}–${invalid.max} 之间的`
+          : invalid.min !== undefined ? `不小于 ${invalid.min} 的`
+            : invalid.max !== undefined ? `不大于 ${invalid.max} 的` : ""
+      return toast.error(`「${label(invalid)}」要填${range}数字`)
+    }
+    setSaving(true)
+    try {
+      await api(`/themes/${theme.short}/config`, {
+        method: "PUT",
+        body: JSON.stringify(configOverrides(fields, base, Object.fromEntries(fields.map((f) => [f.key, typed(f)])))),
+      })
+      toast.success("主题设置已保存，公开页刷新后生效")
+      onClose()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // 每一项都是同一形状的一行：带框，名字在左，控件在右。开关原先就是这个形状，
+  // 其余类型走 `Field`（名字压在控件上方、没有框）——同一个分节里两种形态并存，
+  // 看起来像两套东西。多行的 `text` 是唯一例外：它塞不进右侧那一列，所以保留框、
+  // 上下排列。
+  //
+  // `items-start`：一行里只要有一项带了说明文字就会变高，标题要对齐在同一水平线
+  // 上；短的那一行本来高度就一样，所以只影响高的那个。
+  const ROW = "h-full gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm"
+
+  const named = (field: ConfigField) => (
+    <span className="min-w-0">
+      <span className="block font-medium">{label(field)}</span>
+      {field.help && <span className="mt-0.5 block text-xs text-muted-foreground">{field.help}</span>}
+    </span>
+  )
+
+  const input = (field: ConfigField) => {
+    if (field.type === "text") {
+      return (
+        <div key={field.key} className={`flex flex-col items-stretch ${ROW}`}>
+          {named(field)}
+          <textarea
+            rows={4}
+            className={`${TEXT_BOX} text-sm`}
+            value={values[field.key] as string}
+            onChange={(e) => set(field.key, e.target.value)}
+          />
+        </div>
+      )
+    }
+    if (field.type === "boolean") {
+      // 与「公开显示」「离线通知」同一形状：开关自己可点，文字只是说明。
+      return (
+        <label key={field.key} className={`flex cursor-pointer items-start justify-between ${ROW}`}>
+          {named(field)}
+          <Switch checked={values[field.key] as boolean} onCheckedChange={(v) => set(field.key, v)} />
+        </label>
+      )
+    }
+    return (
+      <div key={field.key} className={`flex items-start justify-between ${ROW}`}>
+        {named(field)}
+        <div className="w-40 shrink-0">
+          {field.type === "select" ? (
+            <Select value={values[field.key] as string} onValueChange={(v) => set(field.key, v)}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {field.options!.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>{o.label || o.value}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : field.type === "number" ? (
+            <Input
+              type="number"
+              required
+              step="any"
+              min={field.min}
+              max={field.max}
+              value={String(values[field.key])}
+              onChange={(e) => set(field.key, e.target.value)}
+            />
+          ) : (
+            <Input value={values[field.key] as string} onChange={(e) => set(field.key, e.target.value)} />
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        // `max-h`, not `h`: it was a fixed height for the 49-field form this
+        // layout was written against, and with a handful of fields that is a
+        // dialog two-thirds empty below the last one.
+        className={large ? "flex max-h-[min(46rem,calc(100dvh-2rem))] flex-col overflow-hidden sm:max-w-4xl" : "sm:max-w-lg"}
+      >
+        <DialogHeader>
+          <DialogTitle>{theme.name} 设置</DialogTitle>
+        </DialogHeader>
+        <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={save}>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row">
+            {paged && (
+              <nav className="-mx-1 flex shrink-0 gap-1 overflow-x-auto px-1 pb-1 sm:mx-0 sm:w-48 sm:flex-col sm:overflow-y-auto sm:px-0">
+                {sections.map((section, index) => (
+                  <button
+                    key={index}
+                    type="button"
+                    aria-current={index === current}
+                    onClick={() => setCurrent(index)}
+                    className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
+                      index === current ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    }`}
+                  >
+                    <span className="whitespace-nowrap sm:whitespace-normal">{section.label}</span>
+                    {section.fields.some(differs) && (
+                      <span className="ml-auto size-1.5 shrink-0 rounded-full bg-primary" title="有改动" />
+                    )}
+                  </button>
+                ))}
+              </nav>
+            )}
+            <div className={`min-h-0 flex-1 ${large ? "overflow-y-auto pr-1" : ""}`}>
+              <div className={`grid gap-4 ${large ? "sm:grid-cols-2" : ""}`}>
+                {paged
+                  ? sections[current].fields.map(input)
+                  : form.map((entry, index) =>
+                      entry.type === "title" ? (
+                        <h3 key={`title-${index}`} className={`pt-2 text-sm font-semibold first:pt-0 ${large ? "sm:col-span-2" : ""}`}>
+                          {entry.label}
+                        </h3>
+                      ) : (
+                        input(entry)
+                      ),
+                    )}
+              </div>
+            </div>
+          </div>
+          {/* One row on a phone as well: stacked, the three buttons would take a
+              third of the height the fields have. */}
+          <DialogFooter className="flex-row items-center border-t pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="mr-auto"
+              onClick={() => {
+                setValues(Object.fromEntries(fields.map((f) => [f.key, f.default])))
+                setBase({})
+              }}
+            >
+              {paged ? "全部恢复默认" : "恢复默认"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={onClose}>取消</Button>
+            <Button type="submit" disabled={saving}>保存</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function Themes() {
   const [themes, setThemes] = useState<Theme[] | null>(null)
   const [updates, setUpdates] = useState<Updates | null>(null)
   const [busy, setBusy] = useState("")
   const [doomed, setDoomed] = useState<Theme | null>(null)
   const [zoomed, setZoomed] = useState<Theme | null>(null)
+  const [configuring, setConfiguring] = useState<{ theme: Theme; saved: Record<string, unknown> } | null>(null)
   const picker = useRef<HTMLInputElement>(null)
 
   const load = () =>
@@ -1408,6 +1730,15 @@ function Themes() {
       toast.error((e as Error).message)
     } finally {
       setBusy("")
+    }
+  }
+
+  // 打开时先读，而不是让对话框自己去读：否则表单会先闪一下默认值。
+  async function configure(theme: Theme) {
+    try {
+      setConfiguring({ theme, saved: await api(`/themes/${theme.short}/config`) })
+    } catch (e) {
+      toast.error((e as Error).message)
     }
   }
 
@@ -1523,6 +1854,11 @@ function Themes() {
                 >
                   {theme.selected ? "使用中" : "使用"}
                 </Button>
+                {configFields(theme.config).length > 0 && (
+                  <Button size="icon" variant="ghost" title="主题设置" onClick={() => configure(theme)}>
+                    <SlidersHorizontal />
+                  </Button>
+                )}
                 {updatable(theme) && (
                   <Button
                     size="icon"
@@ -1580,6 +1916,8 @@ function Themes() {
           </DialogContent>
         </Dialog>
       )}
+
+      {configuring && <ThemeSettings {...configuring} onClose={() => setConfiguring(null)} />}
 
       {doomed && (
         <ConfirmDialog
@@ -1698,8 +2036,9 @@ function SettingsTab() {
   )
 }
 
-const TEXTAREA =
-  "w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+const TEXT_BOX =
+  "w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+const TEXTAREA = `${TEXT_BOX} font-mono text-xs`
 
 // One offline alert, filled in the way the hub fills a template: in a single pass,
 // JSON-escaped for the webhook body. Previews only; nothing here is sent.
@@ -2387,6 +2726,194 @@ function Data() {
 // reload returns to the same section. Grouped the way the work divides: the machines
 // and what they report, then the settings that apply to all of them. Seven flat items
 // gave no hint that 通知 and 节点 are different kinds of thing.
+// Our own repositories, not upstream's: the release a version names is published
+// here.
+const releaseUrl = (repo: string, version: string) => `https://github.com/spot-probe/${repo}/releases/tag/v${version}`
+const BATCH_DOCS = "https://spot-probe-docs.hualala.workers.dev/install/agent"
+
+/** `v1.2.0 → v1.3.0` when something is published, the running version alone otherwise. */
+function VersionPair({ current, latest }: { current: string; latest: string }) {
+  if (!behind(current, latest)) {
+    return <span className="text-xs text-muted-foreground">{latest ? `已是最新 v${current}` : `当前 v${current}`}</span>
+  }
+  return (
+    <span className="text-xs text-muted-foreground">
+      v{current} <span className="px-0.5">→</span>
+      <span className="ml-0.5 font-medium text-foreground">v{latest}</span>
+    </span>
+  )
+}
+
+/** Outdated nodes grouped by the version they run, oldest first. */
+function byVersion(nodes: Node[]): [string, Node[]][] {
+  const groups = new Map<string, Node[]>()
+  for (const n of nodes) groups.set(n.agent_version, [...(groups.get(n.agent_version) ?? []), n])
+  return [...groups].sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+}
+
+/**
+ * What is published for the hub and for the agents.
+ *
+ * Its own route rather than a banner on the node list; the dot in the navigation
+ * is what says there is something here.
+ *
+ * Which nodes are behind is the hub's own verdict (`agent_old`), not a comparison
+ * made again here: the chart in the node table and this list then cannot disagree.
+ *
+ * The hub card names the release alone -- how to take it depends on how the hub
+ * was installed, script or container, which the hub cannot tell.
+ */
+function Update({ versions, reload, nodes, site, canProvision, agentLatest }: {
+  versions: Versions | null
+  reload: () => void
+  nodes: Node[]
+  site: string
+  canProvision: boolean
+  agentLatest: string | null
+}) {
+  const [saving, setSaving] = useState(false)
+  if (!versions) return null
+  const outdated = nodes.filter((n) => n.agent_old)
+  const offline = outdated.filter((n) => !n.online).length
+  // The same refusal the node page carries for its install command, and for the
+  // same reason: a command naming a plaintext origin is one the agent refuses.
+  const upgrade = canProvision ? upgradeCommand(site) : ""
+  const unreachable = !versions.hub_latest && !versions.agent_latest
+  // The command does not depend on the lookup, so it is offered whenever it was
+  // ever needed -- including on a hub that reads agents through the GitHub proxy,
+  // which is exactly the hub that cannot read tags.
+  const needsAgents = outdated.length > 0 || !agentLatest
+
+  // Applied on the spot: one switch, and the navigation changes with it.
+  async function setNotice(on: boolean) {
+    setSaving(true)
+    try {
+      await api("/settings", { method: "PUT", body: JSON.stringify({ update_notice: on ? "on" : "off" }) })
+      reload()
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {unreachable && (
+        <Card className="p-5">
+          <p className="text-sm text-muted-foreground">
+            查不到最新版本：这台 hub 连不上 api.github.com。面板里配的 GitHub 代理只用于下载，不作用于这一项。
+          </p>
+        </Card>
+      )}
+
+      <Card className="gap-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">hub</h3>
+          <div className="flex items-center gap-3">
+            <VersionPair current={versions.hub} latest={versions.hub_latest} />
+            {behind(versions.hub, versions.hub_latest) && (
+              <Button size="sm" variant="ghost" asChild>
+                <a href={releaseUrl("monitor", versions.hub_latest)} target="_blank" rel="noreferrer">
+                  发布说明
+                </a>
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="gap-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">agent</h3>
+          <span className="text-xs text-muted-foreground">
+            {agentLatest
+              ? outdated.length
+                ? <>最新 v{agentLatest} · <span className="font-medium text-foreground">{outdated.length} 台待升级</span></>
+                : `全部已是最新 v${agentLatest}`
+              : "查不到版本"}
+          </span>
+        </div>
+        {needsAgents && (
+          <>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              以 root 在每台机器上执行一次。命令不含凭证、沿用机器上已有的设置，不会新建节点，也不会消耗注册窗口。
+            </p>
+            {upgrade ? (
+              <>
+                <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed select-all">
+                  {upgrade}
+                </pre>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => copy(upgrade)}>
+                    <Copy className="size-4" /> 复制命令
+                  </Button>
+                  {agentLatest && (
+                    <Button size="sm" variant="ghost" asChild>
+                      <a href={releaseUrl("agent", agentLatest)} target="_blank" rel="noreferrer">
+                        发布说明
+                      </a>
+                    </Button>
+                  )}
+                  <Button size="sm" variant="ghost" asChild>
+                    <a href={BATCH_DOCS} target="_blank" rel="noreferrer">
+                      批量升级的做法
+                    </a>
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">请通过 HTTPS 域名访问面板后生成升级命令。</p>
+            )}
+            {/* Collapsed until asked for, grouped by version, and bounded in height
+                once open, so any number of nodes stays one line on the page. */}
+            {outdated.length > 0 && (
+              <details className="group border-t pt-3">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-md text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-1.5">
+                    <ChevronRight className="size-4 transition-transform group-open:rotate-90" />
+                    待升级的节点
+                  </span>
+                  {offline > 0 && <span>其中 {offline} 台离线</span>}
+                </summary>
+                <div className="mt-3 max-h-60 space-y-3 overflow-auto">
+                  {byVersion(outdated).map(([version, group]) => (
+                    <div key={version} className="space-y-1.5">
+                      <div className="text-xs text-muted-foreground">v{version} · {group.length} 台</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {group.map((n) => (
+                          <Badge
+                            key={n.id}
+                            variant="secondary"
+                            className={`font-normal ${n.online ? "" : "opacity-50"}`}
+                            title={n.online ? undefined : "离线"}
+                          >
+                            {n.name}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </>
+        )}
+      </Card>
+
+      <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
+        <span>
+          <span className="block font-medium">更新提醒</span>
+          <span className="mt-0.5 block text-xs text-muted-foreground">
+            有新版本时在导航的「更新」旁显示小圆点。关闭只是不再显示圆点，这一页照常检查
+          </span>
+        </span>
+        <Switch checked={versions.notice} disabled={saving} onCheckedChange={setNotice} />
+      </label>
+    </div>
+  )
+}
+
 export const ADMIN_SECTIONS = [
   {
     group: "资源管理",
@@ -2403,6 +2930,7 @@ export const ADMIN_SECTIONS = [
       { path: "/admin/themes", label: "主题", icon: Palette },
       { path: "/admin/security", label: "安全", icon: Shield },
       { path: "/admin/settings", label: "设置", icon: Settings },
+      { path: "/admin/update", label: "更新", icon: ArrowUpCircle },
     ],
   },
 ]
@@ -2417,6 +2945,8 @@ export function Admin({
   site,
   canProvision,
   agentLatest,
+  versions,
+  reloadVersions,
 }: {
   path: string
   nodes: Node[]
@@ -2424,6 +2954,9 @@ export function Admin({
   site: string
   canProvision: boolean
   agentLatest: string | null
+  /** Read once in `App`, which also marks the navigation with it. */
+  versions: Versions | null
+  reloadVersions: () => void
 }) {
   return (
     <div className="min-w-0">
@@ -2439,6 +2972,15 @@ export function Admin({
           <Security site={site} />
         ) : path === "/admin/settings" ? (
           <SettingsTab />
+        ) : path === "/admin/update" ? (
+          <Update
+            versions={versions}
+            reload={reloadVersions}
+            nodes={nodes}
+            site={site}
+            canProvision={canProvision}
+            agentLatest={agentLatest}
+          />
         ) : (
           <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} agentLatest={agentLatest} />
         )}
