@@ -180,7 +180,7 @@ pub async fn latest(app: &App, owner: &str, repo: &str) -> Result<Release> {
         .map_err(refused)?
         .json()
         .await
-        .context("读不到 {owner}/{repo} 的最新 release：GitHub 的回复无法识别，稍后再试")?;
+        .with_context(|| format!("读不到 {owner}/{repo} 的最新 release：GitHub 的回复无法识别，稍后再试"))?;
     if !path_segment(&release.tag_name) {
         bail!("release 的 tag {:?} 不能出现在下载地址里", release.tag_name);
     }

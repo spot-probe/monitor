@@ -383,16 +383,28 @@ function BillingForm({ node, onClose, onSaved }: {
   // Text rather than a number: a numeric state cannot represent an empty field,
   // so clearing it would snap back to 0 mid-entry. Empty means free.
   const [price, setPrice] = useState(node.price > 0 ? String(node.price) : "")
-  // Whole years are entered in years, the way a five-year plan is sold.
+  // Whole years are entered in years, the way a five-year plan is sold. A stored
+  // length this panel cannot read -- an older hub accepted any string, so a
+  // database may hold `weekly` or `2y` -- gets controls of its own, and the value
+  // is passed back untouched unless the admin actually moves them: turning it
+  // into `yearly` behind their back would be a silent edit of their billing.
   const months = cycleMonths(node.billing_cycle)
-  const [unit, setUnit] = useState(months === 0 ? "once" : months % 12 ? "months" : "years")
-  const [count, setCount] = useState(String(months % 12 ? months : months / 12 || 1))
+  const readable = Number.isFinite(months)
+  const startUnit = readable ? (months === 0 ? "once" : months % 12 ? "months" : "years") : "months"
+  const startCount = readable ? String(months % 12 ? months : months / 12 || 1) : "1"
+  const [unit, setUnit] = useState(startUnit)
+  const [count, setCount] = useState(startCount)
   const [saving, setSaving] = useState(false)
   const set = <K extends keyof Node>(k: K, v: Node[K]) => setForm((f) => ({ ...f, [k]: v }))
 
   async function save() {
-    // The hub refuses a length out of range and stores a named one by name, so
-    // an unchanged length is compared in months, not in spelling.
+    // The cycle is sent only when one of its two controls was touched -- an
+    // untouched pair means "leave the stored length alone", which is also what
+    // keeps a stored length this panel cannot read from being rewritten.
+    const touched = unit !== startUnit || count !== startCount
+    if (touched && unit !== "once" && !(Number.isInteger(Number(count)) && Number(count) >= 1)) {
+      return toast.error("付款周期要填 1 以上的整数")
+    }
     const cycle = unit === "once" ? "once" : `${Number(count) * (unit === "years" ? 12 : 1)}m`
     setSaving(true)
     try {
@@ -401,7 +413,7 @@ function BillingForm({ node, onClose, onSaved }: {
         body: JSON.stringify(changes(node, {
           price: Math.max(0, Number(price) || 0),
           currency: form.currency,
-          billing_cycle: cycleMonths(cycle) === months ? node.billing_cycle : cycle,
+          billing_cycle: touched ? cycle : node.billing_cycle,
           expires_at: form.expires_at || null,
         })),
       })
@@ -449,7 +461,14 @@ function BillingForm({ node, onClose, onSaved }: {
             </Field>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="付款周期" hint="1 个月到 100 年，或一次性">
+            <Field
+              label="付款周期"
+              hint={
+                readable
+                  ? "1 个月到 100 年，或一次性"
+                  : `现在存的是「${node.billing_cycle || "空"}」，不动这里就保持原样`
+              }
+            >
               <div className="flex items-center gap-2">
                 <Input
                   type="number"
@@ -562,8 +581,12 @@ export function useVersions() {
       api<Versions>("/version")
         .then((v) => {
           if (!stop) setVersions(v)
-          // Empty latest is the hub saying its own check has not landed yet, or
-          // that it cannot reach GitHub; both are worth one more look.
+          // Empty latest is worth one more look when the hub's own check had not
+          // landed yet -- a hub that has just started asks again on this call,
+          // so the next attempt can find the answer. A hub that cannot reach
+          // GitHub at all answers the same way every time: it caches the empty
+          // result (ten minutes for the hub release, six hours for the agent),
+          // so those retries are spent, not wasted -- two requests, bounded.
           if (!v.hub_latest && !v.agent_latest) retry(tries)
         })
         .catch(() => retry(tries))
