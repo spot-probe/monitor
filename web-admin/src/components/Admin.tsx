@@ -2774,7 +2774,10 @@ function Data() {
 // Our own repositories, not upstream's: the release a version names is published
 // here.
 const releaseUrl = (repo: string, version: string) => `https://github.com/spot-probe/${repo}/releases/tag/v${version}`
-const BATCH_DOCS = "https://spot-probe-docs.hualala.workers.dev/install/agent"
+// The page for this card's own subject. It used to point at 接入节点, which
+// explains the first install and leaves the reader to find the upgrade page --
+// the one page that answers "how do I send this to every machine" is /install/batch.
+const BATCH_DOCS = "https://spot-probe-docs.hualala.workers.dev/install/batch"
 
 /** `v1.2.0 → v1.3.0` when something is published, the running version alone otherwise. */
 function VersionPair({ current, latest }: { current: string; latest: string }) {
