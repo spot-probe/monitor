@@ -391,6 +391,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(&args.themes)?;
+    // Before the first connection: the setting is process-wide, and its whole
+    // point is to be in place before anything opens the database.
+    if let Err(e) = db::temp_files_beside(&args.database) {
+        warn!("SQLite keeps its temporary files in its default directory: {e:#}");
+    }
     let (notes, inbox) = tokio::sync::mpsc::channel(notify::QUEUE);
     let app = Arc::new(App::new(Db::open(&args.database)?, args.site.clone(), args.themes, notes));
     let url = advertised_url(&args.site, args.listen);
@@ -637,17 +642,34 @@ fn new_password(db: &Db) -> Result<String> {
     Ok(password)
 }
 
+/// Cycles stored under a name. Any other length is stored as `<n>m`; the names
+/// remain because themes built for hub 1.3.0 and earlier recognize only these.
+const NAMED_CYCLES: [(&str, u32); 6] = [
+    ("monthly", 1),
+    ("quarterly", 3),
+    ("semiannual", 6),
+    ("yearly", 12),
+    ("biennial", 24),
+    ("triennial", 36),
+];
+
+/// The longest cycle accepted, in months: 100 years.
+const MAX_CYCLE: u32 = 1_200;
+
 /// Billing cycles as whole months. `once` has none, so it never rolls over.
 fn cycle_months(cycle: &str) -> Option<u32> {
-    Some(match cycle {
-        "monthly" => 1,
-        "quarterly" => 3,
-        "semiannual" => 6,
-        "yearly" => 12,
-        "biennial" => 24,
-        "triennial" => 36,
-        _ => return None,
-    })
+    match NAMED_CYCLES.iter().find(|(name, _)| *name == cycle) {
+        Some(&(_, months)) => Some(months),
+        None => cycle.strip_suffix('m')?.parse().ok().filter(|m| (1..=MAX_CYCLE).contains(m)),
+    }
+}
+
+/// The stored spelling of a cycle of `months`: its name where it has one.
+fn cycle_name(months: u32) -> String {
+    NAMED_CYCLES
+        .iter()
+        .find(|(_, m)| *m == months)
+        .map_or_else(|| format!("{months}m"), |(name, _)| (*name).into())
 }
 
 /// A node still reporting past its expiry date has been renewed, so the date is

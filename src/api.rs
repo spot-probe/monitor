@@ -719,6 +719,48 @@ async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>
 
 // ---- panel write paths ----
 
+/// Why provisioning was refused, or `None` when it was not. Named rather than
+/// collapsed into a boolean: the admin looking at a disabled button cannot read
+/// the journal, and each cause is fixed by a different person -- the reverse
+/// proxy, the `--site` flag, or the browser.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ProvisionBlock {
+    /// No readable `Host`, or one that is not a domain: an IP entry point, or a
+    /// proxy that rewrote Host to its own upstream address.
+    Host,
+    /// Nothing in the request says https.
+    Https,
+    /// `--site` is set and is not an https domain.
+    Site,
+    /// `Origin` disagrees with `https://<Host>`.
+    Origin,
+}
+
+impl ProvisionBlock {
+    /// The code the panel keys on. Part of the response, so it is stable.
+    fn code(self) -> &'static str {
+        match self {
+            ProvisionBlock::Host => "host",
+            ProvisionBlock::Https => "https",
+            ProvisionBlock::Site => "site",
+            ProvisionBlock::Origin => "origin",
+        }
+    }
+}
+
+/// The failing half, in the words the panel repeats back.
+fn provisioning_hint(block: ProvisionBlock) -> &'static str {
+    match block {
+        ProvisionBlock::Host => {
+            "这次请求的 Host 不是域名（是 IP，或反向代理把 Host 改写成了上游地址）；\
+             nginx 需要 proxy_set_header Host $host，Apache 需要 ProxyPreserveHost On"
+        }
+        ProvisionBlock::Https => "这次请求没有说明自己是 https；反向代理要发 X-Forwarded-Proto: https",
+        ProvisionBlock::Site => "hub 启动参数 --site 不是 https 域名（写成了 IP 或带了路径）",
+        ProvisionBlock::Origin => "浏览器发的 Origin 与 https://<Host> 不一致；检查反向代理是否改写了 Host",
+    }
+}
+
 /// Names all three causes. A reverse proxy that does not preserve Host forwards
 /// its own upstream address, which is an IP and therefore never an https domain
 /// entry, while the admin reading this is already on the domain -- so the first
@@ -730,6 +772,11 @@ async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>
 const PROVISIONING_DENIED: &str = "请通过 HTTPS 域名访问面板后添加或安装节点；\
      如果已经是域名访问，检查反向代理是否透传了 Host 与 X-Forwarded-Proto（见 README 的反代配置）；\
      两者都没问题就检查 hub 的启动参数 --site，它必须是 https:// 加域名，不能是 IP、不能带路径";
+
+/// The refusal body: the general paragraph, then the half that actually failed.
+fn provisioning_denied(block: ProvisionBlock) -> String {
+    format!("{PROVISIONING_DENIED}。这次是：{}", provisioning_hint(block))
+}
 
 pub(crate) fn https_domain(site: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(site).ok()?;
@@ -753,20 +800,23 @@ pub(crate) fn https_domain(site: &str) -> Option<reqwest::Url> {
 /// a genuine IP entry point: provisioning stops working across an upgrade, the
 /// message implicates the address bar, and nothing records the header actually
 /// responsible.
-fn provisioning_allowed(app: &App, headers: &HeaderMap) -> bool {
+fn provisioning_block(app: &App, headers: &HeaderMap) -> Option<ProvisionBlock> {
     let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
         debug!("provisioning refused: the request carries no readable Host header");
-        return false;
+        return Some(ProvisionBlock::Host);
     };
     let forwarded = crate::forwarded_proto(headers);
     let https = forwarded.map_or_else(|| app.site.starts_with("https://"), |scheme| scheme == "https");
-    if !https || (!app.site.is_empty() && https_domain(&app.site).is_none()) {
+    if !https {
         debug!(
-            "provisioning refused: not an https domain entry (X-Forwarded-Proto={forwarded:?}, --site={:?}); \
-             a TLS-terminating proxy has to send X-Forwarded-Proto: https",
-            app.site
+            "provisioning refused: not an https entry (X-Forwarded-Proto={forwarded:?}); \
+             a TLS-terminating proxy has to send X-Forwarded-Proto: https"
         );
-        return false;
+        return Some(ProvisionBlock::Https);
+    }
+    if !app.site.is_empty() && https_domain(&app.site).is_none() {
+        debug!("provisioning refused: --site {:?} is not an https domain", app.site);
+        return Some(ProvisionBlock::Site);
     }
     let Some(url) = https_domain(&format!("https://{host}")) else {
         debug!(
@@ -774,15 +824,18 @@ fn provisioning_allowed(app: &App, headers: &HeaderMap) -> bool {
              not preserve Host sends its own upstream address here -- nginx needs \
              `proxy_set_header Host $host`, Apache `ProxyPreserveHost On`"
         );
-        return false;
+        return Some(ProvisionBlock::Host);
     };
     let expected = url.origin().ascii_serialization();
-    let allowed =
-        headers.get(header::ORIGIN).is_none_or(|origin| origin.to_str().ok() == Some(expected.as_str()));
-    if !allowed {
+    if headers.get(header::ORIGIN).is_some_and(|origin| origin.to_str().ok() != Some(expected.as_str())) {
         debug!("provisioning refused: Origin {:?} is not {expected}", headers.get(header::ORIGIN));
+        return Some(ProvisionBlock::Origin);
     }
-    allowed
+    None
+}
+
+fn provisioning_allowed(app: &App, headers: &HeaderMap) -> bool {
+    provisioning_block(app, headers).is_none()
 }
 
 /// Range and sign limits every stored node must satisfy, or the reason it does
@@ -830,6 +883,27 @@ fn pins(node: &mut NodePatch) -> Option<&'static str> {
     None
 }
 
+/// Normalizes the currency and billing cycle, or names the one that cannot be
+/// stored. The currency is held to the ISO 4217 form of three letters, the only
+/// one `Intl.NumberFormat` accepts, so a theme may pass it on without guarding
+/// against a throw. Each cycle length is stored in a single spelling, see
+/// `cycle_name`.
+fn billing_error(currency: Option<&mut String>, cycle: Option<&mut String>) -> Option<&'static str> {
+    if let Some(code) = currency {
+        *code = code.trim().to_ascii_uppercase();
+        if !(code.len() == 3 && code.bytes().all(|b| b.is_ascii_uppercase())) {
+            return Some("货币要填三个字母的代码，如 USD、CNY、HKD");
+        }
+    }
+    if let Some(cycle) = cycle.filter(|c| *c != "once") {
+        let Some(months) = crate::cycle_months(cycle) else {
+            return Some("付款周期要是整月，在 1 个月到 100 年之间");
+        };
+        *cycle = crate::cycle_name(months);
+    }
+    None
+}
+
 /// A theme shows the group as a tab label or a card title, so it is held to a
 /// length that fits one line on a 390 px phone: 32 Chinese characters at 14 px
 /// are about 450 px, wider than the screen.
@@ -869,6 +943,9 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
         "site_name": app.db.get("site_name").unwrap_or_else(|| "Monitor".into()),
         "public_page": app.public_page(),
         "can_provision": provisioning_allowed(&app, &headers),
+        // Which half refused, when it did: the panel reports it beside the
+        // disabled buttons, and an admin has no journal to read.
+        "provision_block": provisioning_block(&app, &headers).map_or("", ProvisionBlock::code),
         // The hub's own public URL when one was given, which is what belongs in an
         // install command and in the OAuth callback -- not whichever address this
         // browser used, which behind a proxy may be a loopback port. Empty by
@@ -885,8 +962,8 @@ pub async fn create_node(
     headers: HeaderMap,
     body: Result<Json<Node>, JsonRejection>,
 ) -> Response {
-    if !provisioning_allowed(&app, &headers) {
-        return (StatusCode::FORBIDDEN, PROVISIONING_DENIED).into_response();
+    if let Some(block) = provisioning_block(&app, &headers) {
+        return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let Ok(Json(mut node)) = body else { return bad("invalid node") };
     if node.name.trim().is_empty() {
@@ -898,6 +975,9 @@ pub async fn create_node(
         return bad(message);
     }
     if let Some(message) = group_error(&mut node.group) {
+        return bad(message);
+    }
+    if let Some(message) = billing_error(Some(&mut node.currency), Some(&mut node.billing_cycle)) {
         return bad(message);
     }
     node.name = node.name.trim().to_owned();
@@ -946,8 +1026,8 @@ pub async fn agent_register(
     // a POSIX `sh`.
     name: String,
 ) -> Response {
-    if !provisioning_allowed(&app, &headers) {
-        return (StatusCode::FORBIDDEN, PROVISIONING_DENIED).into_response();
+    if let Some(block) = provisioning_block(&app, &headers) {
+        return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let ip = client_ip(&headers, peer.ip());
     // Counted separately from the sign-in page: a batch install started with a
@@ -1005,8 +1085,8 @@ pub async fn agent_register(
 /// Opens a registration window with a fresh key. Any previous key stops working
 /// the moment this returns.
 pub async fn open_register(_: Admin, State(app): State<Shared>, headers: HeaderMap) -> Response {
-    if !provisioning_allowed(&app, &headers) {
-        return (StatusCode::FORBIDDEN, PROVISIONING_DENIED).into_response();
+    if let Some(block) = provisioning_block(&app, &headers) {
+        return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let key = random_token();
     let until = (Utc::now().timestamp() + REGISTER_WINDOW).to_string();
@@ -1041,6 +1121,9 @@ pub async fn update_node(
         return bad(message);
     }
     if let Some(message) = node.group.as_mut().and_then(group_error) {
+        return bad(message);
+    }
+    if let Some(message) = billing_error(node.currency.as_mut(), node.billing_cycle.as_mut()) {
         return bad(message);
     }
     if let Some(message) = pins(&mut node) {
@@ -2023,6 +2106,50 @@ mod tests {
         }
     }
 
+    /// The panel reports which half refused, so the four cases have to be told
+    /// apart -- and the code it keys on is part of the response, so it is
+    /// asserted rather than left to the message.
+    #[tokio::test]
+    async fn a_refusal_names_the_half_that_failed() {
+        let mut configured = app();
+        configured.site = "https://monitor.example.com".into();
+        let state = std::sync::Arc::new(configured);
+        let good = domain_headers();
+        assert_eq!(provisioning_block(&state, &good), None, "nothing to report when it works");
+
+        let mut plain = good.clone();
+        plain.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &plain), Some(ProvisionBlock::Https));
+        assert!(provisioning_denied(ProvisionBlock::Https).contains("X-Forwarded-Proto"));
+
+        let mut ip_host = good.clone();
+        ip_host.insert(header::HOST, "198.51.100.1".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &ip_host), Some(ProvisionBlock::Host));
+        // The half that failed is in the body the panel shows, after the general
+        // paragraph it used to get on its own.
+        let body = provisioning_denied(ProvisionBlock::Host);
+        assert!(body.starts_with(PROVISIONING_DENIED) && body.contains("Host"), "{body}");
+
+        let mut wrong_origin = good.clone();
+        wrong_origin.insert(header::ORIGIN, "https://elsewhere.example.com".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &wrong_origin), Some(ProvisionBlock::Origin));
+
+        // `--site` is the one input nothing about the request reveals: the domain
+        // entry is valid and the request is https, and the flag still refuses it.
+        let mut misconfigured = app();
+        misconfigured.site = "https://198.51.100.1".into();
+        assert_eq!(provisioning_block(&misconfigured, &good), Some(ProvisionBlock::Site));
+
+        for (block, code) in [
+            (ProvisionBlock::Host, "host"),
+            (ProvisionBlock::Https, "https"),
+            (ProvisionBlock::Site, "site"),
+            (ProvisionBlock::Origin, "origin"),
+        ] {
+            assert_eq!(block.code(), code, "the panel keys on this");
+        }
+    }
+
     /// Whatever this accepts is pushed to every assigned agent and passed directly
     /// to `lookup_host`. Forms it cannot resolve return -1 indefinitely, which the
     /// chart draws as a probe losing every packet, so the check must match what
@@ -2540,6 +2667,11 @@ mod tests {
             json!({"name": "x", "traffic_reset_day": 99}),
             json!({"name": "x", "price": -5.0}),
             json!({"name": "x", "traffic_limit": -1}),
+            json!({"name": "x", "currency": "USDT"}),
+            json!({"name": "x", "currency": "港币"}),
+            json!({"name": "x", "billing_cycle": "0m"}),
+            json!({"name": "x", "billing_cycle": "1201m"}),
+            json!({"name": "x", "billing_cycle": "weekly"}),
         ] {
             let created = create_node(
                 Admin,
@@ -2559,6 +2691,31 @@ mod tests {
             assert_eq!(updated.status(), StatusCode::BAD_REQUEST, "update accepted {bad}");
         }
         assert_eq!(app.db.nodes().unwrap().len(), 1, "nothing was created");
+    }
+
+    /// A length with a name is stored under it, so a theme built for hub 1.3.0
+    /// still labels it, and one without a name keeps a spelling the panel and a
+    /// theme can both read back.
+    #[tokio::test]
+    async fn currency_and_cycle_are_stored_in_one_spelling() {
+        let app = std::sync::Arc::new(app());
+        let id = node(&app, "n", true);
+        for (sent, currency, cycle) in [
+            (json!({"currency": " hkd ", "billing_cycle": "60m"}), "HKD", "60m"),
+            (json!({"billing_cycle": "12m"}), "HKD", "yearly"),
+            (json!({"billing_cycle": "once"}), "HKD", "once"),
+            (json!({"currency": "twd", "billing_cycle": "18m"}), "TWD", "18m"),
+        ] {
+            let put = update_node(
+                Admin,
+                State(app.clone()),
+                Path(id),
+                Ok(Json(serde_json::from_value(sent).unwrap())),
+            );
+            assert_eq!(put.await.status(), StatusCode::OK);
+            let stored = app.db.node(id).unwrap().unwrap();
+            assert_eq!((stored.currency.as_str(), stored.billing_cycle.as_str()), (currency, cycle));
+        }
     }
 
     /// A theme shows the group as a tab label or a card title, so it is held to
