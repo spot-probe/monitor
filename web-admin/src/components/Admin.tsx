@@ -1792,6 +1792,7 @@ function Themes() {
   const [doomed, setDoomed] = useState<Theme | null>(null)
   const [zoomed, setZoomed] = useState<Theme | null>(null)
   const [configuring, setConfiguring] = useState<{ theme: Theme; saved: Record<string, unknown> } | null>(null)
+  const [repo, setRepo] = useState("")
   const picker = useRef<HTMLInputElement>(null)
 
   const load = () =>
@@ -1813,13 +1814,15 @@ function Themes() {
     }
   }
 
-  async function install(file: File) {
-    setBusy("upload")
+  // Both ways in answer with the installed manifest.
+  async function install(how: "upload" | "github", installing: () => Promise<{ theme: Theme }>) {
+    setBusy(how)
     try {
-      const { theme } = await upload<{ theme: Theme }>("/themes", file)
+      const { theme } = await installing()
       // The hub reads a theme from disk on every request, so it is already live;
       // reloading the list only brings this page up to date.
       toast.success(`已安装 ${theme.name} ${theme.version}`)
+      if (how === "github") setRepo("")
       load()
     } catch (e) {
       toast.error((e as Error).message)
@@ -1885,16 +1888,43 @@ function Themes() {
         <div>
           <h3 className="text-sm font-medium">安装主题</h3>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            上传主题作者发布的 <code>theme.tar.gz</code>，同名主题整体替换。
+            填主题的 GitHub 仓库地址，例如 <code>https://github.com/作者/仓库</code>；仓库首页、Releases 页、
+            某个版本的页面都可以，总是安装最新的 release。
             <br />
-            主题的 <code>url</code> 指向 GitHub 仓库时，卡片上的 <RefreshCw className="inline size-3" /> 从它最新的
-            release 取 <code>theme.tar.gz</code>，版本没变就不下载。
+            也可以上传 release 里的 <code>theme.tar.gz</code>，<b>不要选 Source code</b>。两种方式都是同名主题整体替换。
+            <br />
+            主题的 <code>url</code> 指向 GitHub 仓库时，卡片上的 <RefreshCw className="inline size-3" /> 检查更新，
+            版本没变就不下载。
             <br />
             主题代码在访客浏览器中执行，请只安装可信来源。
           </p>
         </div>
-        <div>
-          <Button size="sm" disabled={!!busy} onClick={() => picker.current?.click()}>
+        <form
+          className="flex flex-wrap gap-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            install("github", () =>
+              api<{ theme: Theme }>("/theme-install", { method: "POST", body: JSON.stringify({ url: repo.trim() }) }),
+            )
+          }}
+        >
+          {/* text rather than url: the browser's own validation would answer in
+              its own language before the hub's message could. */}
+          <Input
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+            inputMode="url"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="主题 GitHub 仓库地址"
+            aria-label="主题 GitHub 仓库地址"
+            className="h-8 flex-1 basis-60"
+          />
+          <Button size="sm" type="submit" disabled={!!busy || !repo.trim()}>
+            <Download /> {busy === "github" ? "安装中…" : "从 GitHub 安装"}
+          </Button>
+          <Button size="sm" type="button" variant="outline" disabled={!!busy} onClick={() => picker.current?.click()}>
             <Upload /> {busy === "upload" ? "安装中…" : "上传主题包"}
           </Button>
           <input
@@ -1905,10 +1935,10 @@ function Themes() {
             onChange={(e) => {
               const file = e.target.files?.[0]
               e.target.value = ""
-              if (file) install(file)
+              if (file) install("upload", () => upload<{ theme: Theme }>("/themes", file))
             }}
           />
-        </div>
+        </form>
       </Card>
 
       {/* items-start：有预览图和没有的卡片不该为了等高而留白 */}
