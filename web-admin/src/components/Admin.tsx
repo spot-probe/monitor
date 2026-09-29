@@ -274,7 +274,7 @@ function NodeForm({ node, onClose, onSaved }: {
             <Field label="每月重置日" hint="1–31。本月流量按新周期重算，总流量不变">
               <Input type="number" min={1} max={31} value={form.traffic_reset_day} onChange={(e) => set("traffic_reset_day", Number(e.target.value))} />
             </Field>
-            <Field label="备注" hint="仅管理员可见">
+            <Field label="备注" hint="仅管理员可见；填了会显示在该节点的详情页（公开页只有你登录后才看得见）">
               <Input value={form.remark ?? ""} onChange={(e) => set("remark", e.target.value)} placeholder="商家、用途" />
             </Field>
           </div>
@@ -763,14 +763,17 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
         <Table>
           <TableHeader>
             {/* Percentages, or the address column swallows every spare pixel
-                and pushes status across the table. */}
+                and pushes status across the table. The version column was taken
+                out of the others rather than added on top: the table already
+                fills the page, and a version is five characters wide. */}
             <TableRow>
-              <TableHead className="w-[20%]">名称</TableHead>
-              <TableHead className="w-[22%]">IP</TableHead>
-              <TableHead className="w-[12%]">状态</TableHead>
-              <TableHead className="w-[16%]">流量</TableHead>
+              <TableHead className="w-[18%]">名称</TableHead>
+              <TableHead className="w-[20%]">IP</TableHead>
+              <TableHead className="w-[11%]">状态</TableHead>
+              <TableHead className="w-[9%]">版本</TableHead>
+              <TableHead className="w-[15%]">流量</TableHead>
               <TableHead className="w-[10%]">价格</TableHead>
-              <TableHead className="w-[12%]">到期</TableHead>
+              <TableHead className="w-[11%]">到期</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -854,6 +857,12 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                     </div>
                   )}
                 </TableCell>
+                {/* What the node last reported it was running. Empty for one that
+                    has never connected: the hub stores it at the handshake, so
+                    there is nothing to show rather than nothing to ask. */}
+                <TableCell className="tnum text-sm">
+                  {n.agent_version || <span className="text-muted-foreground">—</span>}
+                </TableCell>
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
                 <TableCell className="tnum text-sm">
@@ -888,14 +897,14 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
             ))}
             {nodes.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                   还没有节点，右上角添加
                 </TableCell>
               </TableRow>
             )}
             {needle && nodes.length > 0 && !visible.length && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                   没有匹配的节点
                 </TableCell>
               </TableRow>
