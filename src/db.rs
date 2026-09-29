@@ -2243,6 +2243,13 @@ mod tests {
         temp_files_beside("monitor.db").unwrap();
         assert_eq!(read(), std::path::Path::new(&scratch.0).parent().unwrap().to_string_lossy());
 
+        // A directory that is not there is refused by SQLite rather than stored
+        // silently -- and the refusal leaves the previous setting alone, since a
+        // setting that would not work is worse than the default. This is the
+        // path `main` turns into a warning.
+        assert!(temp_files_beside("/nonexistent-xyz/monitor.db").is_err());
+        assert_eq!(read(), std::path::Path::new(&scratch.0).parent().unwrap().to_string_lossy());
+
         // The setting is process-wide, which is why `main` makes it before the
         // first connection. With the copy on the database's own disk, reclaiming
         // space still does its job.
