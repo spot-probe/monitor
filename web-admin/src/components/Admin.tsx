@@ -646,7 +646,14 @@ function Expiry({ date }: { date: string | null }) {
   return <span className="tnum text-muted-foreground">{date}</span>
 }
 
-function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh: () => void; site: string; canProvision: boolean }) {
+function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
+  nodes: Node[]
+  refresh: () => void
+  site: string
+  canProvision: boolean
+  /** The newest agent release the hub has read, or null when it has not. */
+  agentLatest: string | null
+}) {
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<Node | null>(null)
   const [billing, setBilling] = useState<Node | null>(null)
@@ -859,9 +866,24 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                 </TableCell>
                 {/* What the node last reported it was running. Empty for one that
                     has never connected: the hub stores it at the handshake, so
-                    there is nothing to show rather than nothing to ask. */}
+                    there is nothing to show rather than nothing to ask.
+
+                    `agent_old` is the hub's answer, not this file's: it compares
+                    the reported version against the newest release it has read
+                    (a daily check). A dot rather than a word, because the row is
+                    a number and the page is scanned -- the title carries what to
+                    do about it. Nothing is drawn when the hub has not read a
+                    release, which is also what an offline hub gets. */}
                 <TableCell className="tnum text-sm">
                   {n.agent_version || <span className="text-muted-foreground">—</span>}
+                  {n.agent_old && (
+                    <span
+                      className="ml-1.5 inline-block size-1.5 shrink-0 rounded-full bg-warn align-middle"
+                      title={`有新版 agent${agentLatest ? ` ${agentLatest}` : ""}：在该节点上重跑一次安装命令即可升级`}
+                      aria-label={`agent 有新版本${agentLatest ? ` ${agentLatest}` : ""}`}
+                      role="img"
+                    />
+                  )}
                 </TableCell>
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
@@ -2394,12 +2416,14 @@ export function Admin({
   refresh,
   site,
   canProvision,
+  agentLatest,
 }: {
   path: string
   nodes: Node[]
   refresh: () => void
   site: string
   canProvision: boolean
+  agentLatest: string | null
 }) {
   return (
     <div className="min-w-0">
@@ -2416,7 +2440,7 @@ export function Admin({
         ) : path === "/admin/settings" ? (
           <SettingsTab />
         ) : (
-          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} />
+          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} agentLatest={agentLatest} />
         )}
       </div>
   )

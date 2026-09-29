@@ -4,6 +4,7 @@
 //! and the database path is configured in the panel and stored in SQLite,
 //! leaving no config file to track and no secrets in plaintext TOML.
 
+mod agent_release;
 mod agent_ws;
 mod api;
 mod auth;
@@ -61,6 +62,10 @@ pub struct App {
     /// startup, and a stale answer kept across an upgrade would be worse than
     /// none.
     pub theme_check: Mutex<theme::Check>,
+    /// What the last agent release check found. In memory rather than stored,
+    /// for the reason `theme_check` gives: it is a fact about a repository
+    /// somewhere else, re-read at every startup.
+    pub agent_release: Mutex<agent_release::Check>,
     pub http: reqwest::Client,
     /// Public base URL when `--site` was given, empty otherwise. In the default
     /// case the hub is reached at whatever ip:port the browser used and the
@@ -85,6 +90,7 @@ impl App {
             registrations: auth::Throttle::default(),
             theme_api: Mutex::default(),
             theme_check: Mutex::default(),
+            agent_release: Mutex::default(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
@@ -423,6 +429,7 @@ async fn main() -> Result<()> {
     // one exists without either of them releasing a hub version. It only
     // reports: installing stays a button in the panel.
     tokio::spawn(theme::watch(app.clone()));
+    tokio::spawn(agent_release::watch(app.clone()));
 
     let router = Router::new()
         // Agents.

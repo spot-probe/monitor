@@ -380,18 +380,27 @@ fn visible_nodes(app: &App, full: bool) -> Result<Vec<Value>, anyhow::Error> {
     let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
     let none = Traffic::default();
     let today = Local::now().date_naive();
+    let latest = crate::agent_release::state(app).latest;
     Ok(nodes
         .iter()
         .filter(|n| full || n.public)
         .map(|n| {
-            node_view(
+            let mut view = node_view(
                 n,
                 agents.get(&n.id),
                 traffic.get(&n.id).unwrap_or(&none),
                 uptime.get(&n.id).copied().unwrap_or_default(),
                 full,
                 today,
-            )
+            );
+            // The panel's own field: the public page has no use for which agent
+            // release exists. The comparison is the hub's rather than the panel's,
+            // so the tag's `v` and the numeric-segment rule are applied in one
+            // place -- the same one the theme check uses.
+            if full {
+                view["agent_old"] = json!(crate::agent_release::behind(latest.as_deref(), &n.agent_version));
+            }
+            view
         })
         .collect())
 }
@@ -620,7 +629,14 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
     let nodes = visible_nodes(app, full).unwrap_or_default();
     // `admin` is included so the panel's first fetch and its stream share one
     // cached frame.
-    let payload = Utf8Bytes::from(json!({"nodes": nodes, "admin": full}).to_string());
+    let mut payload = json!({"nodes": nodes, "admin": full});
+    // The version the per-node `agent_old` flags were decided against, for the
+    // tooltip that says what to upgrade to. Only the admin frame: the public one
+    // is pushed to every viewer every tick and a visitor has no use for it.
+    if full {
+        payload["agent_latest"] = json!(crate::agent_release::state(app).latest);
+    }
+    let payload = Utf8Bytes::from(payload.to_string());
     cache[slot] = (now, payload.clone());
     payload
 }
