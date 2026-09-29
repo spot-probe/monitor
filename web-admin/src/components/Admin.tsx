@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
-import { bytes, cycleMonths, FOREVER, money, monthUsage, uptime } from "@/lib/format"
+import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
 const TRAFFIC_FIELDS = [
@@ -388,12 +388,9 @@ function BillingForm({ node, onClose, onSaved }: {
   // database may hold `weekly` or `2y` -- gets controls of its own, and the value
   // is passed back untouched unless the admin actually moves them: turning it
   // into `yearly` behind their back would be a silent edit of their billing.
-  const months = cycleMonths(node.billing_cycle)
-  const readable = Number.isFinite(months)
-  const startUnit = readable ? (months === 0 ? "once" : months % 12 ? "months" : "years") : "months"
-  const startCount = readable ? String(months % 12 ? months : months / 12 || 1) : "1"
-  const [unit, setUnit] = useState(startUnit)
-  const [count, setCount] = useState(startCount)
+  const stored = cycleFields(node.billing_cycle)
+  const [unit, setUnit] = useState(stored.unit)
+  const [count, setCount] = useState(stored.count)
   const [saving, setSaving] = useState(false)
   const set = <K extends keyof Node>(k: K, v: Node[K]) => setForm((f) => ({ ...f, [k]: v }))
 
@@ -401,11 +398,10 @@ function BillingForm({ node, onClose, onSaved }: {
     // The cycle is sent only when one of its two controls was touched -- an
     // untouched pair means "leave the stored length alone", which is also what
     // keeps a stored length this panel cannot read from being rewritten.
-    const touched = unit !== startUnit || count !== startCount
-    if (touched && unit !== "once" && !(Number.isInteger(Number(count)) && Number(count) >= 1)) {
-      return toast.error("付款周期要填 1 以上的整数")
+    const touched = unit !== stored.unit || count !== stored.count
+    if (touched && !cycleOk(unit, count)) {
+      return toast.error("付款周期要在 1 个月到 100 年之间，填整数")
     }
-    const cycle = unit === "once" ? "once" : `${Number(count) * (unit === "years" ? 12 : 1)}m`
     setSaving(true)
     try {
       await api(`/nodes/${node.id}`, {
@@ -413,7 +409,7 @@ function BillingForm({ node, onClose, onSaved }: {
         body: JSON.stringify(changes(node, {
           price: Math.max(0, Number(price) || 0),
           currency: form.currency,
-          billing_cycle: touched ? cycle : node.billing_cycle,
+          billing_cycle: cyclePatch(node.billing_cycle, stored, { unit, count }),
           expires_at: form.expires_at || null,
         })),
       })
@@ -464,7 +460,7 @@ function BillingForm({ node, onClose, onSaved }: {
             <Field
               label="付款周期"
               hint={
-                readable
+                stored.readable
                   ? "1 个月到 100 年，或一次性"
                   : `现在存的是「${node.billing_cycle || "空"}」，不动这里就保持原样`
               }
@@ -482,7 +478,8 @@ function BillingForm({ node, onClose, onSaved }: {
                   disabled={unit === "once"}
                   onChange={(e) => setCount(e.target.value)}
                 />
-                <Select value={unit} onValueChange={setUnit}>
+                {/* The three options below are exactly `CycleUnit`. */}
+                <Select value={unit} onValueChange={(v) => setUnit(v as CycleUnit)}>
                   <SelectTrigger className="w-28 shrink-0"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="months">个月</SelectItem>
