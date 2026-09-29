@@ -79,11 +79,13 @@ if [ -n "$UPGRADE" ]; then
 		{ echo "--upgrade 不接受 --token 或 --register：它沿用这台机器已有的凭证" >&2; exit 2; }
 	TOKEN=$(sed -n 's/^MONITOR_TOKEN=//p' "$ENV_FILE" 2>/dev/null | tail -n 1)
 	[ -n "$SERVER" ] || SERVER=$(sed -n 's/^MONITOR_SERVER=//p' "$ENV_FILE" 2>/dev/null | tail -n 1)
-	[ -n "$TOKEN" ] && [ -n "$SERVER" ] || {
+	# 写成 if 而不是 `A && B || C`：后者读起来一样，其实不然——第三个命令在第二个
+	# 失败时也会跑，包括第一个本来就成立的情况。本仓已有五处为此改过。
+	if [ -z "$TOKEN" ] || [ -z "$SERVER" ]; then
 		echo "$ENV_FILE 里没有 token 与 hub 地址：这台机器上没有装过 agent。" >&2
 		echo "请改用面板里生成的安装命令" >&2
 		exit 2
-	}
+	fi
 fi
 
 # A server with neither a token nor a registration key has no way to join. Written

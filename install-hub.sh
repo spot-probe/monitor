@@ -110,7 +110,10 @@ press() {
 # ago. The marker keeps `curl | sh`, whose $0 is "sh", from measuring a file of
 # that name in the working directory.
 check_self() {
-	[ -f "$0" ] && grep -qxF '# monitor hub installer.' "$0" 2>/dev/null || return 0
+	# 写成 if 而不是 `A && B || C`；本仓为此改过五处，shellcheck 也拦这一条。
+	if [ ! -f "$0" ] || ! grep -qxF '# monitor hub installer.' "$0" 2>/dev/null; then
+		return 0
+	fi
 	base="https://github.com/$REPO/releases/latest/download"
 	self="$(mktemp -d)"
 	trap 'rm -rf "$self"' EXIT
