@@ -372,6 +372,15 @@ const MAX_EXPANDED: u64 = 64 << 20;
 /// zeros there would inflate at 1 GiB per MiB uploaded, 1.4 s of CPU each.
 const MAX_PADDING: u64 = 1 << 20;
 
+/// The answer to a file that is not gzip at all, most often the release's
+/// Source code zip. Reported as a damaged archive, it would direct the reader to
+/// download the same wrong file again.
+const NOT_GZIP: &str = "选的不是主题包：到主题仓库的 Releases 下载 theme.tar.gz，不要选 Source code";
+
+/// The first two bytes of every gzip stream, for callers that have the bytes in
+/// hand and can answer before unpacking.
+pub const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
 /// Installs a theme from its published `theme.tar.gz`, under the name its own
 /// manifest carries.
 ///
@@ -394,6 +403,13 @@ pub fn install<R: Read>(themes: &Path, archive: R, expect: Option<&str>) -> Resu
 }
 
 fn unpack<R: Read>(archive: R, into: &Path) -> Result<()> {
+    // A zip, or a tar that was already decompressed, is not a damaged theme but
+    // the wrong file, and downloading it again cannot help. Read through a
+    // buffer so the two bytes can be looked at without consuming them.
+    let mut archive = std::io::BufReader::new(archive);
+    if !std::io::BufRead::fill_buf(&mut archive)?.starts_with(&GZIP_MAGIC) {
+        bail!("{NOT_GZIP}");
+    }
     fs::create_dir(into)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive));
     let mut expanded = 0u64;
@@ -406,7 +422,11 @@ fn unpack<R: Read>(archive: R, into: &Path) -> Result<()> {
         // device node belongs in none, and each is a route to writing where the
         // path check below cannot see.
         let kind = entry.header().entry_type();
-        if !kind.is_file() && !kind.is_dir() {
+        // Also a pax global header: metadata that writes nothing, which
+        // `git archive` and GitHub's Source code archives open with. Refusing it
+        // would hide the answer that names the right file to download.
+        let metadata = kind.is_pax_global_extensions();
+        if !kind.is_file() && !kind.is_dir() && !metadata {
             bail!("主题包里有不支持的条目：{}", entry.path()?.display());
         }
         let size = entry.size();
@@ -419,6 +439,10 @@ fn unpack<R: Read>(archive: R, into: &Path) -> Result<()> {
             bail!("主题包解压后超过 {} MiB", MAX_EXPANDED >> 20);
         }
         expanded += size;
+        // Counted above, written nowhere.
+        if metadata {
+            continue;
+        }
         // Rejects an entry whose path escapes `into` -- absolute, `..`, or via
         // a symlinked parent -- reporting `false` rather than an error.
         if !entry.unpack_in(into)? {
@@ -443,7 +467,10 @@ fn unpack<R: Read>(archive: R, into: &Path) -> Result<()> {
 /// Checks the unpacked directory is a theme this hub can actually serve, then
 /// moves it into place under the name its manifest asks for.
 fn publish(themes: &Path, staging: &Path, expect: Option<&str>) -> Result<Theme> {
-    let manifest = read_inside(staging, "theme.json").context("主题包里没有 theme.json")?;
+    // Source code (tar.gz) is gzip'd too, and nests everything one directory
+    // down, so it arrives here rather than at the magic bytes.
+    let manifest = read_inside(staging, "theme.json")
+        .context("主题包里没有 theme.json，下载的若是 Source code，换成 Releases 里的 theme.tar.gz")?;
     if manifest.len() > 64 * 1024 {
         bail!("theme.json 过大");
     }
@@ -661,6 +688,34 @@ mod tests {
             panic!("an oversized tail installed")
         };
         assert!(e.to_string().contains("tar 结尾之后"), "{e:#}");
+
+        // The wrong file rather than a damaged one: a zip, or the same tar
+        // already decompressed. Downloading it again cannot help, so the answer
+        // names the right file instead.
+        let mut plain = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&whole[..]), &mut plain).unwrap();
+        for wrong in [&b"PK\x03\x04"[..], &plain[..]] {
+            let Err(e) = install(&base, wrong, None) else { panic!("a file that is not gzip installed") };
+            assert!(e.to_string().contains("不要选 Source code"), "{e:#}");
+        }
+        // Source code (tar.gz): a pax global header, then the repository one
+        // directory down. It reaches the missing manifest, which names the file.
+        let mut builder =
+            tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let mut global = tar::Header::new_ustar();
+        global.set_entry_type(tar::EntryType::XGlobalHeader);
+        global.set_size(6);
+        global.set_mode(0o644);
+        builder.append_data(&mut global, "pax_global_header", &b"6 a=b\n"[..]).unwrap();
+        for (name, data) in [("aurora-1/theme.json", manifest), ("aurora-1/dist/index.html", b"v9")] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            builder.append_data(&mut header, name, data).unwrap();
+        }
+        let source = builder.into_inner().unwrap().finish().unwrap();
+        let Err(e) = install(&base, &source[..], None) else { panic!("a source archive installed") };
+        assert!(e.to_string().contains("Source code"), "{e:#}");
 
         // None of that affected the theme being served or left a staging
         // directory behind.

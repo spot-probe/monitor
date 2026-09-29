@@ -1781,6 +1781,59 @@ async fn update(app: &App, short: &str) -> Result<(bool, String), anyhow::Error>
     Ok((true, theme.version))
 }
 
+/// Installs a theme from the latest release of a GitHub repository the
+/// administrator pastes, in place of downloading its `theme.tar.gz` and
+/// uploading it.
+///
+/// The trust is that of an upload: either way the administrator vouches for the
+/// repository. The address is read the way an update reads a manifest's `url`,
+/// with only `<owner>/<repo>` taken from it, so the hub still fetches from no
+/// host but GitHub and the configured proxy.
+pub async fn install_theme(_: Admin, State(app): State<Shared>, Json(body): Json<Repository>) -> Response {
+    let url = body.url.trim();
+    // A bare `github.com/...`, the form an address is often passed along in.
+    let url = if url.starts_with("github.com/") { format!("https://{url}") } else { url.to_owned() };
+    let Some((owner, repo)) = crate::theme::repo(&url) else {
+        return bad("填主题的 GitHub 仓库地址，形如 https://github.com/作者/仓库");
+    };
+    let release = match crate::theme::latest(&app, owner, repo).await {
+        Ok(release) => release,
+        Err(e) => return bad(&format!("{e:#}")),
+    };
+    match install_release(&app, owner, repo, &release).await {
+        Ok(theme) => {
+            crate::theme::installed(&app, &theme.short, &theme.version);
+            Json(json!({"theme": theme})).into_response()
+        }
+        Err(e) => bad(&format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Repository {
+    url: String,
+}
+
+/// Downloads one release's archive and installs it, with no theme it may
+/// replace -- a pasted repository is a new one as often as it is a reinstall.
+///
+/// The same unpacking, validation and atomic replace an upload and an update
+/// undergo; the built-in theme has no directory until this runs, which then
+/// serves in place of the embedded copy until it is deleted.
+async fn install_release(
+    app: &App,
+    owner: &str,
+    repo: &str,
+    release: &crate::theme::Release,
+) -> Result<crate::frontend::Theme, anyhow::Error> {
+    let archive = crate::theme::archive(app, owner, repo, &release.tag_name).await?;
+    let themes = app.themes.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::frontend::install(&themes, std::io::Cursor::new(archive), None)
+    })
+    .await?
+}
+
 /// The thumbnail the theme list displays, where the theme provides one. A theme
 /// without one returns 404, on which the panel hides the image, so nothing need
 /// report whether a preview exists.
@@ -2696,6 +2749,30 @@ mod tests {
     /// A length with a name is stored under it, so a theme built for hub 1.3.0
     /// still labels it, and one without a name keeps a spelling the panel and a
     /// theme can both read back.
+    /// What may be installed from is the same trust boundary as an update's
+    /// manifest `url`: a pasted address is read for `<owner>/<repo>` and nothing
+    /// else, and a form that names no repository is refused before any request.
+    #[tokio::test]
+    async fn installing_a_theme_from_github_needs_a_repository_address() {
+        let app = std::sync::Arc::new(app());
+        for bad in [
+            "",
+            "   ",
+            "not a url",
+            "https://example.com/a/b",
+            "https://github.com/a",
+            "https://github.com/a b",
+        ] {
+            let response =
+                install_theme(Admin, State(app.clone()), Json(Repository { url: bad.into() })).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad} was accepted");
+        }
+        // The bare form an address is often passed along in is completed rather
+        // than refused; it gets as far as the network, which is not this test's
+        // business, so only the parsing is asserted.
+        assert_eq!(crate::theme::repo("https://github.com/a/b"), Some(("a", "b")));
+    }
+
     #[tokio::test]
     async fn currency_and_cycle_are_stored_in_one_spelling() {
         let app = std::sync::Arc::new(app());
