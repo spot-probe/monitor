@@ -41,6 +41,9 @@ export type Node = {
   swap_total: number
   disk_total: number
   agent_version: string
+  /** Panel only, decided by the hub: the latest agent release is newer than what
+   *  this node reported. Never set for a node that has not connected. */
+  agent_old?: boolean
   price: number
   currency: string
   billing_cycle: string
@@ -205,6 +208,10 @@ export function useNodes() {
   // session no longer being an admin one, so an unanswered first fetch must not
   // read as that; see App.tsx.
   const [admin, setAdmin] = useState<boolean | null>(null)
+  // What `agent_old` was decided against, for the tooltip. Replaced by whatever
+  // the hub last read, so a hub that cannot reach GitHub sends null and the
+  // panel simply has nothing to say.
+  const [agentLatest, setAgentLatest] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
 
@@ -215,10 +222,11 @@ export function useNodes() {
     let closed = false
 
     const fetchOnce = () =>
-      api<{ nodes: Node[]; admin: boolean }>("/nodes")
+      api<{ nodes: Node[]; admin: boolean; agent_latest?: string | null }>("/nodes")
         .then((d) => {
           setNodes(d.nodes)
           setAdmin(d.admin)
+          setAgentLatest(d.agent_latest ?? null)
           setError(null)
         })
         .catch((e: Error) => {
@@ -246,6 +254,7 @@ export function useNodes() {
         const frame = JSON.parse(event.data)
         setNodes(frame.nodes)
         setAdmin(frame.admin)
+        setAgentLatest(frame.agent_latest ?? null)
         setError(null)
         // The stream has returned; the poll was only covering for it.
         if (poll) {
@@ -270,5 +279,5 @@ export function useNodes() {
     }
   }, [reload])
 
-  return { nodes, admin, error, refresh: () => setReload((n) => n + 1) }
+  return { nodes, admin, agentLatest, error, refresh: () => setReload((n) => n + 1) }
 }
