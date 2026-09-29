@@ -92,7 +92,7 @@ export default function App() {
   const [navOpen, toggleNav] = useNavOpen()
   const [me, setMe] = useState<Me | null>(null)
   const [meError, setMeError] = useState("")
-  const { nodes, admin, error, refresh } = useNodes()
+  const { nodes, admin, agentLatest, error, refresh } = useNodes()
 
   const loadMe = useCallback(() => {
     // `|| "..."` because an empty message reads as no error: api() falls back to
@@ -148,11 +148,7 @@ export default function App() {
   const pageTitle = ADMIN_ITEMS.find((item) => item.path === path)?.label ?? ""
   const pageGroup = ADMIN_SECTIONS.find((section) => section.items.some((item) => item.path === path))?.group ?? ""
 
-  // The provisioning hint has to stay put while the content scrolls, so it belongs to
-  // the shell's band rather than to the page -- and its condition is already the shell's
-  // (canProvision below is the same expression).
   const canProvision = me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)
-  const hint = path === "/admin/nodes" && !canProvision ? "请通过 HTTPS 域名访问面板后添加或安装节点。" : ""
 
   return (
     // Two panes. The brand and the nav are a full-height column whose header sits on the
@@ -308,7 +304,14 @@ export default function App() {
               {/* A chevron rather than a slash: it is the conventional separator, and it
                   is a real element that can be sized, unlike a text pipe. */}
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-              <span className="truncate font-semibold text-foreground">{pageGroup || "总览"}</span>
+              <span className="truncate">{pageGroup || "总览"}</span>
+              {/* The page's own name ends the trail, which is where the eye already is
+                  for "which page am I on" -- it reads as a path rather than as a heading
+                  repeated under the bar. Being the last crumb it takes the emphasis the
+                  group used to carry, and it is the document's h1: a heading that is
+                  visible, rather than one hidden for the outline's sake. */}
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
+              <h1 className="truncate font-semibold text-foreground">{pageTitle || "后台"}</h1>
             </div>
             {/* The status page is a separate app, so this is a navigation. */}
             <Button variant="ghost" size="sm" asChild>
@@ -347,18 +350,18 @@ export default function App() {
         </header>
 
         <main className="min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6">
-          {/* The page's heading lives with the page. In the bar it had to share a line
-              with the breadcrumb, and the bar is what should stay one line. */}
-          <div className="sticky -top-4 z-[1] -mx-4 -mt-4 border-b bg-background px-4 pt-4 pb-3 md:-top-6 md:-mx-6 md:-mt-6 md:px-6 md:pt-6">
-            <h1 className="truncate text-xl font-semibold tracking-tight">{pageTitle || "后台"}</h1>
-            {hint && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>}
-          </div>
+          {/* No heading band. Every page opened with its own name repeated on a line
+              under the bar, and the name was the only thing in it: the sidebar already
+              marks which item is current, and the breadcrumb above now ends with the
+              page's own name. It cost a line on every one of the seven pages and told
+              the reader nothing new. */}
           {error && <p className="text-sm text-danger-fg">{error}</p>}
           {!nodes ? (
             <Skeleton className="h-64" />
           ) : (
             <Admin
               path={path}
+              agentLatest={agentLatest}
               nodes={sorted}
               refresh={refresh}
               // The hub's own public URL rather than this browser's address: the
