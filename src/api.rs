@@ -1,5 +1,7 @@
 //! The panel and public-status HTTP surface.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
@@ -293,8 +295,11 @@ fn node_view(
         "name": node.name,
         // A country rather than an address: it indicates which region a node sits
         // in, which is what a status page conveys, without locating it. The
-        // address it was derived from remains behind the panel.
-        "country": node.country,
+        // address it was derived from remains behind the panel. What the panel set
+        // by hand stands in for the looked-up one, which goes on updating
+        // underneath -- so a wrong lookup can be corrected without waiting for the
+        // lookup service to answer differently.
+        "country": if node.country_pin.is_empty() { &node.country } else { &node.country_pin },
         "sort": node.sort,
         // The bucket, not a private note: it is what the page's tabs are built from.
         "group": node.group,
@@ -362,6 +367,12 @@ fn node_view(
         view["ip"] = json!(node.ip);
         view["ipv4"] = json!(node.ipv4);
         view["ipv6"] = json!(node.ipv6);
+        // Each of the three set by hand, beside what it stands in for: the panel
+        // shows the automatic value as the box's placeholder.
+        view["ipv4_pin"] = json!(node.ipv4_pin);
+        view["ipv6_pin"] = json!(node.ipv6_pin);
+        view["country_pin"] = json!(node.country_pin);
+        view["country_auto"] = json!(node.country);
         view["remark"] = json!(node.remark);
         view["token"] = json!(node.token);
         view["notify"] = json!(node.notify);
@@ -789,6 +800,36 @@ fn node_limits(reset_day: Option<u32>, price: Option<f64>, limit: Option<i64>) -
     None
 }
 
+/// Normalizes the values set by hand, or names the one that cannot stand. Each
+/// takes the place of an automatic value, so it is held to what that value would
+/// have to be: the country to the rule a looked-up one passes, as both reach the
+/// status page; an address to its own family, stored canonical so the panel's
+/// search matches however it was typed.
+fn pins(node: &mut NodePatch) -> Option<&'static str> {
+    if let Some(cc) = &mut node.country_pin {
+        *cc = cc.trim().to_ascii_uppercase();
+        if !cc.is_empty() && !(cc.len() == 2 && cc.bytes().all(|b| b.is_ascii_uppercase())) {
+            return Some("country must be two letters, or empty to look it up");
+        }
+    }
+    for (pin, v6) in [(&mut node.ipv4_pin, false), (&mut node.ipv6_pin, true)] {
+        let Some(pin) = pin else { continue };
+        let typed = pin.trim();
+        let parsed = if v6 {
+            typed.parse::<Ipv6Addr>().map(IpAddr::V6)
+        } else {
+            typed.parse::<Ipv4Addr>().map(IpAddr::V4)
+        };
+        *pin = match parsed {
+            Ok(ip) => ip.to_string(),
+            Err(_) if typed.is_empty() => String::new(),
+            Err(_) if v6 => return Some("IPv6 must be an IPv6 address, or empty"),
+            Err(_) => return Some("IPv4 must be an IPv4 address, or empty"),
+        };
+    }
+    None
+}
+
 /// A theme shows the group as a tab label or a card title, so it is held to a
 /// length that fits one line on a 390 px phone: 32 Chinese characters at 14 px
 /// are about 450 px, wider than the screen.
@@ -1000,6 +1041,9 @@ pub async fn update_node(
         return bad(message);
     }
     if let Some(message) = node.group.as_mut().and_then(group_error) {
+        return bad(message);
+    }
+    if let Some(message) = pins(&mut node) {
         return bad(message);
     }
     match app.db.update_node(id, &node) {
@@ -2387,7 +2431,7 @@ mod tests {
         let app = app();
         let open = node(&app, "open", true);
         node(&app, "hidden", false);
-        app.db.save_facts(open, &json!({"hostname": "vps-1"}), "198.51.100.9").unwrap();
+        app.db.save_facts(open, &json!({"hostname": "vps-1"}), "198.51.100.9", "").unwrap();
 
         // A live report, so the public view has metrics to strip. `hostname` is
         // what a node token in the wrong hands can insert, and what the agent
@@ -2558,6 +2602,72 @@ mod tests {
         assert_eq!(update("建\n站").await.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Values set by hand take the place of automatic ones, so each is held to
+    /// what the automatic value would have to be, and of the three only the
+    /// country reaches the status page. The create path stores none of them.
+    #[tokio::test]
+    async fn values_set_by_hand_are_checked_and_only_the_country_goes_public() {
+        let app = std::sync::Arc::new(app());
+        let id = node(&app, "n", true);
+        app.db.save_facts(id, &json!({}), "198.51.100.77", "198.51.100.77").unwrap();
+        app.db.set_country(id, "SG", "198.51.100.77").unwrap();
+        let put = |patch: Value| {
+            update_node(
+                Admin,
+                axum::extract::State(app.clone()),
+                Path(id),
+                Ok(Json(serde_json::from_value(patch).unwrap())),
+            )
+        };
+        for bad in [
+            json!({"country_pin": "CHN"}),
+            json!({"country_pin": "中国"}),
+            json!({"country_pin": "C1"}),
+            json!({"ipv4_pin": "2409:8a1e::5"}),
+            json!({"ipv4_pin": "203.0.113.9:22"}),
+            json!({"ipv4_pin": "203.0.113.256"}),
+            json!({"ipv6_pin": "203.0.113.9"}),
+            json!({"ipv6_pin": "[2409:8a1e::5]:22"}),
+        ] {
+            assert_eq!(put(bad.clone()).await.status(), StatusCode::BAD_REQUEST, "accepted {bad}");
+        }
+        let typed =
+            json!({"country_pin": " cn ", "ipv4_pin": " 203.0.113.9 ", "ipv6_pin": "2409:8A1E:0::0088"});
+        assert_eq!(put(typed).await.status(), StatusCode::OK);
+        let stored = app.db.node(id).unwrap().unwrap();
+        assert_eq!(
+            (stored.country_pin.as_str(), stored.ipv4_pin.as_str(), stored.ipv6_pin.as_str()),
+            ("CN", "203.0.113.9", "2409:8a1e::88"),
+            "stored canonical"
+        );
+
+        let public = visible_nodes(&app, false).unwrap()[0].to_string();
+        assert!(public.contains(r#""country":"CN""#), "the pin replaces the looked-up country: {public}");
+        assert!(
+            !public.contains("203.0.113.9") && !public.contains("2409:8a1e::88") && !public.contains("SG")
+        );
+        let full = &visible_nodes(&app, true).unwrap()[0];
+        assert_eq!(
+            (full["country_auto"].as_str(), full["ipv4_pin"].as_str()),
+            (Some("SG"), Some("203.0.113.9"))
+        );
+
+        // A hello leaves the pins alone; empty returns each to automatic.
+        app.db.save_facts(id, &json!({}), "198.51.100.88", "198.51.100.88").unwrap();
+        assert_eq!(app.db.node(id).unwrap().unwrap().ipv4_pin, "203.0.113.9");
+        assert_eq!(
+            put(json!({"country_pin": "", "ipv4_pin": " ", "ipv6_pin": ""})).await.status(),
+            StatusCode::OK
+        );
+        let stored = app.db.node(id).unwrap().unwrap();
+        assert!(stored.country_pin.is_empty() && stored.ipv4_pin.is_empty() && stored.ipv6_pin.is_empty());
+        assert_eq!(
+            visible_nodes(&app, false).unwrap()[0]["country"],
+            "",
+            "back to the lookup, which the new address left owing"
+        );
+    }
+
     /// A stream outlives the request that opened it, so everything the handshake
     /// tested must be re-read rather than captured -- both answers, not one. The
     /// admin frame carries every node's token in the clear, and the public frame
@@ -2591,7 +2701,7 @@ mod tests {
         let app = app();
         let open = node(&app, "open", true);
         node(&app, "hidden", false);
-        app.db.save_facts(open, &json!({"hostname": "vps-1"}), "198.51.100.9").unwrap();
+        app.db.save_facts(open, &json!({"hostname": "vps-1"}), "198.51.100.9", "").unwrap();
 
         let public = live_snapshot(&app, false);
         let admin = live_snapshot(&app, true);
@@ -2772,6 +2882,7 @@ mod tests {
                 id,
                 &json!({"mem_total": 1_000, "swap_total": 1i64 << 30, "disk_total": 30i64 << 30}),
                 "ip",
+                "",
             )
             .unwrap();
 

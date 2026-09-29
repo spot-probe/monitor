@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
 import { bytes, CYCLES, FOREVER, money, monthUsage, uptime } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -44,19 +44,27 @@ function copy(text: string) {
   )
 }
 
-// Every address a node has, each click-to-copy: pasting one into an ssh command
-// is why they are shown.
+const SOURCES: Record<Source, string> = {
+  manual: "手动填写",
+  interface: "网卡地址",
+  exit: "hub 看到的出口，不在节点网卡上（NAT 或代理）",
+  connection: "hub 看到的连接地址",
+}
+
+// The address a node is reached by, one per family, each click-to-copy: pasting
+// one into an ssh command is why they are shown. Where each came from is in the
+// tooltip, keeping the column to addresses alone.
 function Addresses({ node }: { node: Node }) {
   const list = addresses(node)
   if (!list.length) return <span className="text-sm text-muted-foreground">—</span>
   return (
     <div className="flex flex-col items-start gap-y-0.5">
-      {list.map((address) => (
+      {list.map(({ address, source }) => (
         <button
           key={address}
           type="button"
           onClick={() => copy(address)}
-          title="点击复制"
+          title={`${SOURCES[source]}。点击复制`}
           className="tnum group inline-flex items-center gap-1 text-sm hover:text-foreground"
         >
           {address}
@@ -198,6 +206,9 @@ function NodeForm({ node, onClose, onSaved }: {
   // edit and zero a node that has transferred a few MB.
   const pristine = useRef(traffic)
   const set = <K extends keyof Node>(k: K, v: Node[K]) => setForm((f) => ({ ...f, [k]: v }))
+  // What each address box falls back to when left empty.
+  const automatic = (v6: boolean) =>
+    addresses({ ...node, ipv4_pin: "", ipv6_pin: "" }).find((a) => a.address.includes(":") === v6)?.address ?? "无"
 
   async function save() {
     if (!form.name.trim()) return toast.error("请填写节点名称")
@@ -210,6 +221,9 @@ function NodeForm({ node, onClose, onSaved }: {
       traffic_limit: Math.round(Number(limitGib) * GIB),
       traffic_reset_day: Math.min(31, Math.max(1, Math.round(Number(form.traffic_reset_day) || 1))),
       notify: !!form.notify,
+      ipv4_pin: (form.ipv4_pin ?? "").trim(),
+      ipv6_pin: (form.ipv6_pin ?? "").trim(),
+      country_pin: (form.country_pin ?? "").trim().toUpperCase(),
     })
     const correction = trafficCorrection(pristine.current, traffic)
     if ([patch.traffic_limit, ...Object.values(correction)].some((v) => v !== undefined && (!Number.isSafeInteger(v) || v < 0))) {
@@ -310,6 +324,32 @@ function NodeForm({ node, onClose, onSaved }: {
             </span>
             <Switch checked={!!form.notify} onCheckedChange={(v) => set("notify", v)} />
           </label>
+          {/* Held apart from the fields above: these replace what the agent and the
+              hub worked out for themselves, and every one of them is empty by
+              default. The placeholder carries the automatic value, so a box left
+              alone shows what is in use. */}
+          <div className="space-y-3 border-t pt-5">
+            <h3 className="text-sm font-medium">地址与地区</h3>
+            <div className="grid gap-4 sm:grid-cols-[1fr_1.4fr_6rem]">
+              <Field label="IPv4">
+                <Input value={form.ipv4_pin ?? ""} onChange={(e) => set("ipv4_pin", e.target.value)} placeholder={`自动：${automatic(false)}`} />
+              </Field>
+              <Field label="IPv6">
+                <Input value={form.ipv6_pin ?? ""} onChange={(e) => set("ipv6_pin", e.target.value)} placeholder={`自动：${automatic(true)}`} />
+              </Field>
+              <Field label="国家/地区">
+                <Input
+                  value={form.country_pin ?? ""}
+                  maxLength={2}
+                  onChange={(e) => set("country_pin", e.target.value.toUpperCase())}
+                  placeholder={`自动：${node.country_auto || "无"}`}
+                />
+              </Field>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              留空为自动。国家/地区填两位代码，如 CN；手填的值会一直显示，IP 变了要自己改。
+            </p>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>取消</Button>
@@ -789,7 +829,8 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
   const hasUngrouped = order.some((n) => !n.group)
   const visible = order
     .filter((n) => group === "all" || (group === "" ? !n.group : n.group === group))
-    .filter((n) => !needle || [n.name, n.ip, n.ipv4, n.ipv6].some((v) => v?.toLowerCase().includes(needle)))
+    .filter((n) =>
+      !needle || [n.name, n.ip, n.ipv4, n.ipv6, n.ipv4_pin, n.ipv6_pin].some((v) => v?.toLowerCase().includes(needle)))
   // Offered on the same terms as the install command: only where this panel is
   // the https domain entry an install command can name.
   const uninstall = canProvision ? uninstallCommand(site) : ""
@@ -912,7 +953,11 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
                       </Badge>
                     )}
                     {n.country && (
-                      <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">
+                      <Badge
+                        variant="outline"
+                        title={n.country_pin ? "手动指定" : undefined}
+                        className="shrink-0 font-normal text-muted-foreground"
+                      >
                         {n.country}
                       </Badge>
                     )}
