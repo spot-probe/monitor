@@ -8,7 +8,18 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
-type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; login: string; version: string }
+type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; login: string; version: string }
+
+// Which half of the hub's provisioning guard refused, in this panel's words. The
+// hub names its own reason (`provision_block`); the last entry is for a hub too
+// old to send one, which is also why the field is optional.
+const BLOCK_NOTES: Record<string, string> = {
+  host: "hub 收到的 Host 不是域名（是 IP，或反向代理把 Host 改写成了上游地址）——nginx 需要 proxy_set_header Host $host，Apache 需要 ProxyPreserveHost On",
+  https: "这一跳没有说明自己是 https ——反向代理要发 X-Forwarded-Proto: https",
+  site: "hub 启动参数 --site 不是 https 域名（写成了 IP，或带了路径）",
+  origin: "浏览器发的 Origin 与 https://<Host> 不一致——检查反向代理是否改写了 Host",
+  "": "hub 拒绝了这次请求；在它的日志里 grep provisioning 能看到具体是哪一条",
+}
 
 // `/admin` alone is not a page; it is normalised to the first section so that a
 // bookmark and the OAuth redirect both resolve to a real route.
@@ -153,6 +164,17 @@ export default function App() {
   const pageGroup = ADMIN_SECTIONS.find((section) => section.items.some((item) => item.path === path))?.group ?? ""
 
   const canProvision = me.can_provision && !!provisioningSite(location.origin) && !!provisioningSite(me.site || location.origin)
+  // Why the buttons are disabled, in one line. The two checks the panel adds on
+  // top of the hub's are about the address in this browser's bar, which the hub
+  // cannot see -- and each of the three is fixed by a different person, so the
+  // note names the one that failed rather than listing all of them.
+  const provisionNote = canProvision
+    ? ""
+    : !me.can_provision
+      ? BLOCK_NOTES[me.provision_block ?? ""] ?? BLOCK_NOTES[""]
+      : !provisioningSite(location.origin)
+        ? "面板当前的地址不是 https 域名，安装命令要经这条链路下载，请用域名访问"
+        : "hub 的 --site 不是 https 域名（写成了 IP，或带了路径）"
 
   return (
     // Two panes. The brand and the nav are a full-height column whose header sits on the
@@ -385,6 +407,7 @@ export default function App() {
               // while the install command and OAuth callback need the real one.
               site={me.site || location.origin}
               canProvision={canProvision}
+              provisionNote={provisionNote}
             />
           )}
         </main>

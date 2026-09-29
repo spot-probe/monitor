@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
-import { bytes, CYCLES, FOREVER, money, monthUsage, uptime } from "@/lib/format"
+import { bytes, cycleMonths, FOREVER, money, monthUsage, uptime } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
 const TRAFFIC_FIELDS = [
@@ -360,6 +360,20 @@ function NodeForm({ node, onClose, onSaved }: {
   )
 }
 
+const CURRENCY_NAMES = new Intl.DisplayNames(["zh-CN"], { type: "currency" })
+
+// The name confirms a code the hub can only check the shape of. DisplayNames
+// echoes back a code outside ISO 4217 and throws on anything but three letters,
+// which the hub refuses with its own message.
+function currencyHint(code: string) {
+  try {
+    const name = CURRENCY_NAMES.of(code)
+    return name === code ? "未知代码，照原样显示" : name
+  } catch {
+    return undefined
+  }
+}
+
 function BillingForm({ node, onClose, onSaved }: {
   node: Node
   onClose: () => void
@@ -369,10 +383,17 @@ function BillingForm({ node, onClose, onSaved }: {
   // Text rather than a number: a numeric state cannot represent an empty field,
   // so clearing it would snap back to 0 mid-entry. Empty means free.
   const [price, setPrice] = useState(node.price > 0 ? String(node.price) : "")
+  // Whole years are entered in years, the way a five-year plan is sold.
+  const months = cycleMonths(node.billing_cycle)
+  const [unit, setUnit] = useState(months === 0 ? "once" : months % 12 ? "months" : "years")
+  const [count, setCount] = useState(String(months % 12 ? months : months / 12 || 1))
   const [saving, setSaving] = useState(false)
   const set = <K extends keyof Node>(k: K, v: Node[K]) => setForm((f) => ({ ...f, [k]: v }))
 
   async function save() {
+    // The hub refuses a length out of range and stores a named one by name, so
+    // an unchanged length is compared in months, not in spelling.
+    const cycle = unit === "once" ? "once" : `${Number(count) * (unit === "years" ? 12 : 1)}m`
     setSaving(true)
     try {
       await api(`/nodes/${node.id}`, {
@@ -380,7 +401,7 @@ function BillingForm({ node, onClose, onSaved }: {
         body: JSON.stringify(changes(node, {
           price: Math.max(0, Number(price) || 0),
           currency: form.currency,
-          billing_cycle: form.billing_cycle,
+          billing_cycle: cycleMonths(cycle) === months ? node.billing_cycle : cycle,
           expires_at: form.expires_at || null,
         })),
       })
@@ -412,27 +433,38 @@ function BillingForm({ node, onClose, onSaved }: {
                 placeholder="免费"
               />
             </Field>
-            <Field label="货币">
-              <Select value={form.currency} onValueChange={(v) => set("currency", v)}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {["USD", "CNY", "EUR", "GBP", "JPY"].map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <Field label="货币" hint={currencyHint(form.currency.toUpperCase()) ?? "三个字母的代码，如 USD、CNY、HKD"}>
+              {/* Uppercased by CSS: rewriting the value mid-composition would
+                  break an input method, and the hub stores it uppercased. */}
+              <Input
+                className="uppercase"
+                maxLength={3}
+                value={form.currency}
+                onChange={(e) => set("currency", e.target.value)}
+                placeholder="USD"
+              />
             </Field>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="付款周期">
-              <Select value={form.billing_cycle} onValueChange={(v) => set("billing_cycle", v)}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {Object.entries(CYCLES).map(([k, v]) => (
-                    <SelectItem key={k} value={k}>{v}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <Field label="付款周期" hint="1 个月到 100 年，或一次性">
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  className="flex-1"
+                  value={unit === "once" ? "" : count}
+                  disabled={unit === "once"}
+                  onChange={(e) => setCount(e.target.value)}
+                />
+                <Select value={unit} onValueChange={setUnit}>
+                  <SelectTrigger className="w-28 shrink-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="months">个月</SelectItem>
+                    <SelectItem value="years">年</SelectItem>
+                    <SelectItem value="once">一次性</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </Field>
             <Field label="到期时间">
               <Input type="date" value={form.expires_at ?? ""} onChange={(e) => set("expires_at", e.target.value)} />
@@ -496,14 +528,45 @@ export type Versions = { hub: string; hub_latest: string; agent_latest: string; 
  * A hub that cannot reach github.com answers with empty latest fields, which
  * render as no update rather than as an error.
  *
+ * A failed attempt, or one that came back with no latest at all, is retried
+ * twice. Reading it exactly once used to leave the panel showing 查不到版本 --
+ * and the navigation without its dot -- for the rest of the page's life if that
+ * one request landed in the wrong second, as the hub's own first check does when
+ * a browser reaches a hub that has just started. Once the hub has an answer it
+ * serves it from a six-hour cache, so a retry costs one request.
+ *
  * It lives here and is passed down from `App` rather than read in both places:
  * the navigation's dot and the page are the same answer, and reading it twice
  * would make the panel ask twice.
  */
+const VERSION_RETRY_MS = [1_500, 4_000]
+
 export function useVersions() {
   const [versions, setVersions] = useState<Versions | null>(null)
   const load = useCallback(() => api<Versions>("/version").then(setVersions).catch(() => {}), [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    let stop = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const retry = (tries: number) => {
+      if (stop || tries >= VERSION_RETRY_MS.length) return
+      timer = setTimeout(() => attempt(tries + 1), VERSION_RETRY_MS[tries])
+    }
+    const attempt = (tries: number) => {
+      api<Versions>("/version")
+        .then((v) => {
+          if (!stop) setVersions(v)
+          // Empty latest is the hub saying its own check has not landed yet, or
+          // that it cannot reach GitHub; both are worth one more look.
+          if (!v.hub_latest && !v.agent_latest) retry(tries)
+        })
+        .catch(() => retry(tries))
+    }
+    attempt(0)
+    return () => {
+      stop = true
+      clearTimeout(timer)
+    }
+  }, [])
   return { versions, reload: load }
 }
 
@@ -797,11 +860,12 @@ function DragHandle({ onStart, onEnd, onKey, disabled, title, label }: {
   )
 }
 
-function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
+function Nodes({ nodes, refresh, site, canProvision, provisionNote, agentLatest }: {
   nodes: Node[]
   refresh: () => void
   site: string
   canProvision: boolean
+  provisionNote: string
   /** The newest agent release the hub has read, or null when it has not. */
   agentLatest: string | null
 }) {
@@ -883,6 +947,12 @@ function Nodes({ nodes, refresh, site, canProvision, agentLatest }: {
           <Plus /> 添加节点
         </Button>
       </div>
+
+      {/* Both buttons above are disabled without a word otherwise. The note names
+          the half that refused rather than listing every way it could. */}
+      {!canProvision && provisionNote && (
+        <p className="text-xs leading-relaxed text-muted-foreground">{provisionNote}</p>
+      )}
 
       <Card className="overflow-x-auto p-0">
         <Table>
@@ -2811,12 +2881,13 @@ function byVersion(nodes: Node[]): [string, Node[]][] {
  * The hub card names the release alone -- how to take it depends on how the hub
  * was installed, script or container, which the hub cannot tell.
  */
-function Update({ versions, reload, nodes, site, canProvision, agentLatest }: {
+function Update({ versions, reload, nodes, site, canProvision, provisionNote, agentLatest }: {
   versions: Versions | null
   reload: () => void
   nodes: Node[]
   site: string
   canProvision: boolean
+  provisionNote: string
   agentLatest: string | null
 }) {
   const [saving, setSaving] = useState(false)
@@ -2911,7 +2982,11 @@ function Update({ versions, reload, nodes, site, canProvision, agentLatest }: {
                 </div>
               </>
             ) : (
-              <p className="text-xs text-muted-foreground">请通过 HTTPS 域名访问面板后生成升级命令。</p>
+              // Why the commands are not there: the hub or this browser refused,
+              // and the two are fixed by different people.
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {provisionNote || "请通过 HTTPS 域名访问面板后生成升级命令。"}
+              </p>
             )}
             {/* Collapsed until asked for, grouped by version, and bounded in height
                 once open, so any number of nodes stays one line on the page. */}
@@ -2992,6 +3067,7 @@ export function Admin({
   refresh,
   site,
   canProvision,
+  provisionNote,
   agentLatest,
   versions,
   reloadVersions,
@@ -3001,6 +3077,7 @@ export function Admin({
   refresh: () => void
   site: string
   canProvision: boolean
+  provisionNote: string
   agentLatest: string | null
   /** Read once in `App`, which also marks the navigation with it. */
   versions: Versions | null
@@ -3027,10 +3104,11 @@ export function Admin({
             nodes={nodes}
             site={site}
             canProvision={canProvision}
+            provisionNote={provisionNote}
             agentLatest={agentLatest}
           />
         ) : (
-          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} agentLatest={agentLatest} />
+          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} provisionNote={provisionNote} agentLatest={agentLatest} />
         )}
       </div>
   )
