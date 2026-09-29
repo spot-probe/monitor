@@ -99,6 +99,15 @@ CREATE TABLE IF NOT EXISTS metric (
   mem_used INTEGER NOT NULL, swap_used INTEGER NOT NULL, disk_used INTEGER NOT NULL,
   net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
   tcp INTEGER NOT NULL, udp INTEGER NOT NULL, procs INTEGER NOT NULL,
+  -- Last, where `migrate_to_9` has to put them: `ALTER TABLE ADD COLUMN` appends,
+  -- so a column declared anywhere else would leave an upgraded database with a
+  -- different column order from a fresh one. The highest rate the agent measured
+  -- across one report interval within this minute, never below the mean beside
+  -- it: the mean is what integrates to the traffic totals, so a 15-second burst
+  -- in an otherwise idle minute stores as its average and loses the shape that
+  -- made it worth looking at. 0 on rows written before it existed, which the
+  -- history query reads as "no peak" rather than rewriting history.
+  net_rx_max INTEGER NOT NULL DEFAULT 0, net_tx_max INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (node_id, ts)
 ) WITHOUT ROWID;
 
@@ -106,7 +115,12 @@ CREATE TABLE IF NOT EXISTS ping_task (
   id       INTEGER PRIMARY KEY,
   name     TEXT    NOT NULL,
   target   TEXT    NOT NULL,
-  interval INTEGER NOT NULL DEFAULT 60
+  interval INTEGER NOT NULL DEFAULT 60,
+  -- Last, where `migrate_to_10` has to put it: a column declared anywhere else
+  -- would leave an upgraded database with a different column order from a fresh
+  -- one. The panel's order; every probe ties at 0 on an upgraded database, so
+  -- `ORDER BY sort, id` keeps the order it listed them in.
+  sort     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ping_node (
@@ -138,7 +152,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
 /// database already in service.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -280,6 +294,22 @@ fn migrate_to_8(conn: &Connection) -> Result<()> {
     add_column(conn, "metric", "load1 REAL")
 }
 
+/// The per-minute peak of each transfer rate, beside the minute's mean.
+///
+/// Rows written before this hold 0. `Db::metrics` reads that as "no peak" and
+/// falls back to the row's own mean, so history taken before the column existed
+/// still draws -- without rewriting every row of it here.
+fn migrate_to_9(conn: &Connection) -> Result<()> {
+    add_column(conn, "metric", "net_rx_max INTEGER NOT NULL DEFAULT 0")?;
+    add_column(conn, "metric", "net_tx_max INTEGER NOT NULL DEFAULT 0")
+}
+
+/// The probe order the panel arranges. Every existing probe ties at 0, so
+/// `ORDER BY sort, id` keeps the id order an upgraded database listed them in.
+fn migrate_to_10(conn: &Connection) -> Result<()> {
+    add_column(conn, "ping_task", "sort INTEGER NOT NULL DEFAULT 0")
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -310,6 +340,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 8 {
         migrate_to_8(conn)?;
+    }
+    if from < 9 {
+        migrate_to_9(conn)?;
+    }
+    if from < 10 {
+        migrate_to_10(conn)?;
     }
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     Ok(())
@@ -560,11 +596,16 @@ impl Db {
     // ---- settings ----
 
     pub fn get(&self, key: &str) -> Option<String> {
-        self.conn()
+        self.lookup(key).ok().flatten()
+    }
+
+    /// As [`Db::get`], with a failed read kept apart from an absent key, for a
+    /// caller that would otherwise act on "nothing saved".
+    pub fn lookup(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
             .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten()
+            .optional()?)
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
@@ -695,19 +736,33 @@ impl Db {
     }
 
     pub fn reorder_nodes(&self, ids: &[i64]) -> Result<()> {
+        self.reorder("node", ids)
+    }
+
+    pub fn reorder_ping_tasks(&self, ids: &[i64]) -> Result<()> {
+        self.reorder("ping_task", ids)
+    }
+
+    /// Renumbers `sort` from a list that must name every row exactly once, so a
+    /// tab that missed an insert or a delete cannot renumber around it.
+    ///
+    /// The count is read inside the transaction, not before it: re-reading the
+    /// list here would only race the write it guards.
+    fn reorder(&self, table: &str, ids: &[i64]) -> Result<()> {
         let unique: HashSet<_> = ids.iter().collect();
         if unique.len() != ids.len() {
-            anyhow::bail!("node order contains duplicates");
+            anyhow::bail!("排序里有重复的条目");
         }
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let count: i64 = tx.query_row("SELECT COUNT(*) FROM node", [], |r| r.get(0))?;
+        let count: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
         if count as usize != ids.len() {
-            anyhow::bail!("node order must include every node");
+            anyhow::bail!("列表已在别处改动，刷新后再排序");
         }
+        let sql = format!("UPDATE {table} SET sort=?2 WHERE id=?1");
         for (sort, id) in ids.iter().enumerate() {
-            if tx.execute("UPDATE node SET sort=?2 WHERE id=?1", params![id, sort as i64])? != 1 {
-                anyhow::bail!("node order contains an unknown node");
+            if tx.execute(&sql, params![id, sort as i64])? != 1 {
+                anyhow::bail!("列表已在别处改动，刷新后再排序");
             }
         }
         tx.commit()?;
@@ -1008,8 +1063,9 @@ impl Db {
         self.conn()
             .prepare_cached(
                 "INSERT OR REPLACE INTO metric
-               (node_id, ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, tcp, udp, procs, load1)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+               (node_id, ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, tcp, udp, procs, load1,
+                net_rx_max, net_tx_max)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             )?
             .execute(params![
                 node_id,
@@ -1023,7 +1079,9 @@ impl Db {
                 n("tcp"),
                 n("udp"),
                 n("procs"),
-                load1
+                load1,
+                n("net_rx_max"),
+                n("net_tx_max")
             ])?;
         Ok(())
     }
@@ -1052,6 +1110,13 @@ impl Db {
     ///
     /// The stamp is the bucket's start rather than a row inside it, so every
     /// series lands on one grid and the probe rows below can be shared.
+    ///
+    /// `net_rx_max` and `net_tx_max` are the bucket's **highest** rather than its
+    /// mean, since a maximum of maxima loses nothing: a week's window peaks at
+    /// the rate the busiest minute reached. Each row counts as at least its own
+    /// mean -- rows predating the column hold 0, and the mean, timed by the hub's
+    /// arrivals rather than the agent's own clock, can edge past the agent's
+    /// rates by the network's jitter.
     pub fn metrics(&self, node_id: i64, since: i64, step: i64) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
@@ -1059,7 +1124,8 @@ impl Db {
                     CAST(AVG(swap_used) AS INTEGER),
                     CAST(AVG(disk_used) AS INTEGER),
                     CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER),
-                    AVG(load1)
+                    AVG(load1),
+                    MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max))
              FROM metric WHERE node_id=?1 AND ts>=?2 GROUP BY ts/?3 ORDER BY ts/?3",
         )?;
         let rows = stmt.query_map(params![node_id, since, step], |r| {
@@ -1069,6 +1135,7 @@ impl Db {
                 "disk_used": r.get::<_, i64>(4)?,
                 "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
                 "load1": r.get::<_, Option<f64>>(7)?,
+                "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1127,7 +1194,7 @@ impl Db {
 
     pub fn ping_tasks(&self) -> Result<Vec<PingTask>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id, name, target, interval FROM ping_task ORDER BY id")?;
+        let mut stmt = conn.prepare("SELECT id, name, target, interval FROM ping_task ORDER BY sort, id")?;
         let tasks: Vec<PingTask> = stmt
             .query_map([], |r| {
                 Ok(PingTask {
@@ -1177,7 +1244,9 @@ impl Db {
             t.id
         } else {
             tx.execute(
-                "INSERT INTO ping_task (name, target, interval) VALUES (?1,?2,?3)",
+                // At the end, as in `create_node`.
+                "INSERT INTO ping_task (name, target, interval, sort)
+                 VALUES (?1,?2,?3,(SELECT COALESCE(MAX(sort),-1)+1 FROM ping_task))",
                 params![t.name, t.target, t.interval],
             )?;
             tx.last_insert_rowid()
@@ -1364,6 +1433,24 @@ impl Db {
             }
         }
         close_bucket(&mut out, &mut open, bucket * step);
+        // Probe by probe in the panel's order, each probe's rows still in time
+        // order. Themes take their series, colours and legend from the order in
+        // which probes first appear; bucket by bucket that would be whichever
+        // probe happened to answer inside the window's partial first bucket.
+        drop(rows);
+        drop(stmt);
+        let rank: HashMap<i64, usize> = conn
+            .prepare_cached("SELECT id FROM ping_task ORDER BY sort, id")?
+            .query_map([], |r| r.get(0))?
+            .enumerate()
+            .map(|(i, id)| id.map(|id| (id, i)))
+            .collect::<Result<_, _>>()?;
+        drop(conn);
+        // A probe missing from the rank goes last rather than taking the first
+        // colour; the assignment filter in `PING_ROWS` rules that out today.
+        out.sort_by_cached_key(|row| {
+            row["task_id"].as_i64().and_then(|id| rank.get(&id).copied()).unwrap_or(usize::MAX)
+        });
         // Unrounded: the caller decides how to render it, and rounding here would
         // turn 0.14% into the 0% that denotes no loss at all.
         let loss: serde_json::Map<String, serde_json::Value> = totals
@@ -1701,9 +1788,10 @@ impl Db {
 /// of a `loss` key means no timeouts occurred: truncating would report a bucket
 /// that lost 1 of 180 as clean.
 fn close_bucket(out: &mut Vec<serde_json::Value>, open: &mut Vec<(i64, Vec<i64>, i64)>, ts: i64) {
-    // Ordered by probe rather than by which answered first in this bucket, since
-    // the chart shades its lines by arrival order.
-    open.sort_unstable_by_key(|(task, ..)| *task);
+    // Not ordered here: the caller sorts the whole window by the panel's order,
+    // because themes take their series, colours and legend from the order in
+    // which probes first appear, and bucket by bucket that would be whichever
+    // probe happened to answer in the window's partial first bucket.
     for (task, mut answered, lost) in open.drain(..) {
         answered.sort_unstable();
         let middle = match answered.len() {
@@ -2374,6 +2462,39 @@ mod tests {
         assert_eq!(db.nodes().unwrap().iter().map(|n| n.id).collect::<Vec<_>>(), vec![c, a, b, d]);
     }
 
+    /// Themes draw probes in the order they first appear in the rows, so the rows
+    /// follow the panel's order even when a later probe alone answered in the
+    /// window's first bucket -- and a new probe starts at the end rather than on
+    /// top of the order it was added to.
+    #[test]
+    fn a_probe_chart_follows_the_panel_order() {
+        let db = db();
+        let id = node(&db, 1);
+        let probe = |name: &str| {
+            db.save_ping_task(&PingTask {
+                id: 0,
+                name: name.into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+            })
+            .unwrap()
+        };
+        let (a, b) = (probe("a"), probe("b"));
+        db.reorder_ping_tasks(&[b, a]).unwrap();
+        let c = probe("c");
+        let listed: Vec<_> = db.ping_tasks().unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(listed, vec![b, a, c], "a new probe starts at the end");
+
+        for (task, ts, latency) in [(a, 0, 10), (a, 60, 10), (b, 60, 20), (c, 60, 30)] {
+            db.insert_ping(id, task, ts, latency).unwrap();
+        }
+        let rows = db.ping_records(id, 0, 60).unwrap().0;
+        let drawn: Vec<_> =
+            rows.iter().map(|r| (r["task_id"].as_i64().unwrap(), r["ts"].as_i64().unwrap())).collect();
+        assert_eq!(drawn, vec![(b, 60), (a, 0), (a, 60), (c, 60)]);
+    }
+
     #[test]
     fn prune_drops_history_but_never_traffic_totals() {
         let db = db();
@@ -2409,6 +2530,29 @@ mod tests {
         let other = node(&db, 1);
         db.insert_metric(other, 60, &serde_json::json!({"swap_used": 0})).unwrap();
         assert_eq!(db.metrics(other, 0, 60).unwrap()[0]["swap_used"], 0, "zero, not null");
+    }
+
+    /// A bucket peaks where its busiest minute did, and a minute written before
+    /// the peak column existed counts as its own mean rather than as a zero that
+    /// would drag the window's peak down.
+    #[test]
+    fn history_peaks_where_its_busiest_minute_did() {
+        let db = db();
+        let id = node(&db, 1);
+        // One bucket: a quiet minute, then one whose busiest second ran four
+        // times its own average.
+        db.insert_metric(id, 10, &serde_json::json!({"net_rx": 0, "net_tx": 3_000})).unwrap();
+        db.insert_metric(
+            id,
+            70,
+            &serde_json::json!({"net_rx": 1_000, "net_rx_max": 4_000, "net_tx": 1_000, "net_tx_max": 2_000}),
+        )
+        .unwrap();
+
+        let row = &db.metrics(id, 0, 120).unwrap()[0];
+        assert_eq!(row["net_rx"], 500, "the bucket is its mean, not one row of it");
+        assert_eq!(row["net_rx_max"], 4_000, "the bucket peaks where its busiest minute did");
+        assert_eq!(row["net_tx_max"], 3_000, "a row without a peak counts as its own mean, not as zero");
     }
 
     /// The CPU panel draws load from history, so the bucket has to report the

@@ -77,6 +77,18 @@ pub struct App {
     pub themes: PathBuf,
     /// Alerts on their way out; see `notify::send`.
     pub notes: tokio::sync::mpsc::Sender<notify::Note>,
+    /// The tag this hub's own repository last published. Filled when an
+    /// administrator opens the panel rather than on a timer, so a hub nobody
+    /// opens makes no outbound request; see `api::version`.
+    pub hub_release: Mutex<HubRelease>,
+}
+
+#[derive(Default, Clone)]
+pub struct HubRelease {
+    /// The second it was read, 0 before the first read.
+    pub read_at: i64,
+    /// The tag without its leading `v`, empty where the lookup failed.
+    pub latest: String,
 }
 
 impl App {
@@ -98,6 +110,7 @@ impl App {
             site,
             themes,
             notes,
+            hub_release: Mutex::default(),
         }
     }
 
@@ -136,9 +149,11 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
     Some(chain.split(',').next()?.trim())
 }
 
-/// Where the agent binaries are published. Not a setting: redirecting it
-/// implies a fork, which rebuilds this line anyway.
-const AGENT_REPO: &str = "spot-probe/agent";
+/// Where the agent binaries are published, and where this hub is published. Not
+/// settings: redirecting either implies a fork, which rebuilds these lines
+/// anyway.
+pub const AGENT_REPO: &str = "spot-probe/agent";
+pub const HUB_REPO: &str = "spot-probe/monitor";
 
 /// The one-line installer pasted onto a new VPS.
 async fn install_script() -> Response {
@@ -442,6 +457,7 @@ async fn main() -> Result<()> {
         .route("/api/nodes", get(api::nodes))
         .route("/api/nodes/{id}/metrics", get(api::metrics))
         .route("/api/ws", get(api::live_ws))
+        .route("/api/themes/{short}/config", get(api::theme_config))
         // Sign-in.
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
@@ -455,15 +471,18 @@ async fn main() -> Result<()> {
         .route("/api/nodes/{id}/token", post(api::reset_token))
         .route("/api/nodes/{id}/traffic", put(api::patch_traffic))
         .route("/api/ping-tasks", get(api::ping_tasks).post(api::save_ping_task))
+        .route("/api/ping-tasks/order", put(api::reorder_ping_tasks))
         .route("/api/ping-tasks/{id}", delete(api::delete_ping_task))
         .route("/api/sessions", get(api::sessions))
         .route("/api/sessions/{id}", delete(api::delete_session))
         .route("/api/settings", get(api::settings).put(api::save_settings))
+        .route("/api/version", get(api::version))
         .route("/api/notify/test", post(notify::test))
         .route("/api/themes", get(api::themes))
         .route("/api/themes/{short}", delete(api::delete_theme))
         .route("/api/themes/{short}/preview", get(api::theme_preview))
         .route("/api/themes/{short}/update", post(api::update_theme))
+        .route("/api/themes/{short}/config", put(api::save_theme_config))
         .route("/api/db", get(api::db_stats))
         .route("/api/db/backup", get(api::db_backup))
         .route("/api/db/vacuum", post(api::db_vacuum))
