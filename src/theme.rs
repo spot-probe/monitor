@@ -223,10 +223,10 @@ pub async fn archive(app: &App, owner: &str, repo: &str, tag: &str) -> Result<Ve
         .await
         .with_context(no_sum)?
         .error_for_status()
-        .with_context(no_sum)
         .with_context(no_sum)?
         .text()
-        .await?;
+        .await
+        .with_context(no_sum)?;
     let want = sum.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("{tag} 的 {SUM} 里不是 sha256");
@@ -261,7 +261,10 @@ pub async fn archive(app: &App, owner: &str, repo: &str, tag: &str) -> Result<Ve
         Some(size) => bail!("主题包 {} MiB，超过 {} MiB 的上限", size / 1024 / 1024, MAX_THEME / 1024 / 1024),
         None => bail!("下载没有给出大小，无法确认它在 {} MiB 以内", MAX_THEME / 1024 / 1024),
     }
-    let archive = response.bytes().await?;
+    // The body read as well as the send and the status: a filtered network
+    // usually gives up mid-transfer, and without this the panel would show
+    // reqwest's own sentence instead of the one naming the proxy.
+    let archive = response.bytes().await.with_context(unreachable)?;
     // Before the checksum, whose message would send the reader looking for a
     // corrupt release. A proxy answers with a page of its own -- a block notice,
     // a sign-in wall -- under a 200, and `unpack`'s answer is written for an

@@ -790,6 +790,11 @@ mod tests {
         // Not yet due, and one-off billing: both left unchanged.
         assert_eq!(renewed(d("2026-09-01"), "monthly", d("2026-08-28")), None);
         assert_eq!(renewed(d("2020-01-01"), "once", d("2026-08-28")), None);
+        // A length with no name rolls forward by its own months: five years at a
+        // time, not twelve.
+        assert_eq!(renewed(d("2026-03-10"), "60m", d("2026-08-28")), Some(d("2031-03-10")));
+        // And a named length still parses through the same function.
+        assert_eq!(renewed(d("2026-03-10"), "36m", d("2026-08-28")), Some(d("2029-03-10")));
     }
 
     /// The hour is the local one, which in a half-hour zone is not UTC's.

@@ -439,6 +439,9 @@ function BillingForm({ node, onClose, onSaved }: {
               <Input
                 className="uppercase"
                 maxLength={3}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
                 value={form.currency}
                 onChange={(e) => set("currency", e.target.value)}
                 placeholder="USD"
@@ -451,6 +454,10 @@ function BillingForm({ node, onClose, onSaved }: {
                 <Input
                   type="number"
                   min={1}
+                  // Whole months only: a fractional one would be stored as
+                  // `1.5m`, which the hub refuses as "要是整月".
+                  step={1}
+                  aria-label="周期长度"
                   className="flex-1"
                   value={unit === "once" ? "" : count}
                   disabled={unit === "once"}
