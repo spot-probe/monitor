@@ -1013,14 +1013,14 @@ pub async fn update_node(
 }
 
 #[derive(Deserialize)]
-pub struct NodeOrder {
+pub struct Order {
     ids: Vec<i64>,
 }
 
 /// The list must name every node exactly once, checked inside the transaction
 /// that renumbers rather than here: re-reading the node list first would only
 /// race the write it guards.
-pub async fn reorder_nodes(_: Admin, State(app): State<Shared>, Json(order): Json<NodeOrder>) -> Response {
+pub async fn reorder_nodes(_: Admin, State(app): State<Shared>, Json(order): Json<Order>) -> Response {
     match app.db.reorder_nodes(&order.ids) {
         Ok(()) => {
             invalidate_snapshot(&app);
@@ -1088,6 +1088,15 @@ pub async fn patch_traffic(
         }
         Ok(false) => no_such_node(),
         Err(e) => fail(e),
+    }
+}
+
+/// As `reorder_nodes`. Nothing is pushed to the agents: the list they run is in
+/// id order, see `ping_tasks_for`, so reordering changes nothing they hold.
+pub async fn reorder_ping_tasks(_: Admin, State(app): State<Shared>, Json(order): Json<Order>) -> Response {
+    match app.db.reorder_ping_tasks(&order.ids) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => bad(&e.to_string()),
     }
 }
 
@@ -1180,7 +1189,82 @@ const READABLE_SETTINGS: &[&str] = &[
     "retention_days",
     "theme",
     "github_proxy",
+    "update_notice",
 ];
+
+/// How long a release lookup stands before the panel asks GitHub again, and how
+/// long a failed one does. The short retry keeps one unreachable moment from
+/// hiding an update for the rest of the day; the long one keeps a panel left
+/// open on a screen to four lookups a day, well inside the 60 per hour an
+/// unauthenticated caller is allowed.
+const RELEASES_FRESH: i64 = 6 * 3600;
+const RELEASES_RETRY: i64 = 600;
+
+/// What is running here, and what is published.
+///
+/// Admin-only, and deliberately not part of `/api/me`: that route answers
+/// anonymous callers, to whom the running hub version is not disclosed. The
+/// agent's latest comes from [`crate::agent_release`], the same check the node
+/// list is marked against -- one source for that fact rather than two, even
+/// though it refreshes daily rather than on this request.
+///
+/// Nothing is fetched until an administrator asks, so a hub whose panel is never
+/// opened makes no outbound request.
+pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
+    let cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let hub_latest = if fresh_enough(&cached, Utc::now().timestamp()) {
+        cached.latest
+    } else {
+        let latest = latest_hub_tag(&app).await.unwrap_or_default();
+        *app.hub_release.lock().unwrap_or_else(|e| e.into_inner()) =
+            crate::HubRelease { read_at: Utc::now().timestamp(), latest: latest.clone() };
+        latest
+    };
+    Json(json!({
+        "hub": env!("CARGO_PKG_VERSION"),
+        // Empty where GitHub could not be reached, which the panel renders as no
+        // update rather than as an error: a hub on a network that cannot reach
+        // github.com is a supported deployment, not a fault to report.
+        "hub_latest": hub_latest,
+        "agent_latest": crate::agent_release::latest_now(&app).await.unwrap_or_default(),
+        // Whether the navigation marks an update. It governs the mark alone: the
+        // lookup runs either way, so the update page still answers when opened.
+        "notice": app.db.get("update_notice").as_deref() != Some("off"),
+    }))
+}
+
+/// Whether the cached lookup still answers. One that returned nothing is held
+/// for [`RELEASES_RETRY`] instead, so a single unreachable moment does not hide
+/// an update for the rest of the day.
+fn fresh_enough(cached: &crate::HubRelease, now: i64) -> bool {
+    let holds = if cached.latest.is_empty() { RELEASES_RETRY } else { RELEASES_FRESH };
+    cached.read_at != 0 && now - cached.read_at < holds
+}
+
+/// The tag of this hub repository's latest release, without its leading `v`, or
+/// `None` where GitHub could not be read -- which costs only the update notice.
+///
+/// Not `theme::latest`: that one additionally requires the release to carry
+/// `theme.tar.gz`, the contract a theme is installed through and one this
+/// repository's releases do not meet. Through the panel's GitHub proxy, as
+/// `agent_release` is: a hub that cannot reach api.github.com directly is
+/// exactly the one whose operator configured a proxy.
+async fn latest_hub_tag(app: &App) -> Option<String> {
+    let release: crate::theme::Release = app
+        .http
+        .get(crate::proxied(app, format!("https://api.github.com/repos/{}/releases/latest", crate::HUB_REPO)))
+        .header(header::USER_AGENT, "monitor-hub")
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let tag = release.tag_name;
+    Some(tag.strip_prefix('v').unwrap_or(&tag).to_owned())
+}
 
 // ---- the database itself ----
 
@@ -1598,6 +1682,63 @@ pub async fn delete_theme(_: Admin, State(app): State<Shared>, Path(short): Path
     }
 }
 
+/// Where a theme's saved settings live. Keyed by `short` in the database rather
+/// than stored beside the theme, so updating, reinstalling or deleting the theme
+/// leaves them in place, and a backup carries them.
+fn theme_config_key(short: &str) -> String {
+    format!("theme_config:{short}")
+}
+
+/// The settings saved for one theme: only the fields the site owner changed
+/// away from the defaults its `theme.json` declares, which the theme fills in
+/// itself. Any theme may be named, installed or not, so a theme under
+/// development reads its own settings from whichever hub it proxies to.
+///
+/// Anonymous, under the same condition as `/api/nodes`. One request is one
+/// primary-key read answering at most 64 KiB, the router's body limit having
+/// bounded the write, so it is the cost class of `/api/me` and takes no
+/// separate gate.
+///
+/// A failed read answers 500 rather than `{}`: the panel saves on top of what it
+/// reads, so an empty answer would erase every saved override.
+pub async fn theme_config(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    Path(short): Path<String>,
+) -> Response {
+    if !authed(&app, &headers) && !app.public_page() {
+        return (StatusCode::UNAUTHORIZED, "sign-in required").into_response();
+    }
+    if !crate::frontend::valid_short(&short) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match app.db.lookup(&theme_config_key(&short)) {
+        Ok(saved) => {
+            let saved = saved.unwrap_or_else(|| "{}".into());
+            ([(header::CONTENT_TYPE, "application/json")], saved).into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// Replaces a theme's saved settings. Values are not checked against the
+/// theme's declared fields: the theme must validate what it reads regardless,
+/// since a value saved under one version of the theme meets the next.
+pub async fn save_theme_config(
+    _: Admin,
+    State(app): State<Shared>,
+    Path(short): Path<String>,
+    Json(values): Json<serde_json::Map<String, Value>>,
+) -> Response {
+    if !crate::frontend::valid_short(&short) || !crate::frontend::selectable(&app, &short) {
+        return bad("theme is not installed");
+    }
+    match app.db.set(&theme_config_key(&short), &Value::Object(values).to_string()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => fail(e),
+    }
+}
+
 pub async fn themes(_: Admin, State(app): State<Shared>) -> Response {
     match crate::frontend::themes(&app) {
         // The update check's answer rides along with the list: it is about these
@@ -1758,6 +1899,19 @@ mod tests {
     use crate::auth::sha256;
     use crate::db::Db;
 
+    /// A lookup nobody can refresh must not hide an update all day, and a panel
+    /// left open on a screen must not ask GitHub on every load.
+    #[test]
+    fn a_release_lookup_is_held_for_six_hours_and_a_failed_one_for_ten_minutes() {
+        let now = Utc::now().timestamp();
+        let read = |read_at, latest: &str| crate::HubRelease { read_at, latest: latest.into() };
+        assert!(!fresh_enough(&crate::HubRelease::default(), now), "nothing has been read yet");
+        assert!(fresh_enough(&read(now - 5 * 3600, "1.9.0"), now));
+        assert!(!fresh_enough(&read(now - 7 * 3600, "1.9.0"), now));
+        assert!(fresh_enough(&read(now - 300, ""), now), "a failure is held briefly");
+        assert!(!fresh_enough(&read(now - 1200, ""), now), "and then tried again");
+    }
+
     fn domain_headers() -> HeaderMap {
         HeaderMap::from_iter([
             (header::HOST, "monitor.example.com".parse().unwrap()),
@@ -1868,6 +2022,35 @@ mod tests {
         // Trimming must not turn a blank entry into a saved row.
         assert_eq!(save("   ", "   ").await.status(), StatusCode::BAD_REQUEST);
         assert_eq!(app.db.ping_tasks().unwrap().len(), 1);
+    }
+
+    /// What the panel saves is what an anonymous visitor reads, under the same
+    /// condition as the node list, and only an installed theme takes a write.
+    #[tokio::test]
+    async fn saved_theme_settings_reach_visitors_while_the_status_page_is_open() {
+        let app = std::sync::Arc::new(app());
+        let read = |short: &str| theme_config(State(app.clone()), HeaderMap::new(), Path(short.to_owned()));
+        let body = |r: Response| async { axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap() };
+
+        assert_eq!(&body(read("default").await).await[..], b"{}", "nothing saved reads as no overrides");
+        let values = json!({"notice": "维护中", "show_summary": false}).as_object().unwrap().clone();
+        let saved =
+            save_theme_config(Admin, State(app.clone()), Path("default".into()), Json(values.clone())).await;
+        assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+        let read_back: Value = serde_json::from_slice(&body(read("default").await).await).unwrap();
+        assert_eq!(read_back, Value::Object(values.clone()), "an anonymous visitor gets the saved values");
+
+        let missing =
+            save_theme_config(Admin, State(app.clone()), Path("aurora".into()), Json(values.clone())).await;
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST, "a theme that is not installed takes no write");
+        assert_eq!(read("../etc").await.status(), StatusCode::NOT_FOUND, "a short names a directory");
+
+        app.db.set("public_page", "off").unwrap();
+        assert_eq!(
+            read("default").await.status(),
+            StatusCode::UNAUTHORIZED,
+            "a closed status page hides them too"
+        );
     }
 
     /// The same rule as `retention_days`, applied to the other value this hub

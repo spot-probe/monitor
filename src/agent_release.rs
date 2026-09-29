@@ -29,6 +29,13 @@ use crate::{proxied, App, Shared};
 const INTERVAL: Duration = Duration::from_secs(24 * 3_600);
 const FIRST: Duration = Duration::from_secs(30);
 
+/// How old a read may be before the panel's `/api/version` reads it again. The
+/// daily loop above keeps the node markers current on a hub nobody opens; this
+/// is what makes the update page answer on the first ask instead of showing
+/// nothing for the thirty seconds after a restart, and what keeps it honest if
+/// that page is all anyone ever looks at.
+const FRESH: i64 = 6 * 3_600;
+
 #[derive(Clone, Debug, Default)]
 pub struct Check {
     pub checked_at: i64,
@@ -50,6 +57,19 @@ struct Release {
 
 pub fn state(app: &App) -> Check {
     app.agent_release.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The latest release, read now if the daily check has not run yet or has gone
+/// stale. The panel asks for this rather than looking it up itself, so one module
+/// owns "which agent release exists" -- the same fact the node list is marked
+/// against.
+pub async fn latest_now(app: &App) -> Option<String> {
+    let now = chrono::Utc::now().timestamp();
+    let read = state(app);
+    if read.checked_at == 0 || now - read.checked_at >= FRESH {
+        refresh(app).await;
+    }
+    state(app).latest
 }
 
 /// The daily loop.

@@ -98,6 +98,19 @@ impl Agent {
 const MEAN_FLOAT: [&str; 1] = ["cpu"];
 const MEAN_INT: [&str; 6] = ["mem_used", "swap_used", "disk_used", "tcp", "udp", "procs"];
 
+/// Rates a history row also carries at their highest over the minute, each as the
+/// agent measured it across one report interval, stored under its own column.
+///
+/// The row's own rate is the minute's mean, which is what integrates to the
+/// traffic totals -- and therefore stores a 15-second burst in an otherwise idle
+/// minute as that minute's average, losing the shape that made it worth looking
+/// at. This is the same instant the live view shows, kept for the minute.
+///
+/// Taken from the agent rather than derived here from the arrival of two frames:
+/// the network bunches frames, and a second of bytes divided by the half second
+/// between two arrivals would record twice the rate that ran.
+const PEAK: [(&str, &str); 2] = [("net_rx", "net_rx_max"), ("net_tx", "net_tx_max")];
+
 /// Running sums for the minute in progress, one slot per averaged field.
 #[derive(Debug, Default)]
 struct Minute {
@@ -110,12 +123,17 @@ struct Minute {
     /// chart would draw as an idle machine.
     load1: f64,
     loads: f64,
+    /// The highest of each [`PEAK`] rate seen in the minute.
+    peaks: [i64; PEAK.len()],
 }
 
 impl Minute {
     fn add(&mut self, metrics: &serde_json::Value) {
         for (slot, key) in MEAN_FLOAT.iter().chain(&MEAN_INT).enumerate() {
             self.sums[slot] += metrics.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        for (peak, (key, _)) in self.peaks.iter_mut().zip(PEAK) {
+            *peak = (*peak).max(metrics.get(key).and_then(|v| v.as_i64()).unwrap_or(0));
         }
         // Read `load[0]` by hand rather than through the lists above: those
         // index a scalar under the name they write, while this one takes the
@@ -156,6 +174,11 @@ impl Minute {
         // absence of load rather than a minute spent idle.
         if self.loads > 0.0 {
             obj.insert("load1".to_owned(), json!(self.load1 / self.loads));
+        }
+        // Written whatever the report carried, so an agent sending these keys
+        // itself cannot choose the stored value.
+        for (peak, (_, column)) in self.peaks.iter().zip(PEAK) {
+            obj.insert((*column).to_owned(), json!(peak));
         }
     }
 }
@@ -456,9 +479,11 @@ fn report(app: &App, node_id: i64, mut metrics: serde_json::Value) -> Result<()>
         let mut row = metrics.clone();
         entry.minute.write_into(&mut row);
         if let (Some((since, rx0, tx0)), Some(obj)) = (entry.mark, row.as_object_mut()) {
-            let elapsed = tick.saturating_duration_since(since).as_secs().max(1) as i64;
-            obj.insert("net_rx".into(), json!((traffic.total_rx - rx0).max(0) / elapsed));
-            obj.insert("net_tx".into(), json!((traffic.total_tx - tx0).max(0) / elapsed));
+            // Fractional seconds: whole ones drop up to 0.99 s of the minute and
+            // overstate its rate by up to 1.7%.
+            let elapsed = tick.saturating_duration_since(since).as_secs_f64().max(1.0);
+            obj.insert("net_rx".into(), json!(((traffic.total_rx - rx0).max(0) as f64 / elapsed) as i64));
+            obj.insert("net_tx".into(), json!(((traffic.total_tx - tx0).max(0) as f64 / elapsed) as i64));
         }
         entry.last_minute = minute;
         entry.mark = Some((tick, traffic.total_rx, traffic.total_tx));
@@ -674,6 +699,11 @@ mod tests {
         // Busy for half the minute, then idle. The first reading is also the
         // traffic baseline: nothing is booked until a second arrives.
         dispatch(&app, id, "ip", &burst(1_000, 0, 100.0, 100)).unwrap();
+        // A report inside the same minute, which caught the busiest second of the
+        // burst. It folds into the mean below -- the rate that integrates to the
+        // traffic totals -- and it is the only place the peak survives: the mean
+        // of a minute-long burst is what a chart would otherwise draw.
+        dispatch(&app, id, "ip", &burst(1_000 + 45_000_000, 3_000_000, 50.0, 151)).unwrap();
         // Rewind the bookkeeping by a minute so the next report crosses the
         // boundary with a minute of elapsed time behind it. The mark is an
         // `Instant` precisely because a wall-clock difference can be negative when
@@ -690,7 +720,16 @@ mod tests {
         dispatch(&app, id, "ip", &burst(1_000 + 60_000_000, 0, 0.0, 201)).unwrap();
 
         let row = &app.db.metrics(id, 0, 60).unwrap()[0];
-        assert_eq!(row["net_rx"], 1_000_000, "60 MB over 60 s is 1 MB/s, not the agent's 0");
+        // The span is a real `Instant` difference, so it is a hair over 60 s and
+        // the rate a hair under 1 MB/s. Whole seconds would make this exactly
+        // 1_000_000 and overstate the minute by up to 1.7%; the band is what says
+        // the division is now by the measured span, not by a rounded one.
+        let rate = row["net_rx"].as_i64().unwrap();
+        assert!(
+            (999_500..=1_000_000).contains(&rate),
+            "60 MB over a minute is about 1 MB/s, not the agent's 0: {rate}"
+        );
+        assert_eq!(row["net_rx_max"], 3_000_000, "the minute's busiest second survives its mean");
         assert_eq!(row["cpu"], 50.0, "the mean of the minute, not the idle second it ended on");
         // Integers remain integral: the column is read with as_i64, which returns
         // nothing for the 150.5 the raw mean would produce.
