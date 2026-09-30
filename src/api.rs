@@ -17,7 +17,8 @@ use tracing::debug;
 
 use crate::agent_ws::Agent;
 use crate::auth::{
-    authed, client_ip, current_session, hash_password, issue_session, issued_at, random_token, with_cookies,
+    authed, behind_local_proxy, client_ip, current_session, hash_password, issue_session, issued_at,
+    random_token, with_cookies,
 };
 use crate::db::{Node, NodePatch, PingTask, Traffic, TrafficPatch};
 use crate::{agent_ws, App, Shared};
@@ -799,11 +800,38 @@ pub(crate) fn https_domain(site: &str) -> Option<reqwest::Url> {
 /// a genuine IP entry point: provisioning stops working across an upgrade, the
 /// message implicates the address bar, and nothing records the header actually
 /// responsible.
-fn provisioning_block(app: &App, headers: &HeaderMap) -> Option<ProvisionBlock> {
+/// Whether this request arrived straight from a private network rather than
+/// through a proxy, which is the one case where a plaintext address entry is
+/// allowed -- the token then never leaves the operator's own network, which is
+/// the whole reason the checks below exist.
+///
+/// Both halves are load-bearing. `client_ip` resolves what a *local* proxy
+/// forwards in `X-Forwarded-For`, so a reverse proxy on the same host -- the
+/// normal production shape, connecting from loopback -- reports the real client
+/// and a public visitor is not mistaken for a local one. And a request that
+/// announced https is never treated as a direct plaintext one, which covers the
+/// proxy that forwards an address but no scheme.
+fn private_entry(headers: &HeaderMap, peer: IpAddr) -> bool {
+    crate::forwarded_proto(headers).is_none() && behind_local_proxy(client_ip(headers, peer))
+}
+
+fn provisioning_block(app: &App, headers: &HeaderMap, peer: IpAddr) -> Option<ProvisionBlock> {
     let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
         debug!("provisioning refused: the request carries no readable Host header");
         return Some(ProvisionBlock::Host);
     };
+    // Straight from a private network: plain http and a bare address are how it is
+    // entered, and `--site` is not consulted -- an operator who named their LAN
+    // address in it is being consistent, not wrong. The Origin still has to agree,
+    // which is what keeps another site from posting here on this browser's behalf.
+    if private_entry(headers, peer) {
+        let expected = format!("http://{host}");
+        if headers.get(header::ORIGIN).is_some_and(|origin| origin.to_str().ok() != Some(expected.as_str())) {
+            debug!("provisioning refused: Origin {:?} is not {expected}", headers.get(header::ORIGIN));
+            return Some(ProvisionBlock::Origin);
+        }
+        return None;
+    }
     let forwarded = crate::forwarded_proto(headers);
     let https = forwarded.map_or_else(|| app.site.starts_with("https://"), |scheme| scheme == "https");
     if !https {
@@ -831,10 +859,6 @@ fn provisioning_block(app: &App, headers: &HeaderMap) -> Option<ProvisionBlock> 
         return Some(ProvisionBlock::Origin);
     }
     None
-}
-
-fn provisioning_allowed(app: &App, headers: &HeaderMap) -> bool {
-    provisioning_block(app, headers).is_none()
 }
 
 /// Range and sign limits every stored node must satisfy, or the reason it does
@@ -920,7 +944,11 @@ fn group_error(group: &mut String) -> Option<&'static str> {
     None
 }
 
-pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
+pub async fn me(
+    State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     let authed = authed(&app, &headers);
     // Which login this browser holds -- and only for the browser holding it. The public
     // page calls this endpoint too, and an anonymous visitor gets an empty string. The
@@ -934,6 +962,7 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
     // The panel shows which hub it is talking to. Reported only to a signed-in browser:
     // an anonymous visitor has no use for it, and a version is worth not handing out.
     let version = if authed { env!("CARGO_PKG_VERSION") } else { "" };
+    let block = provisioning_block(&app, &headers, peer.ip());
     let body = json!({
         "authed": authed,
         "login": login,
@@ -941,10 +970,12 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
         "github": app.db.get("github_client_id").is_some_and(|v| !v.is_empty()),
         "site_name": app.db.get("site_name").unwrap_or_else(|| "Monitor".into()),
         "public_page": app.public_page(),
-        "can_provision": provisioning_allowed(&app, &headers),
+        // One decision, read once: the boolean and the code beside it are the same
+        // call, and asking twice logged a refusal twice.
+        "can_provision": block.is_none(),
         // Which half refused, when it did: the panel reports it beside the
         // disabled buttons, and an admin has no journal to read.
-        "provision_block": provisioning_block(&app, &headers).map_or("", ProvisionBlock::code),
+        "provision_block": block.map_or("", ProvisionBlock::code),
         // The hub's own public URL when one was given, which is what belongs in an
         // install command and in the OAuth callback -- not whichever address this
         // browser used, which behind a proxy may be a loopback port. Empty by
@@ -966,10 +997,11 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
 pub async fn create_node(
     _: Admin,
     State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     body: Result<Json<Node>, JsonRejection>,
 ) -> Response {
-    if let Some(block) = provisioning_block(&app, &headers) {
+    if let Some(block) = provisioning_block(&app, &headers, peer.ip()) {
         return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let Ok(Json(mut node)) = body else { return bad("invalid node") };
@@ -1033,7 +1065,7 @@ pub async fn agent_register(
     // a POSIX `sh`.
     name: String,
 ) -> Response {
-    if let Some(block) = provisioning_block(&app, &headers) {
+    if let Some(block) = provisioning_block(&app, &headers, peer.ip()) {
         return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let ip = client_ip(&headers, peer.ip());
@@ -1091,8 +1123,13 @@ pub async fn agent_register(
 
 /// Opens a registration window with a fresh key. Any previous key stops working
 /// the moment this returns.
-pub async fn open_register(_: Admin, State(app): State<Shared>, headers: HeaderMap) -> Response {
-    if let Some(block) = provisioning_block(&app, &headers) {
+pub async fn open_register(
+    _: Admin,
+    State(app): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(block) = provisioning_block(&app, &headers, peer.ip()) {
         return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
     let key = random_token();
@@ -2118,6 +2155,20 @@ mod tests {
         App::for_test(Db::open(":memory:").unwrap())
     }
 
+    /// The peer the hub sees for a request from the network, and one for a request
+    /// from the machine it runs on.
+    fn far_ip() -> IpAddr {
+        "198.51.100.7".parse().unwrap()
+    }
+
+    fn local_ip() -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
+    fn conn(ip: IpAddr) -> ConnectInfo<std::net::SocketAddr> {
+        ConnectInfo((ip, 40000).into())
+    }
+
     /// What the panel draws its group field from: a plain text box unless the hub
     /// was started with `--group-dropdown`.
     #[tokio::test]
@@ -2127,7 +2178,7 @@ mod tests {
             (std::sync::Arc::new(App::for_test(Db::open(":memory:").unwrap())), false),
             (std::sync::Arc::new(App::for_test_group_dropdown(Db::open(":memory:").unwrap())), true),
         ] {
-            let asked = me(State(app), domain_headers()).await;
+            let asked = me(State(app), conn(far_ip()), domain_headers()).await;
             let json: serde_json::Value = serde_json::from_slice(&body(asked).await).unwrap();
             assert_eq!(json["group_dropdown"], want, "group_dropdown in /api/me");
             // The default window, and what the range pickers are built from.
@@ -2142,11 +2193,11 @@ mod tests {
         state.site = "https://monitor.example.com".into();
         let app = std::sync::Arc::new(state);
         let good = domain_headers();
-        assert!(provisioning_allowed(&app, &good));
+        assert!(provisioning_block(&app, &good, far_ip()).is_none());
         let mut plain = good.clone();
         plain.insert("x-forwarded-proto", "http".parse().unwrap());
         assert!(
-            !provisioning_allowed(&app, &plain),
+            provisioning_block(&app, &plain, far_ip()).is_some(),
             "--site cannot override an explicitly plaintext request"
         );
         for host in ["127.0.0.1:9911", "[::1]:9911", "198.51.100.1", "2130706433", "localhost"] {
@@ -2154,11 +2205,13 @@ mod tests {
             headers.insert(header::HOST, host.parse().unwrap());
             let node = serde_json::from_value(json!({"name":"blocked"})).unwrap();
             assert_eq!(
-                create_node(Admin, State(app.clone()), headers.clone(), Ok(Json(node))).await.status(),
+                create_node(Admin, State(app.clone()), conn(far_ip()), headers.clone(), Ok(Json(node)))
+                    .await
+                    .status(),
                 StatusCode::FORBIDDEN
             );
             assert_eq!(
-                open_register(Admin, State(app.clone()), headers.clone()).await.status(),
+                open_register(Admin, State(app.clone()), conn(far_ip()), headers.clone()).await.status(),
                 StatusCode::FORBIDDEN
             );
             assert_eq!(
@@ -2175,12 +2228,12 @@ mod tests {
         }
         let mut headers = good.clone();
         headers.insert(header::ORIGIN, "http://127.0.0.1:9911".parse().unwrap());
-        assert!(!provisioning_allowed(&app, &headers));
+        assert!(provisioning_block(&app, &headers, far_ip()).is_some());
         assert!(app.db.nodes().unwrap().is_empty());
         assert!(app.db.get("register_key").is_none());
         headers = good;
         headers.remove("x-forwarded-proto");
-        assert!(!provisioning_allowed(&no_site, &headers));
+        assert!(provisioning_block(&no_site, &headers, far_ip()).is_some());
         for site in [
             "http://monitor.example.com",
             "https://198.51.100.1",
@@ -2189,6 +2242,63 @@ mod tests {
         ] {
             assert!(https_domain(site).is_none());
         }
+    }
+
+    /// A request straight from a private network may enter by plain http and by a
+    /// bare address: the token then stays on that network, which is the reason the
+    /// other checks exist at all. What must stay out of reach is a request a proxy
+    /// relayed -- a reverse proxy on this host connects from loopback, the normal
+    /// production shape -- and one that already said it came over https.
+    #[tokio::test]
+    async fn a_private_entry_may_be_plaintext_but_a_relayed_one_may_not() {
+        let state = std::sync::Arc::new(app());
+        let mut lan = HeaderMap::new();
+        lan.insert(header::HOST, "192.168.1.5:28080".parse().unwrap());
+        lan.insert(header::ORIGIN, "http://192.168.1.5:28080".parse().unwrap());
+
+        // Straight in from the LAN, and from the machine itself: allowed, and
+        // `--site` is not consulted.
+        assert_eq!(provisioning_block(&state, &lan, local_ip()), None);
+        assert_eq!(provisioning_block(&state, &lan, "192.168.1.5".parse().unwrap()), None);
+
+        // Another site posting on this browser's behalf is still refused.
+        let mut other = lan.clone();
+        other.insert(header::ORIGIN, "http://evil.example.com".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &other, local_ip()), Some(ProvisionBlock::Origin));
+
+        // Relayed by a proxy on this host for a public client: the forwarded
+        // address is the client, so this is not a private entry.
+        let mut proxied = lan.clone();
+        proxied.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &proxied, local_ip()), Some(ProvisionBlock::Https));
+
+        // A public client entering directly: unchanged.
+        assert_eq!(provisioning_block(&state, &lan, far_ip()), Some(ProvisionBlock::Https));
+
+        // A request that announced https is judged by the old rules even from a
+        // private address, where a bare address is still not an entry.
+        let mut said_https = lan.clone();
+        said_https.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert_eq!(provisioning_block(&state, &said_https, local_ip()), Some(ProvisionBlock::Host));
+
+        // And the two write paths stop refusing, which is what makes the panel's
+        // buttons appear.
+        let node = serde_json::from_value(json!({"name": "lan"})).unwrap();
+        assert_eq!(
+            create_node(Admin, State(state.clone()), conn(local_ip()), lan.clone(), Ok(Json(node)))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            open_register(Admin, State(state.clone()), conn(local_ip()), lan.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            open_register(Admin, State(state.clone()), conn(far_ip()), lan).await.status(),
+            StatusCode::FORBIDDEN,
+            "the same request from the network is not a private entry"
+        );
     }
 
     /// The panel reports which half refused, so the four cases have to be told
@@ -2200,16 +2310,16 @@ mod tests {
         configured.site = "https://monitor.example.com".into();
         let state = std::sync::Arc::new(configured);
         let good = domain_headers();
-        assert_eq!(provisioning_block(&state, &good), None, "nothing to report when it works");
+        assert_eq!(provisioning_block(&state, &good, far_ip()), None, "nothing to report when it works");
 
         let mut plain = good.clone();
         plain.insert("x-forwarded-proto", "http".parse().unwrap());
-        assert_eq!(provisioning_block(&state, &plain), Some(ProvisionBlock::Https));
+        assert_eq!(provisioning_block(&state, &plain, far_ip()), Some(ProvisionBlock::Https));
         assert!(provisioning_denied(ProvisionBlock::Https).contains("X-Forwarded-Proto"));
 
         let mut ip_host = good.clone();
         ip_host.insert(header::HOST, "198.51.100.1".parse().unwrap());
-        assert_eq!(provisioning_block(&state, &ip_host), Some(ProvisionBlock::Host));
+        assert_eq!(provisioning_block(&state, &ip_host, far_ip()), Some(ProvisionBlock::Host));
         // The half that failed is in the body the panel shows, after the general
         // paragraph it used to get on its own.
         let body = provisioning_denied(ProvisionBlock::Host);
@@ -2217,13 +2327,13 @@ mod tests {
 
         let mut wrong_origin = good.clone();
         wrong_origin.insert(header::ORIGIN, "https://elsewhere.example.com".parse().unwrap());
-        assert_eq!(provisioning_block(&state, &wrong_origin), Some(ProvisionBlock::Origin));
+        assert_eq!(provisioning_block(&state, &wrong_origin, far_ip()), Some(ProvisionBlock::Origin));
 
         // `--site` is the one input nothing about the request reveals: the domain
         // entry is valid and the request is https, and the flag still refuses it.
         let mut misconfigured = app();
         misconfigured.site = "https://198.51.100.1".into();
-        assert_eq!(provisioning_block(&misconfigured, &good), Some(ProvisionBlock::Site));
+        assert_eq!(provisioning_block(&misconfigured, &good, far_ip()), Some(ProvisionBlock::Site));
 
         for (block, code) in [
             (ProvisionBlock::Host, "host"),
@@ -2761,6 +2871,7 @@ mod tests {
             let created = create_node(
                 Admin,
                 axum::extract::State(app.clone()),
+                conn(far_ip()),
                 domain_headers(),
                 Ok(Json(serde_json::from_value(bad.clone()).unwrap())),
             )
@@ -2839,7 +2950,13 @@ mod tests {
         let id = node(&app, "n", true);
         let create = |value: &str| {
             let node: Node = serde_json::from_value(json!({"name": "g", "group": value})).unwrap();
-            create_node(Admin, axum::extract::State(app.clone()), domain_headers(), Ok(Json(node)))
+            create_node(
+                Admin,
+                axum::extract::State(app.clone()),
+                conn(far_ip()),
+                domain_headers(),
+                Ok(Json(node)),
+            )
         };
         let update = |value: &str| {
             let patch: NodePatch = serde_json::from_value(json!({"group": value})).unwrap();
@@ -3014,7 +3131,8 @@ mod tests {
         // from being refused.
         assert_eq!(added.currency, "USD");
 
-        let created = create_node(Admin, State(app.clone()), domain_headers(), Ok(Json(added))).await;
+        let created =
+            create_node(Admin, State(app.clone()), conn(far_ip()), domain_headers(), Ok(Json(added))).await;
         assert_eq!(created.status(), StatusCode::OK);
         // Frames are cached for nearly two seconds, so without dropping the cache
         // the node just added would disappear from the list.
@@ -3022,7 +3140,8 @@ mod tests {
 
         // A name consisting only of spaces is refused and leaves no node behind.
         let blank = Json(serde_json::from_value::<Node>(json!({"name": "   "})).unwrap());
-        let refused = create_node(Admin, State(app.clone()), domain_headers(), Ok(blank)).await;
+        let refused =
+            create_node(Admin, State(app.clone()), conn(far_ip()), domain_headers(), Ok(blank)).await;
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert_eq!(app.db.nodes().unwrap().len(), 2);
     }
@@ -3049,7 +3168,10 @@ mod tests {
         assert_eq!(register(Some("guess"), "a").await.status(), StatusCode::FORBIDDEN);
         assert!(app.db.nodes().unwrap().is_empty());
 
-        assert_eq!(open_register(Admin, State(app.clone()), domain_headers()).await.status(), StatusCode::OK);
+        assert_eq!(
+            open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await.status(),
+            StatusCode::OK
+        );
         let key = app.db.get("register_key").unwrap();
         assert_eq!(register(Some("guess"), "a").await.status(), StatusCode::FORBIDDEN);
         assert_eq!(register(None, "a").await.status(), StatusCode::FORBIDDEN);
@@ -3075,7 +3197,7 @@ mod tests {
 
         // Reopened, then closed manually: the key from the open window stops
         // working.
-        open_register(Admin, State(app.clone()), domain_headers()).await;
+        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await;
         let key = app.db.get("register_key").unwrap();
         assert_eq!(close_register(Admin, State(app.clone())).await.status(), StatusCode::NO_CONTENT);
         assert_eq!(register(Some(&key), "c").await.status(), StatusCode::FORBIDDEN);
@@ -3086,7 +3208,7 @@ mod tests {
     #[tokio::test]
     async fn one_window_stops_registering_at_the_limit() {
         let app = std::sync::Arc::new(app());
-        open_register(Admin, State(app.clone()), domain_headers()).await;
+        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await;
         let key = app.db.get("register_key").unwrap();
         for i in 0..REGISTER_LIMIT {
             node(&app, &format!("n{i}"), true);

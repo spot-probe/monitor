@@ -183,7 +183,7 @@ export default function App() {
     : !me.can_provision
       ? BLOCK_NOTES[me.provision_block ?? ""] ?? BLOCK_NOTES[""]
       : !provisioningSite(location.origin)
-        ? "面板当前的地址不是 https 域名，安装命令要经这条链路下载，请用域名访问"
+        ? "面板当前的地址不能用于安装命令——用 https 域名访问，或从同一内网用私网 IP 访问"
         : "hub 的 --site 不是 https 域名（写成了 IP，或带了路径）"
 
   return (

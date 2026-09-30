@@ -455,9 +455,11 @@ async fn main() -> Result<()> {
     if exposed_over_plain_http(&url) {
         warn!(
             "this hub answers plain HTTP at {url}; sessions and agent tokens travel in the clear. \
-             Put it behind a TLS reverse proxy -- the panel builds install commands from the \
-             browser's own address, so nothing here has to change -- then --listen 127.0.0.1:PORT \
-             so this port is no longer reachable in the clear"
+             On a private network that is a supported way to run it: the panel offers install \
+             commands over the address it was reached by, and the token does not leave that \
+             network. Anywhere else, put it behind a TLS reverse proxy -- the panel builds \
+             install commands from the browser's own address, so nothing here has to change -- \
+             then --listen 127.0.0.1:PORT so this port is no longer reachable in the clear"
         );
     }
     // The warning above derives from --site, the address the operator
@@ -468,9 +470,10 @@ async fn main() -> Result<()> {
     // X-Forwarded-Proto cookie flag both assume the proxy cannot be bypassed.
     else if !args.listen.ip().is_loopback() {
         warn!(
-            "listening on {} in the clear. If a TLS proxy fronts this hub, callers can still reach \
-             this port directly and set their own X-Forwarded-Proto -- --listen 127.0.0.1:{} so the \
-             proxy is the only way in",
+            "listening on {} in the clear. Reached directly on a private network that is fine -- \
+             the panel offers install commands over this address. If a TLS proxy fronts this hub, \
+             callers can still reach this port directly and set their own X-Forwarded-Proto -- \
+             --listen 127.0.0.1:{} so the proxy is the only way in",
             args.listen,
             args.listen.port()
         );

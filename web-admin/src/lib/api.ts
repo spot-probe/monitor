@@ -323,13 +323,36 @@ export function addresses(
   return ip ? [{ address: ip, source: "connection" }] : []
 }
 
-/** Installation commands require a TLS origin with a domain, never an IP. */
+/**
+ * An address on the operator's own network, as a URL host: RFC1918, carrier-grade
+ * NAT, link-local, IPv6 unique-local. Loopback is not one -- no other machine can
+ * reach it, so it cannot be the address an install command names.
+ */
+function lanHost(hostname: string): boolean {
+  const bare = hostname.replace(/^\[|\]$/g, "")
+  if (bare.startsWith("127.") || bare.toLowerCase() === "::1" || /^::ffff:127\./i.test(bare)) return false
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(bare) && !bare.includes(":")) return false
+  return !isPublic(bare)
+}
+
+/**
+ * The origin an install command may name, or "" when this one cannot be used.
+ *
+ * A TLS origin with a domain, always. A plaintext origin is the private-network
+ * case: the hub accepts one when the request comes straight from such a network
+ * (`api::private_entry`), and an address there is what an agent on that network
+ * reaches -- the token never leaves it, which is what the https requirement is
+ * otherwise about.
+ */
 export function provisioningSite(site: string): string {
   try {
     const u = new URL(site)
-    return u.protocol === "https:" && !u.hostname.startsWith("[") && !/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)
-      && u.hostname !== "localhost" && !u.hostname.endsWith(".localhost") && !u.username && !u.password
-      && u.pathname === "/" && !u.search && !u.hash ? u.origin : ""
+    if (u.username || u.password || u.pathname !== "/" || u.search || u.hash) return ""
+    if (u.protocol === "https:") {
+      return !u.hostname.startsWith("[") && !/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)
+        && u.hostname !== "localhost" && !u.hostname.endsWith(".localhost") ? u.origin : ""
+    }
+    return u.protocol === "http:" && lanHost(u.hostname) ? u.origin : ""
   } catch {
     return ""
   }
@@ -422,15 +445,21 @@ export function useNodes() {
     let retry: ReturnType<typeof setTimeout> | null = null
     let closed = false
 
+    // A refresh replaces this effect, and an answer to the one it replaced can
+    // still arrive afterwards; it is dropped rather than written over the newer
+    // one. The 401 below is the reason it matters: a stale refusal would turn a
+    // working session back into an anonymous one.
     const fetchOnce = () =>
       api<{ nodes: Node[]; admin: boolean; agent_latest?: string | null }>("/nodes")
         .then((d) => {
+          if (closed) return
           setNodes(d.nodes)
           setAdmin(d.admin)
           setAgentLatest(d.agent_latest ?? null)
           setError(null)
         })
         .catch((e: Error) => {
+          if (closed) return
           setError(e.message)
           // With the public page switched off, a revoked session receives a 401
           // here and on the stream, so the frame that would report admin=false

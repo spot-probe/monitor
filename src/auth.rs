@@ -449,7 +449,7 @@ pub fn node_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
 }
 
 /// Loopback or a private network, where a reverse proxy resides.
-fn behind_local_proxy(ip: IpAddr) -> bool {
+pub(crate) fn behind_local_proxy(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         // Unique-local (fc00::/7) and link-local (fe80::/10); the stable
