@@ -3513,6 +3513,40 @@ mod tests {
         assert_eq!((lo, hi), (10, 40));
     }
 
+    /// A fold counts exactly the minutes of its own hour: the window is
+    /// `ts >= hour && ts < hour + 3600`, so the hour's first and last minute are in
+    /// it and the next hour's first minute is not. Constructed here rather than
+    /// inferred from a large fixture -- the question is where the window ends, not
+    /// how much is in it -- and with two adjacent hours folded to show that a
+    /// minute is counted once and never twice.
+    #[test]
+    fn a_fold_counts_the_minutes_of_its_own_hour_once() {
+        let db = db();
+        let id = node(&db, 1);
+        let hour = 472_224 * 3_600;
+        for (offset, cpu) in [(0, 1.0), (1, 2.0), (3_599, 3.0), (3_600, 99.0)] {
+            db.insert_metric(id, hour + offset, &serde_json::json!({"cpu": cpu})).unwrap();
+        }
+        let folded = |ts: i64| -> Option<(i64, f64)> {
+            db.conn()
+                .query_row(
+                    "SELECT minutes, cpu FROM metric_hour WHERE node_id=?1 AND ts=?2",
+                    params![id, ts],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .unwrap()
+        };
+
+        db.fold_hour(hour).unwrap();
+        assert_eq!(folded(hour), Some((3, 2.0)), "the hour's own three minutes, their mean");
+        assert_eq!(folded(hour + 3_600), None, "its last minute is not the next hour's");
+
+        db.fold_hour(hour + 3_600).unwrap();
+        assert_eq!(folded(hour), Some((3, 2.0)), "a later hour does not disturb it");
+        assert_eq!(folded(hour + 3_600), Some((1, 99.0)), "counted once, in its own hour");
+    }
+
     /// An hour is not folded when it ends: an agent may report up to an hour late
     /// and a probe's answer arrives with the frame after it, so the hour is only
     /// complete once the next one has passed. Folding it early would drop whatever
