@@ -454,7 +454,7 @@ fn default_hours() -> i64 {
 
 /// How many history windows are built concurrently.
 ///
-/// `PUBLIC_HOURS` bounds what one request costs; this bounds how many may run,
+/// the retention bounds what one request may span; this bounds how many may run,
 /// closing the same gap `main::RELAY_GATE` and `auth::PASSWORD_GATE` close on
 /// the other two paths an anonymous caller can make expensive. This is the most
 /// expensive of the three: every request holds the single connection the agents
@@ -500,7 +500,10 @@ pub async fn metrics(
         return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
             .into_response();
     };
-    let hours = w.hours.clamp(1, if full { ADMIN_HOURS } else { PUBLIC_HOURS });
+    // Bounded by what is kept, for a signed-in browser and an anonymous one alike:
+    // a window wider than the retention has nothing to draw, and past the detail
+    // window the hourly tier answers it in at most a year of rows.
+    let hours = w.hours.clamp(1, app.db.retention_days() * 24);
     let now = Utc::now().timestamp();
     let since = now - hours * 3_600;
     let step = sample_step(hours, w.points);
@@ -525,15 +528,14 @@ pub async fn metrics(
         // has nothing to label and this costs a turn at the write connection.
         let probes =
             if want_ping { app.db.ping_task_names(id).unwrap_or_else(|_| json!({})) } else { json!({}) };
-        let metrics = if want_metrics { app.db.metrics(id, since, step)? } else { vec![] };
+        let metrics = if want_metrics { app.db.metrics_window(id, since, step)? } else { vec![] };
         // `loss` is per probe across the whole window, alongside the per-bucket
         // `loss` on the rows. Both are required and neither replaces the other:
         // the row figure is what a tooltip reads, while the window figure is the
         // only one that can be accurate, since the denominators it divides by are
         // gone by the time the rows are built. Additive, so a theme unaware of it
         // continues to work.
-        let (ping, loss) =
-            if want_ping { app.db.ping_records(id, since, step)? } else { (vec![], json!({})) };
+        let (ping, loss) = if want_ping { app.db.ping_window(id, since, step)? } else { (vec![], json!({})) };
         // The bar rides with whichever chart is drawn, and is skipped for a
         // caller that did not name it: unlike the charts it is a few hundred
         // numbers, but it is also the one series stamped with the minute the
@@ -574,9 +576,6 @@ pub async fn metrics(
 /// The public ceiling is a week because that is the widest chart the themes
 /// draw, so nothing in use is lost. The panel retains the quarter year, being
 /// one signed-in operator rather than an anonymous caller.
-const PUBLIC_HOURS: i64 = 24 * 7;
-const ADMIN_HOURS: i64 = 24 * 90;
-
 /// Seconds between the samples a window is drawn from.
 ///
 /// Thinning exists for what the screen cannot draw rather than as a convention:
@@ -952,6 +951,10 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
         // default, in which case the browser's address is the only one available
         // and the panel falls back to its own origin.
         "site": app.site,
+        // How far back a chart may reach, which is what the panel's and the theme's
+        // range pickers are built from: the numbers they offer are the numbers the
+        // hub will answer.
+        "history_days": app.db.retention_days(),
         // Whether the panel's group field offers the names already in use as a
         // list. Off unless the hub was started with `--group-dropdown`: that
         // field is also how a new group is made, so the list is an opt-in help.
@@ -1414,11 +1417,12 @@ pub const MAX_CHUNK: usize = 8 * 1024 * 1024;
 /// oversized upload is refused before a byte is sent.
 ///
 /// The backup ceiling is set where it is because restoring holds the connection
-/// every read and write passes through: at the measured ~40 MB/s that is roughly
-/// 6.5 seconds during which the panel and the public page also wait. Database
-/// sizes reachable with a few hundred nodes sit two orders of magnitude below
-/// it.
-pub const MAX_RESTORE: u64 = 256 * 1024 * 1024;
+/// every read and write passes through: at the measured ~40 MB/s, a gigabyte is
+/// roughly 26 seconds during which the panel and the public page also wait. That
+/// is why it is not larger. (A hub with the history tiers on is far below it in
+/// any case: ninety days of a hundred nodes came to 127 MiB once folded and
+/// vacuumed, against 1.77 GiB before.)
+pub const MAX_RESTORE: u64 = 1024 * 1024 * 1024;
 pub const MAX_THEME: u64 = 32 * 1024 * 1024;
 
 /// One request of an upload: `total` is the whole file, `offset` where this piece
@@ -2016,8 +2020,15 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
         "theme" if !crate::frontend::selectable(app, value) => Some("theme is not installed".into()),
         // Housekeeping clamps whatever it reads, so an unparsable value would be
         // stored, echoed back, and silently mean 7 days indefinitely.
-        "retention_days" if !value.parse::<i64>().is_ok_and(|d| (1..=3_650).contains(&d)) => {
-            Some("retention days must be a number from 1 to 3650".into())
+        "retention_days"
+            if !value
+                .parse::<i64>()
+                .is_ok_and(|d| (1..=crate::db::MAX_RETENTION_DAYS).contains(&d)) =>
+        {
+            Some(format!(
+                "retention days must be a number from 1 to {}",
+                crate::db::MAX_RETENTION_DAYS
+            ))
         }
         // The hub fetches this URL itself, so it must be one: a scheme it cannot
         // speak turns every agent download into a 502 that says nothing about the
@@ -2119,6 +2130,8 @@ mod tests {
             let asked = me(State(app), domain_headers()).await;
             let json: serde_json::Value = serde_json::from_slice(&body(asked).await).unwrap();
             assert_eq!(json["group_dropdown"], want, "group_dropdown in /api/me");
+            // The default window, and what the range pickers are built from.
+            assert_eq!(json["history_days"], crate::db::DEFAULT_RETENTION_DAYS, "history_days in /api/me");
         }
     }
 
@@ -3375,8 +3388,10 @@ mod tests {
             app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
         }
 
-        // The default is a week, so thirty days is not answerable -- and is not
-        // claimed to have been answered.
+        // Kept to a week here, whatever the default is, so that thirty days is not
+        // answerable -- and is not claimed to have been answered.
+        app.db.set("retention_days", "7").unwrap();
+        invalidate_snapshot(&app);
         let view = visible_nodes(&app, false).unwrap();
         let u = &view[0]["uptime"];
         assert_eq!(u["from30"], u["from7"], "the month is not longer than the history kept");
@@ -3439,7 +3454,7 @@ mod tests {
         assert!(!only["availability"]["buckets"].as_array().unwrap().is_empty());
     }
 
-    /// `PUBLIC_HOURS` bounds one window; this bounds how many are built
+    /// The retention bounds one window; this bounds how many are built
     /// concurrently. Each holds the connection the agents report through for its
     /// entire scan, and the path takes no credentials -- the same arrangement
     /// `RELAY_GATE` and `PASSWORD_GATE` enforce on the other two anonymous paths
@@ -3551,7 +3566,7 @@ mod tests {
     /// every row behind it holding the write connection.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // see `gate_tests`
-    async fn an_anonymous_history_window_stops_at_a_week() {
+    async fn an_anonymous_history_window_reaches_the_retention() {
         let _serial = gate_tests();
         let app = std::sync::Arc::new(app());
         let id = node(&app, "n", true);
@@ -3578,10 +3593,13 @@ mod tests {
         let week = axum::body::to_bytes(ask(168).await.into_body(), usize::MAX).await.unwrap();
         assert_eq!(rows(std::str::from_utf8(&week).unwrap()), 8, "a week reaches back seven days");
 
-        // Requesting the quarter year formerly available to an anonymous caller
-        // returns the week: the extra rows exist, and reading them is the cost.
-        let quarter = axum::body::to_bytes(ask(2_160).await.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(quarter, week, "an anonymous window past a week is clamped to one");
+        // What an anonymous caller may span is the operator's retention, not a fixed
+        // week: past it there is nothing kept to answer with, so asking for more is
+        // the same as asking for what is kept.
+        let kept = axum::body::to_bytes(ask(2_160).await.into_body(), usize::MAX).await.unwrap();
+        let beyond = axum::body::to_bytes(ask(24 * 400).await.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(beyond, kept, "a window past the retention is the retention");
+        assert!(rows(std::str::from_utf8(&kept).unwrap()) >= rows(std::str::from_utf8(&week).unwrap()));
     }
 
     #[tokio::test]
@@ -3694,7 +3712,11 @@ mod tests {
     async fn a_fresh_hub_answers_settings_that_it_will_take_back() {
         let app = std::sync::Arc::new(app());
         let Json(read) = settings(Admin, State(app.clone())).await;
-        assert_eq!(read["retention_days"], "7", "the default belongs in the answer, not in each caller");
+        assert_eq!(
+            read["retention_days"],
+            crate::db::DEFAULT_RETENTION_DAYS.to_string(),
+            "the default belongs in the answer, not in each caller"
+        );
 
         // Exactly what the panel sends, on a hub where nothing was ever set.
         let echoed = json!({
@@ -3715,7 +3737,11 @@ mod tests {
             StatusCode::OK,
             "a fresh hub's own settings must survive a round trip"
         );
-        assert_eq!(app.db.retention_days(), 7, "and the stored window is the one that was shown");
+        assert_eq!(
+            app.db.retention_days(),
+            crate::db::DEFAULT_RETENTION_DAYS,
+            "and the stored window is the one that was shown"
+        );
     }
 
     #[tokio::test]
