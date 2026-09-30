@@ -1417,11 +1417,12 @@ pub const MAX_CHUNK: usize = 8 * 1024 * 1024;
 /// oversized upload is refused before a byte is sent.
 ///
 /// The backup ceiling is set where it is because restoring holds the connection
-/// every read and write passes through: at the measured ~40 MB/s that is roughly
-/// 6.5 seconds during which the panel and the public page also wait. Database
-/// sizes reachable with a few hundred nodes sit two orders of magnitude below
-/// it.
-pub const MAX_RESTORE: u64 = 256 * 1024 * 1024;
+/// every read and write passes through: at the measured ~40 MB/s, a gigabyte is
+/// roughly 26 seconds during which the panel and the public page also wait. That
+/// is why it is not larger. (A hub with the history tiers on is far below it in
+/// any case: ninety days of a hundred nodes came to 127 MiB once folded and
+/// vacuumed, against 1.77 GiB before.)
+pub const MAX_RESTORE: u64 = 1024 * 1024 * 1024;
 pub const MAX_THEME: u64 = 32 * 1024 * 1024;
 
 /// One request of an upload: `total` is the whole file, `offset` where this piece

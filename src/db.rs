@@ -494,7 +494,9 @@ const TABLES: [&str; 8] =
 ///
 /// Test-visible only, for now: the rollup and the retention pass are what use it
 /// in production.
-#[cfg(test)]
+/// The two summary tables. They are **not** in [`TABLES`]: a backup taken before
+/// they existed restores, and `check_backup` only requires what a hub of any
+/// version would have. `stats` reports their sizes separately.
 const HOUR_TABLES: [&str; 2] = ["metric_hour", "ping_hour"];
 
 /// One node's stored configuration and last known facts.
@@ -2307,6 +2309,15 @@ impl Db {
             let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
             rows.insert(table.to_owned(), serde_json::json!(n));
         }
+        // The summary tables, counted apart from `TABLES` so that a backup taken
+        // before they existed still passes `check_backup`. This is how an operator
+        // sees what the tiering is holding: minute rows fall away at the detail
+        // window while these grow with the retention.
+        let mut summary = serde_json::Map::new();
+        for table in HOUR_TABLES {
+            let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+            summary.insert(table.to_owned(), serde_json::json!(n));
+        }
         Ok(serde_json::json!({
             "path": file,
             "size": bytes_of(&file),
@@ -2315,6 +2326,7 @@ impl Db {
             "oldest": oldest,
             "retention": retention,
             "rows": rows,
+            "summary": summary,
         }))
     }
 
