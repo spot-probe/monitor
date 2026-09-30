@@ -3686,12 +3686,50 @@ mod tests {
             assert!(band.is_none_or(|(lo, hi)| (lo..=hi).contains(&median)), "{h}");
         }
 
-        // (No assertion that the median equals the median over the underlying
-        // minutes: it does not. Medians do not compose -- a bucket of two hours is
-        // not determined by its hours' medians and counts -- which is why a point
-        // spanning several hours is an approximation and the band is reported beside
-        // it. Pinning the rank rule itself, from the `ping_hour` rows, is what would
-        // catch an unweighted median; this test does not do that yet.)
+        // The rank rule itself, computed here from the `ping_hour` rows rather than
+        // read back from the API: the median is the value at rank (answered+1)/2 by
+        // weight, counted once per answer an hour stands for. An unweighted median --
+        // one vote per hour, whatever it holds -- lands elsewhere as soon as the
+        // hours hold different numbers of answers, which is what this pins. (It is
+        // *not* the median over the underlying minutes: medians do not compose, which
+        // is why a point spanning hours is an approximation and the band sits beside
+        // it.)
+        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
+        for (i, first) in [0i64, 2, 4].iter().enumerate() {
+            let conn = db.conn();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT latency, answered FROM ping_hour
+                      WHERE node_id=?1 AND task_id=?2 AND ts>=?3 AND ts<?4",
+                )
+                .unwrap();
+            let mut samples: Vec<(i64, i64)> = stmt
+                .query_map(params![id, probe, start + first * 3_600, start + (first + 2) * 3_600], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            samples.sort_unstable();
+            let total: i64 = samples.iter().map(|s| s.1).sum();
+            let at = |rank: i64| {
+                let mut seen = 0;
+                samples
+                    .iter()
+                    .find(|s| {
+                        seen += s.1;
+                        seen >= rank
+                    })
+                    .map(|s| s.0)
+                    .unwrap()
+            };
+            let want = (at((total + 1) / 2) + at(total / 2 + 1)) / 2;
+            assert_eq!(
+                hourly[i]["latency"].as_i64().unwrap(),
+                want,
+                "bucket {i}: the median is the value at rank by weight"
+            );
+        }
     }
 
     /// The hourly tier's resource series answer what the minute rows they were
