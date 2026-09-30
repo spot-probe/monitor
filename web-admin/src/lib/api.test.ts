@@ -6,7 +6,14 @@ assert.deepEqual(changes({ public: true, price: 5 }, { price: 20 }), { price: 20
 assert.deepEqual(changes({ total_rx: "100", month_tx: "2" }, { total_rx: "100", month_tx: "3" }), { month_tx: "3" })
 assert.deepEqual(changes({ expires_at: "2030-01-01" as string | null }, { expires_at: null }), { expires_at: null })
 assert.equal(provisioningSite("https://monitor.example.com:8443/"), "https://monitor.example.com:8443")
-for (const site of ["http://monitor.example.com", "https://127.0.0.1", "https://[::1]", "https://2130706433", "https://0x7f000001", "https://localhost", "https://user@monitor.example.com", "https://monitor.example.com/path"]) {
+// On a private network a plaintext address is usable too: the hub accepts that
+// entry when the request comes straight from such a network, and an agent on it
+// reaches the address. Loopback is not: nothing else can reach it.
+assert.equal(provisioningSite("http://192.168.1.5:28080"), "http://192.168.1.5:28080")
+assert.equal(provisioningSite("http://10.0.0.7:28080/"), "http://10.0.0.7:28080")
+assert.equal(provisioningSite("http://172.16.9.9:28080"), "http://172.16.9.9:28080")
+assert.equal(provisioningSite("http://[fd00::5]:28080"), "http://[fd00::5]:28080")
+for (const site of ["http://monitor.example.com", "https://127.0.0.1", "https://[::1]", "https://2130706433", "https://0x7f000001", "https://localhost", "https://user@monitor.example.com", "https://monitor.example.com/path", "http://127.0.0.1:28080", "http://[::1]:28080", "http://2130706433:28080", "http://192.168.1.5:28080/path", "http://8.8.8.8:28080"]) {
   assert.equal(provisioningSite(site), "", site)
 }
 // An emptied traffic field means the counter is not to be corrected. Sent as 0

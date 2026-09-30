@@ -35,6 +35,8 @@ DATA="$ROOT/data"
 # A fixed data directory requires a fixed owner: DynamicUser= selects its uid at
 # start, and a recycled one would leave the database unreadable.
 USER_NAME="monitor"
+HOST="127.0.0.1"
+HOST_SET=""
 PORT="28080"
 PORT_SET=""
 SITE=""
@@ -141,6 +143,7 @@ check_self() {
 	# The parser consumed "$@", so the request is rebuilt from what it recorded;
 	# only the menu or an install reaches here.
 	set --
+	[ -z "$HOST_SET" ] || set -- "$@" --host "$HOST"
 	[ -z "$PORT_SET" ] || set -- "$@" --port "$PORT"
 	[ -z "$SITE_SET" ] || set -- "$@" --site "$SITE"
 	[ -z "$YES" ] || set -- "$@" --yes
@@ -168,6 +171,25 @@ old_port() {
 	case "$listen" in
 	*:[0-9]*) listen="${listen%% *}"; printf '%s' "${listen##*:}" ;;
 	esac
+}
+
+# The address it listens on, empty when there is none. Splitting on the *last*
+# colon is also what keeps a bracketed IPv6 address whole.
+old_host() {
+	listen="$(old_exec)"
+	case "$listen" in
+	*:[0-9]*) listen="${listen%% *}"; printf '%s' "${listen%:*}" ;;
+	esac
+}
+
+# The hub takes a socket address, not a hostname, and an IPv6 one only in
+# brackets. Catching a typo here beats a service that will not start.
+check_host() {
+	case "$HOST" in
+	\[*\] | 0.0.0.0 | 127.0.0.1) return 0 ;;
+	[0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;;
+	esac
+	die "监听地址要是 IP：127.0.0.1（默认）、0.0.0.0，或写成 [::] 的 IPv6"
 }
 
 # ---- install ----
@@ -253,6 +275,10 @@ install_hub() {
 
 	# Whatever the command line did not specify is recovered from the old unit;
 	# see old_exec.
+	if [ -z "$HOST_SET" ]; then
+		carried="$(old_host)"
+		[ -z "$carried" ] || HOST="$carried"
+	fi
 	if [ -z "$PORT_SET" ]; then
 		carried="$(old_port)"
 		[ -z "$carried" ] || PORT="$carried"
@@ -263,6 +289,7 @@ install_hub() {
 		*--site\ *) SITE="${carried##*--site }"; SITE="${SITE%% *}" ;;
 		esac
 	fi
+	check_host
 	check_port "$PORT"
 
 	# Before anything is stopped, replaced or downloaded: a port conflict must
@@ -279,6 +306,11 @@ install_hub() {
 			die "端口 $PORT 已被其它程序占用，换一个：--port <n>"
 		fi
 	fi
+
+	case "$HOST" in
+	127.0.0.1 | "[::1]") ;;
+	*) warn "监听地址是 $HOST：这个端口会明文可达，只应在内网或反向代理之后这样用" ;;
+	esac
 
 	id -u "$USER_NAME" >/dev/null 2>&1 ||
 		useradd --system --no-create-home --shell /usr/sbin/nologin "$USER_NAME" ||
@@ -350,11 +382,12 @@ install_hub() {
 		fetch_theme
 	fi
 
-	# Loopback only: the panel and the agent tokens never traverse a network in
-	# the clear, and there is no port to firewall. Reaching it is the reverse
-	# proxy's responsibility, and 127.0.0.1 rather than [::1] because that is
-	# every proxy's default upstream; the hub binds one address, not both.
-	args="--listen 127.0.0.1:$PORT --db $DATA/monitor.db"
+	# Loopback by default: the panel and the agent tokens then never traverse a
+	# network in the clear, and there is no port to firewall. Reaching it is the
+	# reverse proxy's responsibility, and 127.0.0.1 rather than [::1] because that
+	# is every proxy's default upstream; the hub binds one address, not both.
+	# `--host` opens it for a private network, where the hub's own warning applies.
+	args="--listen $HOST:$PORT --db $DATA/monitor.db"
 	[ -z "$SITE" ] || args="$args --site $SITE"
 	cat >"$UNIT" <<UNIT
 [Unit]
@@ -592,10 +625,14 @@ monitor hub 安装器
 
   sudo ./install-hub.sh                有终端时给菜单，否则按默认安装
   sudo ./install-hub.sh --port 8443    指定端口安装
+  sudo ./install-hub.sh --host 0.0.0.0 监听所有地址（内网直连用）
   sudo ./install-hub.sh --uninstall    卸载，保留数据
   sudo ./install-hub.sh --reset-password  重新生成应急密码并登出所有会话
   sudo ./install-hub.sh --purge        卸载并删除数据库
 
+  --host <addr>  监听地址，默认 127.0.0.1。改成 0.0.0.0 或内网地址后端口
+                 就明文对外可达了：只应在内网、或反向代理之后这样用。从同
+                 一内网用 http://私网IP 进面板也能添加节点
   --port <n>     本机监听端口，默认 $PORT
   --site <url>   一般不用填。面板拼安装命令用的是浏览器地址栏，配好反代
                  用域名访问就自动对了。只有两种情况要填：你进面板的地址
@@ -606,11 +643,11 @@ monitor hub 安装器
   --yes, -y      跳过确认
   --help, -h     显示这段
 
-hub 只监听 127.0.0.1，公网访问不到，需要自己配 nginx / caddy / CF 隧道把
+hub 默认只监听 127.0.0.1，公网访问不到，需要自己配 nginx / caddy / CF 隧道把
 域名指过来。装完会打印具体怎么配。
 
 重跑一次就是升级：校验通过后才替换二进制，起不来会自动回滚到上一版；
-没写的参数沿用上次的，所以升级不会把端口和 --site 冲掉。
+没写的参数沿用上次的，所以升级不会把监听地址、端口和 --site 冲掉。
 这份脚本不是最新发布的那一版时，会先把自己换成新版再接着装。
 
 首次安装会顺带把主题仓库当前发布版的主题装到 ${DATA}/themes/default/（校验 sha256），
@@ -624,6 +661,7 @@ while [ $# -gt 0 ]; do
 	# An explicit guard rather than `${2-}`: `shift 2` with nothing to shift is
 	# fatal in dash, and the output would be the shell's diagnostic rather than
 	# this message.
+	--host) [ $# -ge 2 ] || die "--host 后面要跟监听地址"; HOST="$2"; HOST_SET=1; shift 2 ;;
 	--port) [ $# -ge 2 ] || die "--port 后面要跟端口号"; PORT="$2"; PORT_SET=1; shift 2 ;;
 	--site) [ $# -ge 2 ] || die "--site 后面要跟地址"; SITE="$2"; SITE_SET=1; shift 2 ;;
 	--uninstall) ACTION=uninstall; shift ;;
