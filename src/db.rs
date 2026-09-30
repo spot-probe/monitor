@@ -1474,6 +1474,53 @@ impl Db {
     /// mean -- rows predating the column hold 0, and the mean, timed by the hub's
     /// arrivals rather than the agent's own clock, can edge past the agent's
     /// rates by the network's jitter.
+    /// The probe series as the hourly tier holds them, for a window that has already
+    /// been folded: each hour row is one sample whose median stands for `answered`
+    /// answers, and [`Tally`] weights it by exactly that.
+    ///
+    /// Read-only for now, like [`Db::metrics_hourly`]: the read path picks between
+    /// this and [`Db::ping_records`] once it also stitches the minute rows past the
+    /// watermark.
+    #[allow(dead_code)]
+    pub fn ping_records_hourly(
+        &self,
+        node_id: i64,
+        since: i64,
+        until: i64,
+        step: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT (ts/?4)*?4, task_id, answered, lost, latency, lo, hi FROM ping_hour
+              WHERE node_id=?1 AND ts>=?2 AND ts<?3 ORDER BY ts/?4",
+        )?;
+        let mut rows = stmt.query(params![node_id, since, until, step])?;
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let mut open: Option<(i64, std::collections::BTreeMap<i64, Tally>)> = None;
+        while let Some(r) = rows.next()? {
+            let bucket = r.get::<_, i64>(0)?;
+            if open.as_ref().map(|(b, _)| *b) != Some(bucket) {
+                if let Some((ts, tallies)) = open.take() {
+                    close_tallies(&mut out, tallies, ts);
+                }
+                open = Some((bucket, Default::default()));
+            }
+            let task = r.get::<_, i64>(1)?;
+            let sample = Sample {
+                answered: r.get(2)?,
+                lost: r.get(3)?,
+                median: r.get(4)?,
+                lo: r.get(5)?,
+                hi: r.get(6)?,
+            };
+            open.as_mut().expect("just set").1.entry(task).or_default().add(sample);
+        }
+        if let Some((ts, tallies)) = open.take() {
+            close_tallies(&mut out, tallies, ts);
+        }
+        Ok(out)
+    }
+
     /// The resource series as the hourly tier holds them, for a window that has
     /// already been folded.
     ///
@@ -2398,6 +2445,28 @@ impl Db {
 /// `"loss":0` on each would add 29 kB of nothing. Rounded up, so that the absence
 /// of a `loss` key means no timeouts occurred: truncating would report a bucket
 /// that lost 1 of 180 as clean.
+/// One bucket of **hourly** samples, written the way [`close_bucket`] writes one of
+/// minute answers: the same band rule, the same ceiling percentage, and the median
+/// from the shared [`Tally`] -- so a bucket spanning several hours is measured by
+/// the same code as a bucket of single answers, which is what keeps a window drawn
+/// from either layer agreeing.
+fn close_tallies(out: &mut Vec<serde_json::Value>, tallies: std::collections::BTreeMap<i64, Tally>, ts: i64) {
+    for (task, mut t) in tallies {
+        let median = t.median();
+        let mut row = serde_json::json!({"task_id": task, "ts": ts, "latency": median});
+        if let (Some(lo), Some(hi)) = (t.lo, t.hi) {
+            if hi > lo {
+                row["band"] = serde_json::json!([lo, hi]);
+            }
+        }
+        if t.lost > 0 {
+            let total = t.answered() + t.lost;
+            row["loss"] = ((100 * t.lost + total - 1) / total).into();
+        }
+        out.push(row);
+    }
+}
+
 fn close_bucket(out: &mut Vec<serde_json::Value>, open: &mut Vec<(i64, Vec<i64>, i64)>, ts: i64) {
     // Not ordered here: the caller sorts the whole window by the panel's order,
     // because themes take their series, colours and legend from the order in
@@ -3560,6 +3629,69 @@ mod tests {
         assert_eq!((answered, lost), (3, 1), "a timeout is a loss, not an answer");
         assert_eq!(median, 20, "the middle of 10, 20 and 40");
         assert_eq!((lo, hi), (10, 40));
+    }
+
+    /// The hourly tier's probe series answer what the minute rows do, hour per point
+    /// and two hours per point. The median is the weighted one, so the second case is
+    /// where that shows: `Tally` counts each hour's median once per answer it stands
+    /// for, not once per hour.
+    #[test]
+    fn the_hourly_tier_draws_the_probes_the_minute_rows_would() {
+        let db = db();
+        let id = node(&db, 1);
+        let probe = db
+            .save_ping_task(&PingTask {
+                id: 0,
+                name: "p".into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+            })
+            .unwrap();
+        let start = 472_224 * 3_600;
+        // Six hours of different lengths, answers that differ per hour, and losses.
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                let latency = if m % 13 == 0 { -1 } else { 20 + h * 10 + m % 5 };
+                db.insert_ping(id, probe, start + h * 3_600 + m * 60, latency).unwrap();
+            }
+        }
+        let until = start + 6 * 3_600;
+        db.roll_up(until + 7_200, 30).unwrap();
+
+        let key = |r: &serde_json::Value| (r["ts"].as_i64().unwrap(), r["task_id"].as_i64().unwrap());
+        let hourly = db.ping_records_hourly(id, start, until, 3_600).unwrap();
+        let (minutes, _) = db.ping_records(id, start, 3_600).unwrap();
+        let by: std::collections::HashMap<_, _> = minutes.iter().map(|m| (key(m), m.clone())).collect();
+        assert_eq!(hourly.len(), 6, "one point per hour");
+        for h in &hourly {
+            assert_eq!(
+                h,
+                by.get(&key(h)).expect("the minute path has this point"),
+                "an hour per point is exact"
+            );
+        }
+
+        // Two hours a point: the band and the loss are exact, the median is the
+        // weighted one and falls inside its own band.
+        let hourly = db.ping_records_hourly(id, start, until, 7_200).unwrap();
+        let (minutes, _) = db.ping_records(id, start, 7_200).unwrap();
+        let by: std::collections::HashMap<_, _> = minutes.iter().map(|m| (key(m), m.clone())).collect();
+        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
+        for h in &hourly {
+            let m = by.get(&key(h)).expect("the minute path has this point");
+            assert_eq!((&h["band"], &h["loss"]), (&m["band"], &m["loss"]), "exact either way");
+            let median = h["latency"].as_i64().unwrap();
+            let band = h["band"].as_array().map(|b| (b[0].as_i64().unwrap(), b[1].as_i64().unwrap()));
+            assert!(band.is_none_or(|(lo, hi)| (lo..=hi).contains(&median)), "{h}");
+        }
+
+        // (No assertion that the median equals the median over the underlying
+        // minutes: it does not. Medians do not compose -- a bucket of two hours is
+        // not determined by its hours' medians and counts -- which is why a point
+        // spanning several hours is an approximation and the band is reported beside
+        // it. Pinning the rank rule itself, from the `ping_hour` rows, is what would
+        // catch an unweighted median; this test does not do that yet.)
     }
 
     /// The hourly tier's resource series answer what the minute rows they were
