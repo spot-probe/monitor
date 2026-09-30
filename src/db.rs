@@ -595,6 +595,32 @@ pub struct PingTask {
     pub nodes: Vec<i64>,
 }
 
+/// Points SQLite's temporary files -- the copy `VACUUM` rebuilds the database
+/// into, and any sort too large for memory -- at the directory holding the
+/// database.
+///
+/// SQLite otherwise tries $SQLITE_TMPDIR, $TMPDIR, /var/tmp, /usr/tmp, /tmp and
+/// the working directory. The Docker image is built from scratch and has none of
+/// them writable, so reclaiming space failed there with "unable to determine a
+/// suitable directory for temporary files". Under the systemd unit /tmp is
+/// private, and where the distribution mounts it as tmpfs -- Debian 13 does by
+/// default -- the copy is charged to the unit's `MemoryMax`: vacuuming a 559 MiB
+/// database at 256M without swap was OOM-killed. Beside the database, the copy
+/// lands on the disk that has room for the database. SQLite unlinks each file
+/// as it opens it, so none remain there.
+///
+/// Process-wide and not thread-safe, so it is called once, before any
+/// connection is opened. A bare file name keeps SQLite's own search, which ends
+/// at the working directory holding it.
+pub fn temp_files_beside(database: &str) -> Result<()> {
+    let Some(dir) = std::path::Path::new(database).parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    let dir = dir.to_string_lossy().replace('\'', "''");
+    Connection::open_in_memory()?.execute_batch(&format!("PRAGMA temp_store_directory = '{dir}'"))?;
+    Ok(())
+}
+
 /// Restricts the database to its owner.
 ///
 /// It is the credential store: node tokens in the clear, the GitHub client
@@ -2192,6 +2218,52 @@ mod tests {
         assert!(on_disk(&scratch.0) < fat);
         assert_eq!(db.stats().unwrap()["rows"]["metric"], 0);
         assert_eq!(db.nodes().unwrap().len(), 1, "vacuum keeps the rows that are left");
+    }
+
+    /// Reclaiming space rebuilds the whole database into a temporary file, so it
+    /// needs a directory the process can write. The image built from scratch has
+    /// none of SQLite's own choices, and under the systemd unit `/tmp` is a
+    /// tmpfs charged to `MemoryMax`; both are answered by putting the copy
+    /// beside the database, on the disk that already holds it.
+    #[test]
+    fn temporary_files_go_beside_the_database() {
+        let scratch = Scratch::new();
+        temp_files_beside(&scratch.0).unwrap();
+        let read = || -> String {
+            Connection::open_in_memory()
+                .unwrap()
+                .query_row("PRAGMA temp_store_directory", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(read(), std::path::Path::new(&scratch.0).parent().unwrap().to_string_lossy());
+
+        // A bare file name names no directory to move to, and SQLite's own search
+        // already ends at the working directory that holds it: leave the setting
+        // alone rather than point the process at nothing.
+        temp_files_beside("monitor.db").unwrap();
+        assert_eq!(read(), std::path::Path::new(&scratch.0).parent().unwrap().to_string_lossy());
+
+        // A directory that is not there is refused by SQLite rather than stored
+        // silently -- and the refusal leaves the previous setting alone, since a
+        // setting that would not work is worse than the default. This is the
+        // path `main` turns into a warning.
+        assert!(temp_files_beside("/nonexistent-xyz/monitor.db").is_err());
+        assert_eq!(read(), std::path::Path::new(&scratch.0).parent().unwrap().to_string_lossy());
+
+        // The setting is process-wide, which is why `main` makes it before the
+        // first connection. With the copy on the database's own disk, reclaiming
+        // space still does its job.
+        let db = Db::open(&scratch.0).unwrap();
+        let id = node(&db, 1);
+        let now = Utc::now().timestamp();
+        let sample = serde_json::json!({"cpu": 1.0, "mem_used": 1, "swap_used": 1, "disk_used": 1,
+            "net_rx": 1, "net_tx": 1, "tcp": 1, "udp": 1, "procs": 1});
+        for i in 1..=5_000 {
+            db.insert_metric(id, now - i, &sample).unwrap();
+        }
+        let _ = db.conn().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        db.prune(0).unwrap();
+        assert!(db.vacuum().unwrap() > 0, "the copy landed in a directory it fits in");
     }
 
     fn node(db: &Db, reset_day: u32) -> i64 {

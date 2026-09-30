@@ -37,14 +37,62 @@ export function money(amount: number, currency: string): string {
   return `${SYMBOLS[currency] ?? ""}${amount.toFixed(2)}${SYMBOLS[currency] ? "" : ` ${currency}`}`
 }
 
-export const CYCLES: Record<string, string> = {
-  monthly: "月付",
-  quarterly: "季付",
-  semiannual: "半年付",
-  yearly: "年付",
-  biennial: "两年付",
-  triennial: "三年付",
-  once: "一次性",
+// The hub stores these lengths under a name and any other as `<n>m`.
+const NAMED_CYCLES: Record<string, number> = { monthly: 1, quarterly: 3, semiannual: 6, yearly: 12, biennial: 24, triennial: 36 }
+
+/** A billing cycle in months: 0 for one-off, NaN when unrecognized. */
+export function cycleMonths(cycle: string): number {
+  return cycle === "once" ? 0 : NAMED_CYCLES[cycle] ?? Number(/^(\d+)m$/.exec(cycle)?.[1])
+}
+
+/** The unit the billing form's cycle controls offer. */
+export type CycleUnit = "months" | "years" | "once"
+
+/**
+ * What the two cycle controls start at for a stored cycle, and whether the panel
+ * could read it at all. `readable: false` means the stored string is neither a
+ * named length nor `<n>m` -- an older hub accepted any string, so a database may
+ * hold `weekly` or `2y` -- and the controls start somewhere neutral while the
+ * raw value is shown beside them.
+ */
+export function cycleFields(stored: string): { unit: CycleUnit; count: string; readable: boolean } {
+  const months = cycleMonths(stored)
+  if (!Number.isFinite(months)) return { unit: "months", count: "1", readable: false }
+  const wholeYears = months !== 0 && months % 12 === 0
+  return {
+    unit: months === 0 ? "once" : wholeYears ? "years" : "months",
+    count: String(wholeYears ? months / 12 : months || 1),
+    readable: true,
+  }
+}
+
+/** The `<n>m` spelling of what the controls hold, or `once`. */
+export function cycleValue(unit: CycleUnit, count: string): string {
+  return unit === "once" ? "once" : `${Number(count) * (unit === "years" ? 12 : 1)}m`
+}
+
+/** Whether what the controls hold is something the hub will store: a whole
+ * number of months or years, from one month to the hundred years it caps at. */
+export function cycleOk(unit: CycleUnit, count: string): boolean {
+  if (unit === "once") return true
+  const months = Number(count) * (unit === "years" ? 12 : 1)
+  return Number.isInteger(months) && months >= 1 && months <= 1_200
+}
+
+/**
+ * The `billing_cycle` to send back. A pair of controls nobody touched means
+ * "leave the stored length alone" -- which is also what keeps a stored length
+ * this panel cannot read from being rewritten into one the form invented.
+ * Where the spelling changed but the length did not, the stored spelling stands:
+ * the hub keeps named lengths under their names.
+ */
+export function cyclePatch(
+  stored: string,
+  started: { unit: CycleUnit; count: string },
+  now: { unit: CycleUnit; count: string },
+): string {
+  if (now.unit === started.unit && now.count === started.count) return stored
+  return cycleValue(now.unit, now.count)
 }
 
 /**

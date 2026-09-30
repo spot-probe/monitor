@@ -391,6 +391,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(&args.themes)?;
+    // Before the first connection: the setting is process-wide, and its whole
+    // point is to be in place before anything opens the database.
+    if let Err(e) = db::temp_files_beside(&args.database) {
+        warn!("SQLite keeps its temporary files in its default directory: {e:#}");
+    }
     let (notes, inbox) = tokio::sync::mpsc::channel(notify::QUEUE);
     let app = Arc::new(App::new(Db::open(&args.database)?, args.site.clone(), args.themes, notes));
     let url = advertised_url(&args.site, args.listen);
@@ -482,6 +487,9 @@ async fn main() -> Result<()> {
         .route("/api/themes/{short}", delete(api::delete_theme))
         .route("/api/themes/{short}/preview", get(api::theme_preview))
         .route("/api/themes/{short}/update", post(api::update_theme))
+        // Not under /api/themes/: a fixed segment there would shadow the theme of
+        // that name for the routes keyed by `{short}`.
+        .route("/api/theme-install", post(api::install_theme))
         .route("/api/themes/{short}/config", put(api::save_theme_config))
         .route("/api/db", get(api::db_stats))
         .route("/api/db/backup", get(api::db_backup))
@@ -637,17 +645,34 @@ fn new_password(db: &Db) -> Result<String> {
     Ok(password)
 }
 
+/// Cycles stored under a name. Any other length is stored as `<n>m`; the names
+/// remain because themes built for hub 1.3.0 and earlier recognize only these.
+const NAMED_CYCLES: [(&str, u32); 6] = [
+    ("monthly", 1),
+    ("quarterly", 3),
+    ("semiannual", 6),
+    ("yearly", 12),
+    ("biennial", 24),
+    ("triennial", 36),
+];
+
+/// The longest cycle accepted, in months: 100 years.
+const MAX_CYCLE: u32 = 1_200;
+
 /// Billing cycles as whole months. `once` has none, so it never rolls over.
 fn cycle_months(cycle: &str) -> Option<u32> {
-    Some(match cycle {
-        "monthly" => 1,
-        "quarterly" => 3,
-        "semiannual" => 6,
-        "yearly" => 12,
-        "biennial" => 24,
-        "triennial" => 36,
-        _ => return None,
-    })
+    match NAMED_CYCLES.iter().find(|(name, _)| *name == cycle) {
+        Some(&(_, months)) => Some(months),
+        None => cycle.strip_suffix('m')?.parse().ok().filter(|m| (1..=MAX_CYCLE).contains(m)),
+    }
+}
+
+/// The stored spelling of a cycle of `months`: its name where it has one.
+fn cycle_name(months: u32) -> String {
+    NAMED_CYCLES
+        .iter()
+        .find(|(_, m)| *m == months)
+        .map_or_else(|| format!("{months}m"), |(name, _)| (*name).into())
 }
 
 /// A node still reporting past its expiry date has been renewed, so the date is
@@ -765,6 +790,11 @@ mod tests {
         // Not yet due, and one-off billing: both left unchanged.
         assert_eq!(renewed(d("2026-09-01"), "monthly", d("2026-08-28")), None);
         assert_eq!(renewed(d("2020-01-01"), "once", d("2026-08-28")), None);
+        // A length with no name rolls forward by its own months: five years at a
+        // time, not twelve.
+        assert_eq!(renewed(d("2026-03-10"), "60m", d("2026-08-28")), Some(d("2031-03-10")));
+        // And a named length still parses through the same function.
+        assert_eq!(renewed(d("2026-03-10"), "36m", d("2026-08-28")), Some(d("2029-03-10")));
     }
 
     /// The hour is the local one, which in a half-hour zone is not UTC's.

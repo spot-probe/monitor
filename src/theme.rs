@@ -157,16 +157,30 @@ pub async fn watch(app: Shared) {
 pub async fn latest(app: &App, owner: &str, repo: &str) -> Result<Release> {
     // Unauthenticated, and the tag rather than the assets: the archive is
     // fetched separately, and through the panel's GitHub proxy when one is set.
+    // Each refusal gets its own sentence: an administrator who pasted a private
+    // repository's address is looking at a 404, and "读不到" alone would send them
+    // to check the network.
+    let why = |e: &reqwest::Error| match e.status().map(|s| s.as_u16()) {
+        // A private repository answers the same as a missing one.
+        Some(404) => "仓库不存在，或者还没有正式 release",
+        // Unauthenticated callers get 60 requests an hour per address.
+        Some(403 | 429) => "GitHub 限制了这台机器的请求次数，过一小时再试",
+        Some(_) => "GitHub 接口出错，稍后再试",
+        None => "hub 连不上 api.github.com，检查它的网络",
+    };
+    let refused = |e: reqwest::Error| anyhow::anyhow!("读不到 {owner}/{repo} 的最新 release：{}", why(&e));
     let release: Release = app
         .http
         .get(format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"))
         .header(header::USER_AGENT, "monitor-hub")
         .send()
-        .await?
+        .await
+        .map_err(refused)?
         .error_for_status()
-        .with_context(|| format!("读不到 {owner}/{repo} 的最新 release"))?
+        .map_err(refused)?
         .json()
-        .await?;
+        .await
+        .with_context(|| format!("读不到 {owner}/{repo} 的最新 release：GitHub 的回复无法识别，稍后再试"))?;
     if !path_segment(&release.tag_name) {
         bail!("release 的 tag {:?} 不能出现在下载地址里", release.tag_name);
     }
@@ -190,30 +204,55 @@ pub async fn archive(app: &App, owner: &str, repo: &str, tag: &str) -> Result<Ve
         bail!("release 的 tag {tag:?} 不能出现在下载地址里");
     }
     let base = format!("https://github.com/{owner}/{repo}/releases/download/{tag}");
+    // The send as well as the status: a proxy or a filtered network answers
+    // neither, and the raw reqwest error names the URL without saying what it is
+    // for. A theme published without one cannot be installed from here at all, so
+    // the message says what to do rather than what failed -- uploading the
+    // archive by hand is unchecked, which is why it is offered.
+    let no_sum = || {
+        format!(
+            "读不到 {owner}/{repo} {tag} 的 {SUM}：这个 hub 只安装 release 里带校验和的主题包；\
+             可以让主题作者一起发布它，或者下载 {ARCHIVE} 后在面板里手动上传"
+        )
+    };
     let sum = app
         .http
         .get(proxied(app, format!("{base}/{SUM}")))
         .timeout(std::time::Duration::from_secs(120))
         .send()
-        .await?
+        .await
+        .with_context(no_sum)?
         .error_for_status()
-        .with_context(|| format!("读不到 {owner}/{repo} {tag} 的 {SUM}"))?
+        .with_context(no_sum)?
         .text()
-        .await?;
+        .await
+        .with_context(no_sum)?;
     let want = sum.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("{tag} 的 {SUM} 里不是 sha256");
     }
 
     // Through the panel's GitHub proxy when one is configured, the archive being
-    // the part a blocked network cannot reach.
+    // the part a blocked network cannot reach. Which way it went decides what
+    // "failed" means: clear the proxy, or fill one in.
+    let direct = format!("{base}/{ARCHIVE}");
+    let url = proxied(app, direct.clone());
+    let unreachable = || {
+        if url != direct {
+            format!("经 GitHub 代理下载 {ARCHIVE} 失败，换一个代理，或清空代理让 hub 直连")
+        } else {
+            format!("下载 {ARCHIVE} 失败：hub 连不上 github.com 时，在设置里填 GitHub 代理")
+        }
+    };
     let response = app
         .http
-        .get(proxied(app, format!("{base}/{ARCHIVE}")))
+        .get(url.clone())
         .timeout(std::time::Duration::from_secs(120))
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .with_context(unreachable)?
+        .error_for_status()
+        .with_context(unreachable)?;
     // The transfer stops at Content-Length, so checking it checks the body: a
     // header understating the archive cannot make more arrive. GitHub always
     // sends one; a proxy that omits it is refused rather than read unbounded.
@@ -222,7 +261,20 @@ pub async fn archive(app: &App, owner: &str, repo: &str, tag: &str) -> Result<Ve
         Some(size) => bail!("主题包 {} MiB，超过 {} MiB 的上限", size / 1024 / 1024, MAX_THEME / 1024 / 1024),
         None => bail!("下载没有给出大小，无法确认它在 {} MiB 以内", MAX_THEME / 1024 / 1024),
     }
-    let archive = response.bytes().await?;
+    // The body read as well as the send and the status: a filtered network
+    // usually gives up mid-transfer, and without this the panel would show
+    // reqwest's own sentence instead of the one naming the proxy.
+    let archive = response.bytes().await.with_context(unreachable)?;
+    // Before the checksum, whose message would send the reader looking for a
+    // corrupt release. A proxy answers with a page of its own -- a block notice,
+    // a sign-in wall -- under a 200, and `unpack`'s answer is written for an
+    // upload rather than for this.
+    if !archive.starts_with(&crate::frontend::GZIP_MAGIC) {
+        if url != direct {
+            bail!("GitHub 代理返回的不是主题包，换一个代理，或清空代理让 hub 直连");
+        }
+        bail!("release {tag} 里的 {ARCHIVE} 不是 gzip 格式，包本身有问题，请联系主题作者");
+    }
     let got = hex::encode(Sha256::digest(&archive));
     if got != want {
         bail!("主题包 sha256 是 {got}，而 release 里写的是 {want}；这个包不能装");
@@ -271,8 +323,10 @@ pub fn strip_v(tag: &str) -> &str {
 /// relay.
 pub fn repo(url: &str) -> Option<(&str, &str)> {
     let (owner, rest) = url.strip_prefix("https://github.com/")?.split_once('/')?;
-    // A link to a branch or a file is still a link to the repository.
-    let repo = rest.split('/').next()?;
+    // A link to a branch or a file is still a link to the repository, as is the
+    // `?tab=readme-ov-file` or `#readme` a browser's address bar often carries;
+    // neither reaches the addresses built from the result.
+    let repo = rest.split(['/', '?', '#']).next()?;
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     (path_segment(owner) && path_segment(repo)).then_some((owner, repo))
 }
@@ -300,6 +354,12 @@ mod tests {
         assert_eq!(repo("https://github.com/a/b.git"), Some(("a", "b")));
         assert_eq!(repo("https://github.com/a/b/tree/main"), Some(("a", "b")));
         assert_eq!(repo("https://github.com/a/b/"), Some(("a", "b")));
+        // A pasted address from a browser's bar carries a query or a fragment:
+        // both are dropped with the rest of the tail, before the segment is
+        // taken, so neither can reach the address built from it.
+        assert_eq!(repo("https://github.com/a/b?tab=readme-ov-file"), Some(("a", "b")));
+        assert_eq!(repo("https://github.com/a/b#readme"), Some(("a", "b")));
+        assert_eq!(repo("https://github.com/a/b/releases/tag/v1?x=1#y"), Some(("a", "b")));
 
         for hostile in [
             "",
@@ -314,9 +374,8 @@ mod tests {
             "https://github.com/../../etc/passwd",
             "https://github.com/a/..",
             // Anything that could open a segment of its own in the URL built from
-            // it, whether encoded, queried or fragmented.
+            // it, encoded or not.
             "https://github.com/a/b%2f..%2fc",
-            "https://github.com/a/b?x=1",
             "https://github.com/a b",
         ] {
             assert_eq!(repo(hostile), None, "{hostile} must not name a download");
