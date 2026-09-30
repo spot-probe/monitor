@@ -454,7 +454,7 @@ fn default_hours() -> i64 {
 
 /// How many history windows are built concurrently.
 ///
-/// `PUBLIC_HOURS` bounds what one request costs; this bounds how many may run,
+/// the retention bounds what one request may span; this bounds how many may run,
 /// closing the same gap `main::RELAY_GATE` and `auth::PASSWORD_GATE` close on
 /// the other two paths an anonymous caller can make expensive. This is the most
 /// expensive of the three: every request holds the single connection the agents
@@ -500,7 +500,10 @@ pub async fn metrics(
         return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
             .into_response();
     };
-    let hours = w.hours.clamp(1, if full { ADMIN_HOURS } else { PUBLIC_HOURS });
+    // Bounded by what is kept, for a signed-in browser and an anonymous one alike:
+    // a window wider than the retention has nothing to draw, and past the detail
+    // window the hourly tier answers it in at most a year of rows.
+    let hours = w.hours.clamp(1, app.db.retention_days() * 24);
     let now = Utc::now().timestamp();
     let since = now - hours * 3_600;
     let step = sample_step(hours, w.points);
@@ -574,9 +577,6 @@ pub async fn metrics(
 /// The public ceiling is a week because that is the widest chart the themes
 /// draw, so nothing in use is lost. The panel retains the quarter year, being
 /// one signed-in operator rather than an anonymous caller.
-const PUBLIC_HOURS: i64 = 24 * 7;
-const ADMIN_HOURS: i64 = 24 * 90;
-
 /// Seconds between the samples a window is drawn from.
 ///
 /// Thinning exists for what the screen cannot draw rather than as a convention:
@@ -952,6 +952,10 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
         // default, in which case the browser's address is the only one available
         // and the panel falls back to its own origin.
         "site": app.site,
+        // How far back a chart may reach, which is what the panel's and the theme's
+        // range pickers are built from: the numbers they offer are the numbers the
+        // hub will answer.
+        "history_days": app.db.retention_days(),
         // Whether the panel's group field offers the names already in use as a
         // list. Off unless the hub was started with `--group-dropdown`: that
         // field is also how a new group is made, so the list is an opt-in help.
@@ -2119,6 +2123,8 @@ mod tests {
             let asked = me(State(app), domain_headers()).await;
             let json: serde_json::Value = serde_json::from_slice(&body(asked).await).unwrap();
             assert_eq!(json["group_dropdown"], want, "group_dropdown in /api/me");
+            // The default window, and what the range pickers are built from.
+            assert_eq!(json["history_days"], 7, "history_days in /api/me");
         }
     }
 
@@ -3439,7 +3445,7 @@ mod tests {
         assert!(!only["availability"]["buckets"].as_array().unwrap().is_empty());
     }
 
-    /// `PUBLIC_HOURS` bounds one window; this bounds how many are built
+    /// The retention bounds one window; this bounds how many are built
     /// concurrently. Each holds the connection the agents report through for its
     /// entire scan, and the path takes no credentials -- the same arrangement
     /// `RELAY_GATE` and `PASSWORD_GATE` enforce on the other two anonymous paths
