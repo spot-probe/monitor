@@ -2130,7 +2130,7 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body(asked).await).unwrap();
             assert_eq!(json["group_dropdown"], want, "group_dropdown in /api/me");
             // The default window, and what the range pickers are built from.
-            assert_eq!(json["history_days"], 7, "history_days in /api/me");
+            assert_eq!(json["history_days"], crate::db::DEFAULT_RETENTION_DAYS, "history_days in /api/me");
         }
     }
 
@@ -3387,8 +3387,10 @@ mod tests {
             app.db.insert_metric(id, now - i * 60, &json!({"cpu": 1.0})).unwrap();
         }
 
-        // The default is a week, so thirty days is not answerable -- and is not
-        // claimed to have been answered.
+        // Kept to a week here, whatever the default is, so that thirty days is not
+        // answerable -- and is not claimed to have been answered.
+        app.db.set("retention_days", "7").unwrap();
+        invalidate_snapshot(&app);
         let view = visible_nodes(&app, false).unwrap();
         let u = &view[0]["uptime"];
         assert_eq!(u["from30"], u["from7"], "the month is not longer than the history kept");
@@ -3563,7 +3565,7 @@ mod tests {
     /// every row behind it holding the write connection.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // see `gate_tests`
-    async fn an_anonymous_history_window_stops_at_a_week() {
+    async fn an_anonymous_history_window_reaches_the_retention() {
         let _serial = gate_tests();
         let app = std::sync::Arc::new(app());
         let id = node(&app, "n", true);
@@ -3590,10 +3592,13 @@ mod tests {
         let week = axum::body::to_bytes(ask(168).await.into_body(), usize::MAX).await.unwrap();
         assert_eq!(rows(std::str::from_utf8(&week).unwrap()), 8, "a week reaches back seven days");
 
-        // Requesting the quarter year formerly available to an anonymous caller
-        // returns the week: the extra rows exist, and reading them is the cost.
-        let quarter = axum::body::to_bytes(ask(2_160).await.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(quarter, week, "an anonymous window past a week is clamped to one");
+        // What an anonymous caller may span is the operator's retention, not a fixed
+        // week: past it there is nothing kept to answer with, so asking for more is
+        // the same as asking for what is kept.
+        let kept = axum::body::to_bytes(ask(2_160).await.into_body(), usize::MAX).await.unwrap();
+        let beyond = axum::body::to_bytes(ask(24 * 400).await.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(beyond, kept, "a window past the retention is the retention");
+        assert!(rows(std::str::from_utf8(&kept).unwrap()) >= rows(std::str::from_utf8(&week).unwrap()));
     }
 
     #[tokio::test]
@@ -3706,7 +3711,11 @@ mod tests {
     async fn a_fresh_hub_answers_settings_that_it_will_take_back() {
         let app = std::sync::Arc::new(app());
         let Json(read) = settings(Admin, State(app.clone())).await;
-        assert_eq!(read["retention_days"], "7", "the default belongs in the answer, not in each caller");
+        assert_eq!(
+            read["retention_days"],
+            crate::db::DEFAULT_RETENTION_DAYS.to_string(),
+            "the default belongs in the answer, not in each caller"
+        );
 
         // Exactly what the panel sends, on a hub where nothing was ever set.
         let echoed = json!({
@@ -3727,7 +3736,11 @@ mod tests {
             StatusCode::OK,
             "a fresh hub's own settings must survive a round trip"
         );
-        assert_eq!(app.db.retention_days(), 7, "and the stored window is the one that was shown");
+        assert_eq!(
+            app.db.retention_days(),
+            crate::db::DEFAULT_RETENTION_DAYS,
+            "and the stored window is the one that was shown"
+        );
     }
 
     #[tokio::test]

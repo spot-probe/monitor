@@ -772,6 +772,11 @@ const LATE: i64 = 3_600;
 /// and is read from there; see `roll_up` and `prune`.
 pub const DETAIL_DAYS: i64 = 7;
 
+/// What a hub keeps when the operator has not chosen. A quarter is a couple of
+/// hundred megabytes of hourly rows at a hundred nodes, against the gigabytes the
+/// same span of minute rows would take, and it is a range the themes already offer.
+pub const DEFAULT_RETENTION_DAYS: i64 = 90;
+
 /// The widest window an operator may set. A year of hourly rows is 8760 per series,
 /// which one request still answers; beyond it the answer grows without bound and
 /// the themes' own ranges stop at a year. **Reducing this truncates**: an operator
@@ -2274,7 +2279,7 @@ impl Db {
     pub fn retention_days(&self) -> i64 {
         self.get("retention_days")
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(DETAIL_DAYS)
+            .unwrap_or(DEFAULT_RETENTION_DAYS)
             .clamp(1, MAX_RETENTION_DAYS)
     }
 
@@ -2851,7 +2856,11 @@ mod tests {
         let now = Utc::now().timestamp();
 
         assert_eq!(db.stats().unwrap()["oldest"], serde_json::Value::Null, "no history, no start");
-        assert_eq!(db.stats().unwrap()["retention"], 7, "an unset window is the default");
+        assert_eq!(
+            db.stats().unwrap()["retention"],
+            DEFAULT_RETENTION_DAYS,
+            "an unset window is the default"
+        );
 
         db.insert_metric(id, now - 3 * 86_400, &serde_json::json!({"cpu": 1.0})).unwrap();
         assert_eq!(db.stats().unwrap()["oldest"], now - 3 * 86_400);
