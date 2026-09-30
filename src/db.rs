@@ -1474,6 +1474,55 @@ impl Db {
     /// mean -- rows predating the column hold 0, and the mean, timed by the hub's
     /// arrivals rather than the agent's own clock, can edge past the agent's
     /// rates by the network's jitter.
+    /// The resource series as the hourly tier holds them, for a window that has
+    /// already been folded.
+    ///
+    /// Averaged **weighted by `minutes`**, so a bucket covering hours of different
+    /// lengths -- a hub that was down, an agent that reported late -- does not let a
+    /// short hour count as much as a full one, and the answer matches what the same
+    /// minutes would give one row at a time. `load1` divides by the minutes that
+    /// carried a value and is NULL when none did, which is what `AVG(load1)` does
+    /// over the minute rows by ignoring NULLs. Multiplied by `1.0` to divide as
+    /// reals: integer division would truncate twice where `AVG` truncates once.
+    ///
+    /// #[allow] until the read path picks between this and [`Db::metrics`]: a window
+    /// wider than the detail window reads this before the watermark and the minute
+    /// rows after it.
+    #[allow(dead_code)]
+    pub fn metrics_hourly(
+        &self,
+        node_id: i64,
+        since: i64,
+        until: i64,
+        step: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT (ts/?4)*?4, SUM(cpu*minutes)*1.0/SUM(minutes),
+                    CAST(SUM(mem_used*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(swap_used*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(disk_used*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(net_rx*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(net_tx*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CASE WHEN SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) > 0
+                         THEN SUM(load1*minutes)*1.0/SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) END,
+                    MAX(net_rx_max), MAX(net_tx_max)
+             FROM metric_hour WHERE node_id=?1 AND ts>=?2 AND ts<?3
+             GROUP BY ts/?4 ORDER BY ts/?4",
+        )?;
+        let rows = stmt.query_map(params![node_id, since, until, step], |r| {
+            Ok(serde_json::json!({
+                "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
+                "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
+                "disk_used": r.get::<_, i64>(4)?,
+                "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
+                "load1": r.get::<_, Option<f64>>(7)?,
+                "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
+            }))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn metrics(&self, node_id: i64, since: i64, step: i64) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
@@ -3511,6 +3560,54 @@ mod tests {
         assert_eq!((answered, lost), (3, 1), "a timeout is a loss, not an answer");
         assert_eq!(median, 20, "the middle of 10, 20 and 40");
         assert_eq!((lo, hi), (10, 40));
+    }
+
+    /// The hourly tier's resource series answer what the minute rows they were
+    /// folded from answer, hour per point. The fold's own arithmetic is covered by
+    /// `folding_an_hour_sums_what_its_minute_rows_hold`; this is the **reading** of
+    /// it, which is what a window wider than the detail window does.
+    ///
+    /// Six hours with different numbers of minutes, so a plain average of the
+    /// hourly means would differ from the weighted one.
+    #[test]
+    fn the_hourly_tier_draws_what_the_minute_rows_would() {
+        let db = db();
+        let id = node(&db, 1);
+        let start = 472_224 * 3_600;
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                db.insert_metric(
+                    id,
+                    start + h * 3_600 + m * 60,
+                    &serde_json::json!({"cpu": h as f64 + m as f64 / 100.0, "mem_used": 1_000 + m,
+                        "swap_used": 10, "disk_used": 5, "net_rx": 100 + m, "net_tx": 50,
+                        "load1": 0.25, "net_rx_max": 900 + m, "net_tx_max": 400}),
+                )
+                .unwrap();
+            }
+        }
+        let until = start + 6 * 3_600;
+        db.roll_up(until + 7_200, 30).unwrap();
+
+        let hourly = db.metrics_hourly(id, start, until, 3_600).unwrap();
+        let minutes = db.metrics(id, start, 3_600).unwrap();
+        assert_eq!(hourly.len(), 6, "one point per hour");
+        assert_eq!(hourly.len(), minutes.len());
+        for (h, m) in hourly.iter().zip(&minutes) {
+            assert_eq!(h["ts"], m["ts"]);
+            assert_eq!(h["net_rx_max"], m["net_rx_max"], "the peak is the peak either way");
+            assert_eq!(h["net_tx_max"], m["net_tx_max"]);
+            assert!(
+                (h["cpu"].as_f64().unwrap() - m["cpu"].as_f64().unwrap()).abs() < 1e-9,
+                "{} vs {}",
+                h["cpu"],
+                m["cpu"]
+            );
+            for key in ["mem_used", "swap_used", "disk_used", "net_rx", "net_tx"] {
+                assert_eq!(h[key], m[key], "{key}: the same minutes, weighted the same");
+            }
+            assert_eq!(h["load1"], m["load1"]);
+        }
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
