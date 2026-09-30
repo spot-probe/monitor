@@ -766,8 +766,24 @@ async fn housekeeping(app: Shared) {
             warn!("rolling expiry dates failed: {e:#}");
         }
         let keep = app.db.retention_days();
-        if let Err(e) = app.db.prune(keep) {
-            warn!("pruning history failed: {e:#}");
+        // Both move history and can take minutes on a large database (a first pass
+        // after an upgrade folds every hour still held as minute rows), so they run
+        // off the runtime the sockets are served by. Folding comes first because the
+        // pruning is only safe after it: a minute row may not be dropped until its
+        // hour is in the summary tables.
+        let now = chrono::Utc::now().timestamp();
+        let folding = app.clone();
+        match tokio::task::spawn_blocking(move || folding.db.roll_up(now, keep)).await {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => info!("folded {n} hour(s) of history into the summary tables"),
+            Ok(Err(e)) => warn!("folding history into the summary tables failed: {e:#}"),
+            Err(e) => warn!("folding history into the summary tables failed: {e}"),
+        }
+        let pruning = app.clone();
+        match tokio::task::spawn_blocking(move || pruning.db.prune(keep)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => warn!("pruning history failed: {e:#}"),
+            Err(e) => warn!("pruning history failed: {e}"),
         }
         if let Err(e) = app.db.expire_sessions() {
             warn!("expiring sessions failed: {e:#}");
