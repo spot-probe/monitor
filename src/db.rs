@@ -2171,6 +2171,91 @@ impl Db {
         Ok((out, serde_json::Value::Object(loss)))
     }
 
+    /// The probe series for a window that **reaches past the watermark**: the hourly
+    /// tier up to it and the minute rows after, both fed to the same [`Tally`] so the
+    /// median is one implementation either way.
+    ///
+    /// Separate from [`Db::ping_records`] rather than replacing it: that one is what
+    /// the panel reads today, and this is switched over to it only once the two are
+    /// known to agree. Same assignment filter, so a probe taken off the node stops
+    /// appearing here too.
+    #[allow(dead_code)]
+    pub fn ping_window(
+        &self,
+        node_id: i64,
+        since: i64,
+        step: i64,
+    ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
+        let conn = self.conn();
+        let rolled = rolled(&conn)?.unwrap_or(0);
+        let mut stmt = conn.prepare_cached(
+            "SELECT (ts/?4)*?4 AS bucket, task_id, latency, answered, lost, lo, hi FROM (
+               SELECT ts, task_id, latency, answered, lost, lo, hi FROM ping_hour
+                WHERE node_id=?1 AND ts>=?2 AND ts<?3
+                  AND task_id IN (SELECT task_id FROM ping_node WHERE node_id=?1)
+               UNION ALL
+               SELECT ts, task_id,
+                      CASE WHEN latency >= 0 THEN latency END,
+                      CASE WHEN latency >= 0 THEN 1 ELSE 0 END,
+                      CASE WHEN latency < 0 THEN 1 ELSE 0 END,
+                      CASE WHEN latency >= 0 THEN latency END,
+                      CASE WHEN latency >= 0 THEN latency END
+                 FROM ping_record WHERE node_id=?1 AND ts>=?2 AND ts>=?3
+                  AND task_id IN (SELECT task_id FROM ping_node WHERE node_id=?1)
+             ) ORDER BY (ts/?4)*?4",
+        )?;
+        let mut rows = stmt.query(params![node_id, since, rolled, step])?;
+        let mut out = Vec::new();
+        let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
+        let mut open: Option<(i64, std::collections::BTreeMap<i64, Tally>)> = None;
+        while let Some(row) = rows.next()? {
+            let bucket = row.get::<_, i64>(0)?;
+            if open.as_ref().map(|(b, _)| *b) != Some(bucket) {
+                if let Some((ts, tallies)) = open.take() {
+                    close_tallies(&mut out, tallies, ts);
+                }
+                // Column 0 is already a timestamp, scaled by `step` in the SQL;
+                // multiplying again here made every sample its own bucket.
+                open = Some((bucket, Default::default()));
+            }
+            let task = row.get::<_, i64>(1)?;
+            let sample = Sample {
+                median: row.get::<_, Option<i64>>(2)?,
+                answered: row.get::<_, i64>(3)?,
+                lost: row.get::<_, i64>(4)?,
+                lo: row.get::<_, Option<i64>>(5)?,
+                hi: row.get::<_, Option<i64>>(6)?,
+            };
+            let seen = totals.entry(task).or_insert((0, 0));
+            seen.0 += sample.lost;
+            seen.1 += sample.answered + sample.lost;
+            open.as_mut().expect("just set").1.entry(task).or_default().add(sample);
+        }
+        if let Some((ts, tallies)) = open.take() {
+            close_tallies(&mut out, tallies, ts);
+        }
+        drop(rows);
+        drop(stmt);
+        let rank: HashMap<i64, usize> = conn
+            .prepare_cached("SELECT id FROM ping_task ORDER BY sort, id")?
+            .query_map([], |r| r.get(0))?
+            .enumerate()
+            .map(|(i, id)| id.map(|id| (id, i)))
+            .collect::<Result<_, _>>()?;
+        drop(conn);
+        out.sort_by_cached_key(|row| {
+            row["task_id"].as_i64().and_then(|id| rank.get(&id).copied()).unwrap_or(usize::MAX)
+        });
+        let loss: serde_json::Map<String, serde_json::Value> = totals
+            .into_iter()
+            .filter(|(_, (lost, _))| *lost > 0)
+            .map(|(task, (lost, samples))| {
+                (task.to_string(), serde_json::json!(100.0 * lost as f64 / samples as f64))
+            })
+            .collect();
+        Ok((out, serde_json::Value::Object(loss)))
+    }
+
     // ---- the database file itself ----
 
     /// The file this connection is open on, empty for `:memory:`.
@@ -3905,6 +3990,38 @@ mod tests {
                 assert!(d <= 1, "{key} differs by {d}");
             }
         }
+    }
+
+    /// The stitched probe reader agrees with the minute one on a database with
+    /// nothing folded -- where it must degenerate to exactly that -- and still
+    /// carries the fields the panel reads: latency, band and loss.
+    #[test]
+    fn the_stitched_probe_reader_matches_the_minute_one_when_nothing_is_folded() {
+        let app_db = db();
+        let id = node(&app_db, 1);
+        let _ = app_db
+            .save_ping_task(&PingTask {
+                id: 0,
+                name: "p".into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+            })
+            .unwrap();
+        let task = app_db.conn().query_row("SELECT id FROM ping_task", [], |r| r.get(0)).unwrap();
+        let base = 472_224 * 3_600;
+        for (i, latency) in [30, -1, -1, -1, 12, 44].into_iter().enumerate() {
+            app_db.insert_ping(id, task, base + i as i64 * 10, latency).unwrap();
+        }
+
+        let (stitched, window) = app_db.ping_window(id, base, 120).unwrap();
+        let (minutes, minute_window) = app_db.ping_records(id, base, 120).unwrap();
+        assert_eq!(stitched, minutes, "nothing is folded, so this is the minute path");
+        assert_eq!(window, minute_window, "and the same window loss");
+        // All six land in the one 120-second bucket: three answer (30, 12, 44) and
+        // three do not, so the median is 30 and the loss is 50%.
+        assert_eq!(stitched[0]["loss"], 50, "three of six did not answer");
+        assert_eq!(stitched[0]["latency"], 30, "the median of 30, 12 and 44");
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
