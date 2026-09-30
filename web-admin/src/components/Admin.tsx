@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -86,18 +86,23 @@ function Addresses({ node }: { node: Node }) {
   if (!list.length) return <span className="text-sm text-muted-foreground">—</span>
   return (
     <div className="flex flex-col items-start gap-y-0.5">
-      {list.map(({ address, source }) => (
-        <button
-          key={address}
-          type="button"
-          onClick={() => copy(address)}
-          title={`${SOURCES[source]}。点击复制`}
-          className="tnum group inline-flex items-center gap-1 text-sm hover:text-foreground"
-        >
-          {address}
-          <Copy className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
-        </button>
-      ))}
+      {list.map(({ address, source }) => {
+        // A full IPv6 runs to 39 characters and would set the width of this
+        // column; the tooltip and the clipboard still carry the whole thing.
+        const shown = shortAddress(address)
+        return (
+          <button
+            key={address}
+            type="button"
+            onClick={() => copy(address)}
+            title={shown === address ? `${SOURCES[source]}。点击复制` : `${SOURCES[source]}：${address}。点击复制`}
+            className="tnum group inline-flex items-center gap-1 text-sm hover:text-foreground"
+          >
+            {shown}
+            <Copy className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
+          </button>
+        )
+      })}
     </div>
   )
 }

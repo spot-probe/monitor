@@ -273,6 +273,23 @@ export function isPublic(ip: string): boolean {
     (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)))
 }
 
+/**
+ * An address as the node table shows it. A full IPv6 runs to 39 characters and
+ * would set the width of the whole column; past 22 it keeps its first two groups
+ * and its last two -- the prefix names the provider, the tail tells machines on
+ * one prefix apart -- and elides the middle. The groups are cut from the text as
+ * written, so a `::` inside what is kept stays a `::` rather than reading as a
+ * lone colon. The full address is still what the tooltip shows and what a click
+ * copies.
+ */
+export function shortAddress(address: string): string {
+  const groups = [...address.matchAll(/[^:]+/g)]
+  if (address.length <= 22 || groups.length < 5) return address
+  const head = groups[1]
+  const tail = groups[groups.length - 2]
+  return `${address.slice(0, head.index + head[0].length)}…${address.slice(tail.index)}`
+}
+
 /** Where a shown address comes from, which the panel gives as its tooltip. */
 export type Source = "manual" | "interface" | "exit" | "connection"
 

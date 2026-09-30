@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict"
-import { addresses, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, isPublic, matchingGroups, provisioningSite, trafficCorrection } from "./api.ts"
+import { addresses, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, isPublic, matchingGroups, provisioningSite, shortAddress, trafficCorrection } from "./api.ts"
 
 assert.deepEqual(changes({ public: true, price: 5 }, { price: 20 }), { price: 20 })
 assert.deepEqual(changes({ total_rx: "100", month_tx: "2" }, { total_rx: "100", month_tx: "3" }), { month_tx: "3" })
@@ -118,5 +118,14 @@ assert.deepEqual(matchingGroups(NAMES, "不存在的"), [])
 assert.deepEqual(matchingGroups(["Edge", "edge-2"], "eDgE"), ["Edge", "edge-2"], "case-insensitive")
 assert.deepEqual(matchingGroups(["Edge", "edge-2"], "edge-2"), ["Edge", "edge-2"])
 assert.deepEqual(matchingGroups([], "x"), [])
+
+// A full IPv6 would set the width of the address column; past 22 characters it
+// keeps the first two groups (the provider) and the last two (which machine).
+assert.equal(shortAddress("2605:52c0:1234:5678:9abc:def0:fe84:2c48"), "2605:52c0…fe84:2c48")
+assert.equal(shortAddress("2001:db8:85a3::8a2e:370:7334"), "2001:db8…370:7334", "a `::` inside what is kept stays a `::`")
+assert.equal(shortAddress("2401:b60:1c::5"), "2401:b60:1c::5", "short enough to read as it is")
+assert.equal(shortAddress("203.0.113.7"), "203.0.113.7")
+assert.equal(shortAddress("fe80::1"), "fe80::1")
+assert.equal(shortAddress("aaaa:bbbb:cccc:dddddddddd"), "aaaa:bbbb:cccc:dddddddddd", "too few groups to cut one from each end")
 
 console.log("partial edits, traffic corrections, provisioning and address checks and theme-config checks passed")

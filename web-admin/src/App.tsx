@@ -73,7 +73,17 @@ function useTheme() {
   const dark = saved ? saved === "dark" : system
 
   useEffect(() => {
+    // Switched with every transition held. Buttons, badges and table rows fade
+    // their colours over 150 ms while the rest of the page changes at once,
+    // which leaves the page in both palettes for that long.
+    const hold = document.createElement("style")
+    hold.textContent = "*,*::before,*::after{transition:none!important}"
+    document.head.append(hold)
     document.documentElement.classList.toggle("dark", dark)
+    // Reading a layout property resolves the new colours while transitions are
+    // off, so removing the hold does not start one.
+    void document.body.offsetWidth
+    hold.remove()
   }, [dark])
 
   return [
