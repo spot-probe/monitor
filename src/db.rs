@@ -3608,6 +3608,32 @@ mod tests {
             }
             assert_eq!(h["load1"], m["load1"]);
         }
+
+        // And at two hours a point, which is the case that actually guards the
+        // weighting: one point then covers hours of different lengths, so a plain
+        // average of the hourly means differs from the mean of the minutes. (At one
+        // hour a point it cannot: a bucket holds a single hour row, whose value is
+        // already that hour's mean. Verified by mutation -- summing instead of
+        // weighting left this test green until this case existed.)
+        //
+        // The integer columns are allowed one unit: the hour's own mean is truncated
+        // when it is stored, so two hours can add up to a fraction more or less than
+        // the mean over both.
+        let hourly = db.metrics_hourly(id, start, until, 7_200).unwrap();
+        let minutes = db.metrics(id, start, 7_200).unwrap();
+        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
+        assert_eq!(hourly.len(), minutes.len());
+        for (h, m) in hourly.iter().zip(&minutes) {
+            assert_eq!(h["ts"], m["ts"]);
+            assert_eq!(h["net_rx_max"], m["net_rx_max"], "the peak is exact");
+            assert_eq!(h["net_tx_max"], m["net_tx_max"]);
+            let (got, want) = (h["cpu"].as_f64().unwrap(), m["cpu"].as_f64().unwrap());
+            assert!((got - want).abs() < 1e-9, "cpu {got} vs {want}");
+            for key in ["mem_used", "swap_used", "disk_used", "net_rx", "net_tx"] {
+                let d = (h[key].as_i64().unwrap() - m[key].as_i64().unwrap()).abs();
+                assert!(d <= 1, "{key} differs by {d}");
+            }
+        }
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
