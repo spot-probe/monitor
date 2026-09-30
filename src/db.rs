@@ -818,6 +818,9 @@ fn oldest(conn: &Connection, tables: &[&str]) -> Result<Option<i64>> {
 }
 
 /// One probe's answer, or one hour's answers summarised.
+// Consumed by the hourly read path, which a window wider than the detail
+// window reaches; nothing constructs these until that lands.
+#[allow(dead_code)]
 struct Sample {
     /// How many stored results the median stands for. One for a minute row, the
     /// hour's count for an hourly one -- which is what makes a chart point that
@@ -829,6 +832,9 @@ struct Sample {
     hi: Option<i64>,
 }
 
+// Consumed by the hourly read path, which a window wider than the detail
+// window reaches; nothing constructs these until that lands.
+#[allow(dead_code)]
 impl Sample {
     /// One stored result. A timeout is stored as -1: counted as lost, and kept
     /// out of the median.
@@ -846,6 +852,9 @@ impl Sample {
 
 /// What one probe's rows in one bucket add up to.
 #[derive(Default)]
+// Consumed by the hourly read path, which a window wider than the detail
+// window reaches; nothing constructs these until that lands.
+#[allow(dead_code)]
 struct Tally {
     /// Each sample's median and the number of answers it stands for.
     medians: Vec<(i64, i64)>,
@@ -854,6 +863,9 @@ struct Tally {
     hi: Option<i64>,
 }
 
+// Consumed by the hourly read path, which a window wider than the detail
+// window reaches; nothing constructs these until that lands.
+#[allow(dead_code)]
 impl Tally {
     fn add(&mut self, s: Sample) {
         if let Some(median) = s.median {
@@ -1588,21 +1600,11 @@ impl Db {
         // Every row is written with `INSERT OR REPLACE`, so a failure anywhere
         // leaves the hour to be folded again and rewriting what did land; the
         // watermark written last is what makes the hour count as folded.
-        self.conn()
-            .prepare_cached(
-                "INSERT OR REPLACE INTO metric_hour
-                   (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
-                    net_rx_max, net_tx_max)
-                 SELECT node_id, ?1, COUNT(*), AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
-                        CAST(AVG(swap_used) AS INTEGER), CAST(AVG(disk_used) AS INTEGER),
-                        CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER), AVG(load1),
-                        MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max))
-                 FROM metric WHERE ts>=?1 AND ts<?1+3600
-                 GROUP BY node_id",
-            )?
-            .execute([hour])?;
-        // The probes are folded one node at a time: the median needs the answers
-        // themselves, and a `ts` range alone would scan the whole table.
+        // Both halves are folded a block of nodes at a time, for the same reason:
+        // `ts` alone cannot seek -- the keys begin with `node_id` -- so a statement
+        // covering **every** node scans the whole table once per hour. Measured:
+        // 461 ms an hour with the metric fold written that way, against a few
+        // milliseconds with an `IN` list per block.
         let nodes: Vec<i64> = {
             let conn = self.conn();
             let mut stmt = conn.prepare_cached("SELECT id FROM node")?;
@@ -1612,30 +1614,89 @@ impl Db {
         for block in nodes.chunks(FOLD_NODES) {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
-            let mut read = tx.prepare_cached(
-                "SELECT task_id, latency FROM ping_record WHERE node_id=?1 AND ts>=?2 AND ts<?2+3600",
-            )?;
-            let mut write = tx.prepare_cached(
-                "INSERT OR REPLACE INTO ping_hour (node_id, task_id, ts, answered, lost, latency, lo, hi)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
-            for &node in block {
-                let mut probes: std::collections::BTreeMap<i64, Tally> = Default::default();
-                {
-                    let mut rows = read.query(params![node, hour])?;
-                    while let Some(r) = rows.next()? {
-                        probes.entry(r.get(0)?).or_default().add(Sample::result(r.get(1)?));
-                    }
-                }
-                for (task, mut t) in probes {
-                    let median = t.median();
-                    write.execute(params![node, task, hour, t.answered(), t.lost, median, t.lo, t.hi])?;
-                }
-            }
-            // Dropped before the commit, and the guard dropped before the pause:
-            // holding either across it would be the lock again.
-            drop(read);
-            drop(write);
+            // `IN (?, ...)`, not `BETWEEN`: an inequality on the leading primary key
+            // column `node_id` leaves the `ts` range as a **filter over every row
+            // those nodes ever wrote** -- 5.2M rows, 2157 ms an hour -- where an IN
+            // list is one equality seek per id with the range inside it.
+            //
+            // The median is picked by rank in SQL rather than in Rust: pulling the
+            // rows out cost 441 ms an hour, most of it moving 24 000 rows through the
+            // driver, against a few statements this way. `LIMIT 2 OFFSET
+            // (COUNT(*)-1)/2` takes the middle one when the count is odd and the
+            // middle two when it is even, and `CAST(AVG(...) AS INTEGER)` truncates --
+            // the answer `close_bucket` computes in Rust for the minute path, which is
+            // what lets a window drawn from either layer agree.
+            // `IN (?, ...)`, not `BETWEEN`: an inequality on the leading primary key
+            // column `node_id` leaves the `ts` range as a **filter over every row
+            // those nodes ever wrote** -- 5.2M rows, 2157 ms an hour -- where an IN
+            // list is one equality seek per id with the range inside it.
+            //
+            // The median is picked by rank in SQL rather than in Rust: pulling the
+            // rows out cost 441 ms an hour, most of it moving 24 000 rows through the
+            // driver. `ROW_NUMBER()` gives each answer its rank, the two ranks
+            // `(n+1)/2` and `n/2+1` are the middle one or the middle two, and
+            // `CAST(AVG(...) AS INTEGER)` truncates -- the answer `close_bucket`
+            // computes in Rust for the minute path, which is what lets a window drawn
+            // from either layer agree.
+            //
+            // Not `ORDER BY ... LIMIT 2 OFFSET (SELECT COUNT(*) ...)`: a LIMIT
+            // expression cannot reference the outer row, so the offset has to come
+            // from a window function instead.
+            // Every placeholder numbered explicitly: mixing `?` with `?N` makes the
+            // numbering depend on document order, and the count SQLite then expects
+            // does not match the values passed.
+            let first: Vec<String> = (1..=block.len()).map(|i| format!("?{i}")).collect();
+            let h = block.len() + 1;
+            let metric_sql = format!(
+                "INSERT OR REPLACE INTO metric_hour
+                   (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
+                    net_rx_max, net_tx_max)
+                 SELECT node_id, ?{h}, COUNT(*), AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
+                        CAST(AVG(swap_used) AS INTEGER), CAST(AVG(disk_used) AS INTEGER),
+                        CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER), AVG(load1),
+                        MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max))
+                 FROM metric WHERE node_id IN ({}) AND ts>=?{h} AND ts<?{h}+3600
+                 GROUP BY node_id",
+                first.join(",")
+            );
+            let mut mvalues: Vec<rusqlite::types::Value> = block.iter().map(|id| (*id).into()).collect();
+            mvalues.push(hour.into());
+            tx.prepare_cached(&metric_sql)?.execute(rusqlite::params_from_iter(mvalues))?;
+            let second: Vec<String> = (0..block.len()).map(|i| format!("?{}", h + 1 + i)).collect();
+            let (marks, more) = (first.join(","), second.join(","));
+            let sql = format!(
+                "INSERT OR REPLACE INTO ping_hour
+                   (node_id, task_id, ts, answered, lost, latency, lo, hi)
+                 SELECT a.node_id, a.task_id, ?{h}, a.answered, a.lost, m.latency, a.lo, a.hi
+                 FROM (
+                   SELECT node_id, task_id,
+                          SUM(CASE WHEN latency >= 0 THEN 1 ELSE 0 END) AS answered,
+                          SUM(CASE WHEN latency <  0 THEN 1 ELSE 0 END) AS lost,
+                          MIN(CASE WHEN latency >= 0 THEN latency END) AS lo,
+                          MAX(CASE WHEN latency >= 0 THEN latency END) AS hi
+                     FROM ping_record
+                    WHERE node_id IN ({marks}) AND ts >= ?{h} AND ts < ?{h} + 3600
+                    GROUP BY node_id, task_id
+                 ) a
+                 LEFT JOIN (
+                   SELECT node_id, task_id, CAST(AVG(latency) AS INTEGER) AS latency
+                     FROM (
+                       SELECT node_id, task_id, latency,
+                              ROW_NUMBER() OVER (PARTITION BY node_id, task_id ORDER BY latency) AS rn,
+                              COUNT(*)     OVER (PARTITION BY node_id, task_id) AS n
+                         FROM ping_record
+                        WHERE node_id IN ({more}) AND ts >= ?{h} AND ts < ?{h} + 3600
+                          AND latency >= 0
+                     )
+                    WHERE rn IN ((n + 1) / 2, n / 2 + 1)
+                    GROUP BY node_id, task_id
+                 ) m ON m.node_id = a.node_id AND m.task_id = a.task_id"
+            );
+            let mut values: Vec<rusqlite::types::Value> = Vec::new();
+            values.extend(block.iter().map(|id| (*id).into()));
+            values.push(hour.into());
+            values.extend(block.iter().map(|id| (*id).into()));
+            tx.prepare_cached(&sql)?.execute(rusqlite::params_from_iter(values))?;
             tx.commit()?;
             drop(conn);
             let_waiters_in();
