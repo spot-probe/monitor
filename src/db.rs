@@ -772,6 +772,24 @@ const LATE: i64 = 3_600;
 /// and is read from there; see `roll_up` and `prune`.
 pub const DETAIL_DAYS: i64 = 7;
 
+/// Whether SQLite refused because another connection holds the write lock, which
+/// a catch-up treats as "wait and try the same hour again" rather than an error:
+/// see `roll_up`.
+fn is_locked(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::DatabaseBusy || err.code == rusqlite::ErrorCode::DatabaseLocked
+    )
+}
+
+/// Nodes per transaction and per yield while folding an hour's probes. One node
+/// at a time cost more in commits and in sleeping than in work -- 549 ms per
+/// hour against ~100 ms with blocks -- while the whole hour at once held the lock
+/// the agents write through long enough to refuse a report. Ten keeps a writer's
+/// wait to one block's statements, which is tens of milliseconds.
+const FOLD_NODES: usize = 10;
+
 /// Releases the lock the agents write through between two statements of a long
 /// pass. Measured: a pass that held it throughout showed up as a node going
 /// offline for 12 s.
@@ -1531,7 +1549,18 @@ impl Db {
         };
         let mut folded = 0;
         while hour + 3_600 + LATE <= now {
-            self.fold_hour(hour)?;
+            if let Err(e) = self.fold_hour(hour) {
+                // A writer held the lock past `busy_timeout`. Measured: one such
+                // conflict aborted a catch-up that had folded 7 of 2159 hours, and
+                // the next pass starts over from the same hour -- so the whole pass
+                // is lost work. Every row is written idempotently, so waiting and
+                // retrying the same hour costs only time.
+                if !is_locked(&e) {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
             // Between hours, not only between nodes: a catch-up folds thousands of
             // hours, and the agents' writes must get in throughout.
             let_waiters_in();
@@ -1580,26 +1609,35 @@ impl Db {
             let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
             ids
         };
-        for node in nodes {
-            let mut probes: std::collections::BTreeMap<i64, Tally> = Default::default();
-            {
-                let conn = self.conn();
-                let mut read = conn.prepare_cached(
-                    "SELECT task_id, latency FROM ping_record WHERE node_id=?1 AND ts>=?2 AND ts<?2+3600",
-                )?;
-                let mut rows = read.query(params![node, hour])?;
-                while let Some(r) = rows.next()? {
-                    probes.entry(r.get(0)?).or_default().add(Sample::result(r.get(1)?));
+        for block in nodes.chunks(FOLD_NODES) {
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            let mut read = tx.prepare_cached(
+                "SELECT task_id, latency FROM ping_record WHERE node_id=?1 AND ts>=?2 AND ts<?2+3600",
+            )?;
+            let mut write = tx.prepare_cached(
+                "INSERT OR REPLACE INTO ping_hour (node_id, task_id, ts, answered, lost, latency, lo, hi)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for &node in block {
+                let mut probes: std::collections::BTreeMap<i64, Tally> = Default::default();
+                {
+                    let mut rows = read.query(params![node, hour])?;
+                    while let Some(r) = rows.next()? {
+                        probes.entry(r.get(0)?).or_default().add(Sample::result(r.get(1)?));
+                    }
                 }
-                let mut write = conn.prepare_cached(
-                    "INSERT OR REPLACE INTO ping_hour (node_id, task_id, ts, answered, lost, latency, lo, hi)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                )?;
                 for (task, mut t) in probes {
                     let median = t.median();
                     write.execute(params![node, task, hour, t.answered(), t.lost, median, t.lo, t.hi])?;
                 }
             }
+            // Dropped before the commit, and the guard dropped before the pause:
+            // holding either across it would be the lock again.
+            drop(read);
+            drop(write);
+            tx.commit()?;
+            drop(conn);
             let_waiters_in();
         }
         self.set(ROLLED, &(hour + 3_600).to_string())?;
