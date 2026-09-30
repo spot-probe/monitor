@@ -4,7 +4,7 @@
 // read used to be rewritten into one the form invented, so saving a price turned
 // `weekly` into `yearly`. These are the pure functions the form now calls.
 import assert from "node:assert/strict"
-import { cycleFields, cycleOk, cyclePatch, cycleValue } from "./format.ts"
+import { cycleFields, cycleOk, cyclePatch, cycleValue, money } from "./format.ts"
 
 // A named length and a length without a name are both readable, and a whole
 // number of years is shown in years.
@@ -39,5 +39,23 @@ assert.equal(cycleOk("years", "101"), false)
 assert.equal(cycleOk("once", ""), true)
 assert.equal(cycleValue("years", "5"), "60m")
 assert.equal(cycleValue("once", "9"), "once")
+
+// A price puts its currency in front of the number whichever code it is: the
+// code used to trail the amount for everything outside a five-entry table, so
+// `100.00 HKD` sat in the same column as `$100.00` (upstream issue #76). The five
+// keep the symbol they always had; the rest take Intl's.
+assert.equal(money(1234.5, "USD"), "$1,234.50")
+assert.equal(money(1234.5, "CNY"), "¥1,234.50")
+assert.equal(money(1234.5, "EUR"), "€1,234.50")
+assert.equal(money(1234.5, "GBP"), "£1,234.50")
+assert.equal(money(1000, "JPY"), "¥1,000", "Intl knows yen has no minor unit")
+assert.equal(money(1234.5, "HKD"), "HK$1,234.50")
+assert.equal(money(1234.5, "TWD"), "NT$1,234.50")
+// Intl separates a currency from its amount with U+00A0, and so does the
+// fallback below: a plain space would let a price wrap between the two.
+assert.equal(money(1234.5, "SGD"), "SGD\u00A01,234.50", "Intl's own prefix for a code it has no symbol for")
+assert.equal(money(1234.5, "XYZ"), "XYZ\u00A01,234.50")
+assert.equal(money(1234.5, "USDT"), "USDT\u00A01,234.50", "four letters: from before the hub checked")
+assert.equal(money(1234.5, ""), "1,234.50")
 
 console.log("billing cycle fields, patch and bounds passed")

@@ -31,10 +31,47 @@ export function uptime(seconds: number): string {
  */
 export const FOREVER = "∞"
 
-const SYMBOLS: Record<string, string> = { USD: "$", CNY: "¥", EUR: "€", GBP: "£", JPY: "¥" }
+/// The five this panel has always shown a symbol for. Intl's narrow form is
+/// exactly the symbol we used (`$`, `¥`, `€`, `£`, `¥`); its full form would
+/// prefix `US$`/`JP¥` instead, which is a change nobody asked for.
+const NARROW = new Set(["USD", "CNY", "EUR", "GBP", "JPY"])
 
+/// Built once per currency: a formatter holds the locale data it needs, and this
+/// runs for every row of the node table.
+const FORMATTERS = new Map<string, Intl.NumberFormat>()
+
+function formatter(currency: string): Intl.NumberFormat | undefined {
+  const known = FORMATTERS.get(currency)
+  if (known) return known
+  try {
+    const made = new Intl.NumberFormat("zh-CN", {
+      style: "currency",
+      currency,
+      // Everything else takes the full symbol: the narrow one collapses SGD, AUD
+      // and HKD into a bare `$`, which is actively wrong in a price column that
+      // can hold several currencies at once.
+      currencyDisplay: NARROW.has(currency) ? "narrowSymbol" : "symbol",
+    })
+    FORMATTERS.set(currency, made)
+    return made
+  } catch {
+    // Not a code Intl knows. The hub only stores three letters, so this is a
+    // value from before that check existed.
+    return undefined
+  }
+}
+
+/// A price with the currency in front of the number, always. The code used to
+/// trail the amount for every currency outside a five-entry table -- `100.00
+/// HKD` in the same column as `$100.00` -- which read as two styles once any
+/// three-letter code could be set (#71, upstream issue #76).
 export function money(amount: number, currency: string): string {
-  return `${SYMBOLS[currency] ?? ""}${amount.toFixed(2)}${SYMBOLS[currency] ? "" : ` ${currency}`}`
+  const f = formatter(currency)
+  if (f) return f.format(amount)
+  // Grouped like the rest: one ungrouped amount in a column of grouped ones is
+  // the same inconsistency in a different disguise.
+  const plain = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)
+  return currency ? `${currency}\u00A0${plain}` : plain
 }
 
 // The hub stores these lengths under a name and any other as `<n>m`.
