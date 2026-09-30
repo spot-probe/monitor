@@ -80,6 +80,20 @@ export type Node = {
 export type PingTask = { id: number; name: string; target: string; interval: number; nodes: number[] }
 
 /** Form snapshots must never overwrite fields the user did not edit. */
+/// The groups worth offering under what has been typed, case-insensitively.
+///
+/// Holding a known name is not a search: the field is then showing a choice
+/// already made, and the list under it is there to change that choice -- filtering
+/// by the name itself would leave nothing to change to. So an exact match (and an
+/// empty field) lists every group, and anything else filters by substring while a
+/// new name is being typed. Order is the caller's: the panel sorts names the way
+/// the language does.
+export function matchingGroups(groups: string[], typed: string): string[] {
+  const q = typed.trim().toLocaleLowerCase()
+  if (!q || groups.some((g) => g.toLocaleLowerCase() === q)) return groups
+  return groups.filter((g) => g.toLocaleLowerCase().includes(q))
+}
+
 export function changes<T extends object>(initial: T, values: Partial<T>): Partial<T> {
   return Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== initial[key as keyof T])) as Partial<T>
 }
@@ -257,6 +271,23 @@ export function isPublic(ip: string): boolean {
   return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b < 128) ||
     (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)))
+}
+
+/**
+ * An address as the node table shows it. A full IPv6 runs to 39 characters and
+ * would set the width of the whole column; past 22 it keeps its first two groups
+ * and its last two -- the prefix names the provider, the tail tells machines on
+ * one prefix apart -- and elides the middle. The groups are cut from the text as
+ * written, so a `::` inside what is kept stays a `::` rather than reading as a
+ * lone colon. The full address is still what the tooltip shows and what a click
+ * copies.
+ */
+export function shortAddress(address: string): string {
+  const groups = [...address.matchAll(/[^:]+/g)]
+  if (address.length <= 22 || groups.length < 5) return address
+  const head = groups[1]
+  const tail = groups[groups.length - 2]
+  return `${address.slice(0, head.index + head[0].length)}…${address.slice(tail.index)}`
 }
 
 /** Where a shown address comes from, which the panel gives as its tooltip. */

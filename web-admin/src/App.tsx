@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
-type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; login: string; version: string }
+type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; group_dropdown?: boolean; login: string; version: string }
 
 // Which half of the hub's provisioning guard refused, in this panel's words. The
 // hub names its own reason (`provision_block`); the last entry is for a hub too
@@ -73,7 +73,17 @@ function useTheme() {
   const dark = saved ? saved === "dark" : system
 
   useEffect(() => {
+    // Switched with every transition held. Buttons, badges and table rows fade
+    // their colours over 150 ms while the rest of the page changes at once,
+    // which leaves the page in both palettes for that long.
+    const hold = document.createElement("style")
+    hold.textContent = "*,*::before,*::after{transition:none!important}"
+    document.head.append(hold)
     document.documentElement.classList.toggle("dark", dark)
+    // Reading a layout property resolves the new colours while transitions are
+    // off, so removing the hold does not start one.
+    void document.body.offsetWidth
+    hold.remove()
   }, [dark])
 
   return [
@@ -408,6 +418,9 @@ export default function App() {
               site={me.site || location.origin}
               canProvision={canProvision}
               provisionNote={provisionNote}
+              // Off unless the hub was started with `--group-dropdown`, and
+              // optional so an older hub that never sends it keeps the text box.
+              groupDropdown={!!me.group_dropdown}
             />
           )}
         </main>

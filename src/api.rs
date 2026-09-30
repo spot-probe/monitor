@@ -952,6 +952,10 @@ pub async fn me(State(app): State<Shared>, headers: HeaderMap) -> Response {
         // default, in which case the browser's address is the only one available
         // and the panel falls back to its own origin.
         "site": app.site,
+        // Whether the panel's group field offers the names already in use as a
+        // list. Off unless the hub was started with `--group-dropdown`: that
+        // field is also how a new group is made, so the list is an opt-in help.
+        "group_dropdown": app.group_dropdown,
     });
     ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
@@ -2101,6 +2105,21 @@ mod tests {
 
     fn app() -> App {
         App::for_test(Db::open(":memory:").unwrap())
+    }
+
+    /// What the panel draws its group field from: a plain text box unless the hub
+    /// was started with `--group-dropdown`.
+    #[tokio::test]
+    async fn me_reports_whether_the_group_list_is_on() {
+        let body = |r: Response| async { axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap() };
+        for (app, want) in [
+            (std::sync::Arc::new(App::for_test(Db::open(":memory:").unwrap())), false),
+            (std::sync::Arc::new(App::for_test_group_dropdown(Db::open(":memory:").unwrap())), true),
+        ] {
+            let asked = me(State(app), domain_headers()).await;
+            let json: serde_json::Value = serde_json::from_slice(&body(asked).await).unwrap();
+            assert_eq!(json["group_dropdown"], want, "group_dropdown in /api/me");
+        }
     }
 
     #[tokio::test]
