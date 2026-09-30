@@ -2343,12 +2343,17 @@ function SettingsTab() {
           <Field label="站点名称">
             <Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
           </Field>
-          <Field label="历史数据保留天数" hint="超出的明细自动清理，累计流量不受影响">
+          <Field
+            label="历史数据保留天数"
+            hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
+          >
             <Input
               type="number"
+              min={1}
+              max={365}
               value={String(s.retention_days ?? "")}
               onChange={(e) => set("retention_days", e.target.value)}
-              placeholder="7"
+              placeholder="90"
             />
           </Field>
           <Field
@@ -2381,7 +2386,7 @@ function SettingsTab() {
                 // `||` rather than `??`: the hub returns "" for an unset key
                 // rather than null, and "" is the one value this key's write path
                 // refuses.
-                retention_days: String(s.retention_days || "7"),
+                retention_days: String(s.retention_days || "90"),
                 github_proxy: String(s.github_proxy ?? ""),
                 public_page: s.public_page === "off" ? "off" : "on",
               })
