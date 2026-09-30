@@ -772,6 +772,13 @@ const LATE: i64 = 3_600;
 /// and is read from there; see `roll_up` and `prune`.
 pub const DETAIL_DAYS: i64 = 7;
 
+/// The widest window an operator may set. A year of hourly rows is 8760 per series,
+/// which one request still answers; beyond it the answer grows without bound and
+/// the themes' own ranges stop at a year. **Reducing this truncates**: an operator
+/// who had set more loses the history past the new ceiling as the hourly prune
+/// reaches it, so the hub says so at startup.
+pub const MAX_RETENTION_DAYS: i64 = 365;
+
 /// Whether SQLite refused because another connection holds the write lock, which
 /// a catch-up treats as "wait and try the same hour again" rather than an error:
 /// see `roll_up`.
@@ -2265,7 +2272,10 @@ impl Db {
     /// text by the settings form, so a missing or unparsable value falls back to
     /// the default rather than erroring.
     pub fn retention_days(&self) -> i64 {
-        self.get("retention_days").and_then(|v| v.parse::<i64>().ok()).unwrap_or(7).clamp(1, 3_650)
+        self.get("retention_days")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(DETAIL_DAYS)
+            .clamp(1, MAX_RETENTION_DAYS)
     }
 
     /// What the panel's data page reads: how much space the file occupies, how
@@ -2860,8 +2870,17 @@ mod tests {
         db.insert_ping(id, task, now - 9 * 86_400, 12).unwrap();
         assert_eq!(db.stats().unwrap()["oldest"], now - 9 * 86_400);
 
+        // Above the ceiling reads as the ceiling -- and the hourly prune then
+        // deletes the history past it, which is the one change in this release that
+        // can take away history an operator had been keeping. Hence the startup
+        // warning in `main`.
         db.set("retention_days", "9999").unwrap();
-        assert_eq!(db.stats().unwrap()["retention"], 3_650, "a stored window is still clamped");
+        assert_eq!(
+            db.stats().unwrap()["retention"],
+            MAX_RETENTION_DAYS,
+            "a stored window is clamped to the ceiling"
+        );
+        assert_eq!(MAX_RETENTION_DAYS, 365, "and the ceiling is a year");
     }
 
     /// Deleted rows leave free pages behind; only a rebuild returns them to the

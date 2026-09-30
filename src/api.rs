@@ -2019,8 +2019,15 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
         "theme" if !crate::frontend::selectable(app, value) => Some("theme is not installed".into()),
         // Housekeeping clamps whatever it reads, so an unparsable value would be
         // stored, echoed back, and silently mean 7 days indefinitely.
-        "retention_days" if !value.parse::<i64>().is_ok_and(|d| (1..=3_650).contains(&d)) => {
-            Some("retention days must be a number from 1 to 3650".into())
+        "retention_days"
+            if !value
+                .parse::<i64>()
+                .is_ok_and(|d| (1..=crate::db::MAX_RETENTION_DAYS).contains(&d)) =>
+        {
+            Some(format!(
+                "retention days must be a number from 1 to {}",
+                crate::db::MAX_RETENTION_DAYS
+            ))
         }
         // The hub fetches this URL itself, so it must be one: a scheme it cannot
         // speak turns every agent download into a 502 that says nothing about the
