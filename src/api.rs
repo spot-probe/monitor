@@ -528,15 +528,14 @@ pub async fn metrics(
         // has nothing to label and this costs a turn at the write connection.
         let probes =
             if want_ping { app.db.ping_task_names(id).unwrap_or_else(|_| json!({})) } else { json!({}) };
-        let metrics = if want_metrics { app.db.metrics(id, since, step)? } else { vec![] };
+        let metrics = if want_metrics { app.db.metrics_window(id, since, step)? } else { vec![] };
         // `loss` is per probe across the whole window, alongside the per-bucket
         // `loss` on the rows. Both are required and neither replaces the other:
         // the row figure is what a tooltip reads, while the window figure is the
         // only one that can be accurate, since the denominators it divides by are
         // gone by the time the rows are built. Additive, so a theme unaware of it
         // continues to work.
-        let (ping, loss) =
-            if want_ping { app.db.ping_records(id, since, step)? } else { (vec![], json!({})) };
+        let (ping, loss) = if want_ping { app.db.ping_window(id, since, step)? } else { (vec![], json!({})) };
         // The bar rides with whichever chart is drawn, and is skipped for a
         // caller that did not name it: unlike the charts it is a few hundred
         // numbers, but it is also the one series stamped with the minute the

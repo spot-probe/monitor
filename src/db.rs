@@ -1531,7 +1531,6 @@ impl Db {
     /// one `GROUP BY` bucket rather than two values that have to be combined by
     /// hand. Without a watermark (`rolled` is `None`) the hour half selects nothing
     /// and this is exactly what the minute rows alone would give.
-    #[allow(dead_code)] // `metrics` adopts it once the read path is switched over
     pub fn metrics_window(&self, node_id: i64, since: i64, step: i64) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn();
         let rolled = rolled(&conn)?.unwrap_or(0);
@@ -2179,7 +2178,6 @@ impl Db {
     /// the panel reads today, and this is switched over to it only once the two are
     /// known to agree. Same assignment filter, so a probe taken off the node stops
     /// appearing here too.
-    #[allow(dead_code)]
     pub fn ping_window(
         &self,
         node_id: i64,
