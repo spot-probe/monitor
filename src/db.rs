@@ -1521,6 +1521,53 @@ impl Db {
         Ok(out)
     }
 
+    /// The resource series for a window that **reaches past the watermark**: the
+    /// hourly tier up to it, the minute rows after it, and the two merged by bucket.
+    ///
+    /// Merged in SQL, not in Rust, and that is what settles the seam: the weight is
+    /// explicit in each half (`minutes` for an hour row, 1 for a minute row), and a
+    /// bucket straddling the watermark -- which happens whenever `step` is coarser
+    /// than an hour, and always for the theme's six-hour and one-day ranges -- is
+    /// one `GROUP BY` bucket rather than two values that have to be combined by
+    /// hand. Without a watermark (`rolled` is `None`) the hour half selects nothing
+    /// and this is exactly what the minute rows alone would give.
+    #[allow(dead_code)] // `metrics` adopts it once the read path is switched over
+    pub fn metrics_window(&self, node_id: i64, since: i64, step: i64) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn();
+        let rolled = rolled(&conn)?.unwrap_or(0);
+        let mut stmt = conn.prepare_cached(
+            "SELECT (b.ts/?4)*?4, SUM(b.cpu*b.w)*1.0/SUM(b.w),
+                    CAST(SUM(b.mem_used*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.swap_used*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.disk_used*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.net_rx*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.net_tx*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CASE WHEN SUM(CASE WHEN b.load1 IS NOT NULL THEN b.w END) > 0
+                         THEN SUM(b.load1*b.w)*1.0/SUM(CASE WHEN b.load1 IS NOT NULL THEN b.w END) END,
+                    MAX(b.net_rx_max), MAX(b.net_tx_max)
+             FROM (
+               SELECT ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
+                      net_rx_max, net_tx_max, minutes AS w
+                 FROM metric_hour WHERE node_id=?1 AND ts>=?2 AND ts<?3
+               UNION ALL
+               SELECT ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
+                      MAX(net_rx, net_rx_max), MAX(net_tx, net_tx_max), 1
+                 FROM metric WHERE node_id=?1 AND ts>=?2 AND ts>=?3
+             ) b GROUP BY (b.ts/?4)*?4 ORDER BY (b.ts/?4)*?4",
+        )?;
+        let rows = stmt.query_map(params![node_id, since, rolled, step], |r| {
+            Ok(serde_json::json!({
+                "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
+                "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
+                "disk_used": r.get::<_, i64>(4)?,
+                "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
+                "load1": r.get::<_, Option<f64>>(7)?,
+                "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
+            }))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The resource series as the hourly tier holds them, for a window that has
     /// already been folded.
     ///
@@ -3629,6 +3676,60 @@ mod tests {
         assert_eq!((answered, lost), (3, 1), "a timeout is a loss, not an answer");
         assert_eq!(median, 20, "the middle of 10, 20 and 40");
         assert_eq!((lo, hi), (10, 40));
+    }
+
+    /// A window reaching across the watermark draws what the minute rows alone would
+    /// draw. Six hours are folded and the last three are not, so the seam falls in
+    /// the middle of the window; `metrics` reads **every** minute row, folded or not,
+    /// and is therefore the independent baseline.
+    ///
+    /// Two hours and a day per point are the cases that matter: a bucket then spans
+    /// both halves, and it is the `GROUP BY` in `metrics_window` that has to merge
+    /// them rather than let the same `ts` out twice.
+    #[test]
+    fn a_window_across_the_watermark_draws_what_the_minutes_would() {
+        let db = db();
+        let id = node(&db, 1);
+        let start = 472_224 * 3_600;
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                db.insert_metric(
+                    id,
+                    start + h * 3_600 + m * 60,
+                    &serde_json::json!({"cpu": h as f64 + m as f64 / 100.0, "mem_used": 1_000 + m,
+                        "swap_used": 10, "disk_used": 5, "net_rx": 100 + m, "net_tx": 50,
+                        "load1": 0.25, "net_rx_max": 900 + m, "net_tx_max": 400}),
+                )
+                .unwrap();
+            }
+        }
+        // Three hours folded, three left as minute rows: the seam is mid-window.
+        for h in 0..3i64 {
+            let when = start + h * 3_600 + 7_200;
+            db.roll_up(when, 30).unwrap();
+            db.fold_hour(start + h * 3_600).unwrap();
+        }
+        assert_eq!(count(&db, "metric_hour"), 3, "one node, three hours folded");
+
+        let until = start + 6 * 3_600;
+        for step in [3_600i64, 7_200, 86_400] {
+            let window = db.metrics_window(id, start, step).unwrap();
+            let minutes = db.metrics(id, start, step).unwrap();
+            assert_eq!(window.len(), minutes.len(), "step {step}: the same buckets");
+            for (w, m) in window.iter().zip(&minutes) {
+                assert_eq!(w["ts"], m["ts"], "step {step}");
+                assert_eq!(w["net_rx_max"], m["net_rx_max"], "step {step}: the peak is exact");
+                let (got, want) = (w["cpu"].as_f64().unwrap(), m["cpu"].as_f64().unwrap());
+                assert!((got - want).abs() < 1e-9, "step {step}: cpu {got} vs {want}");
+                for key in ["mem_used", "swap_used", "disk_used", "net_rx", "net_tx"] {
+                    let d = (w[key].as_i64().unwrap() - m[key].as_i64().unwrap()).abs();
+                    assert!(d <= 1, "step {step}: {key} differs by {d}");
+                }
+                let (got, want) = (w["load1"].as_f64().unwrap(), m["load1"].as_f64().unwrap());
+                assert!((got - want).abs() < 1e-9, "step {step}: load1 {got} vs {want}");
+            }
+        }
+        let _ = until;
     }
 
     /// The hourly tier's probe series answer what the minute rows do, hour per point
