@@ -39,10 +39,36 @@ function animate(update: () => void) {
 }
 
 function copy(text: string) {
-  navigator.clipboard.writeText(text).then(
-    () => toast.success("已复制"),
-    () => toast.error("复制失败"),
-  )
+  // The async clipboard API exists only in a secure context, and a hub reached
+  // over plain http on a LAN address is not one -- which is a supported way to
+  // run this (the panel says so when it refuses to add a node). A copy button
+  // that silently does nothing there is worse than the old API, so this falls
+  // back to it.
+  const legacy = () => {
+    const box = document.createElement("textarea")
+    box.value = text
+    box.setAttribute("readonly", "")
+    // Parked off-screen rather than hidden: a hidden element cannot be selected,
+    // and selecting is what `execCommand` copies.
+    box.style.position = "fixed"
+    box.style.top = "-1000px"
+    document.body.appendChild(box)
+    box.select()
+    let ok = false
+    try {
+      ok = document.execCommand("copy")
+    } catch {
+      ok = false
+    }
+    box.remove()
+    if (ok) toast.success("已复制")
+    else toast.error("复制失败")
+  }
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast.success("已复制"), legacy)
+  } else {
+    legacy()
+  }
 }
 
 const SOURCES: Record<Source, string> = {
