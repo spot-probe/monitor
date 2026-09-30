@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -230,8 +230,91 @@ function CreateNode({ onClose, onSaved }: {
   )
 }
 
-function NodeForm({ node, onClose, onSaved }: {
+/**
+ * The group field with the names already in use listed under it.
+ *
+ * Only drawn when the hub was started with `--group-dropdown`: the field is also
+ * how a new group is made, so the list is an opt-in help for the case where there
+ * are many names to remember. Typing works exactly as it did -- this is the same
+ * input, with a list beside it.
+ *
+ * The list is drawn in place rather than in a popover: a popover takes focus when
+ * it opens, and a field that cannot be typed into is worse than no list at all.
+ */
+function GroupPicker({ value, onChange, groups }: { value: string; onChange: (v: string) => void; groups: string[] }) {
+  const [open, setOpen] = useState(false)
+  // Which entry the arrow keys are on, or none: Enter takes it only after the
+  // admin has chosen one, so it keeps saving the form as before otherwise.
+  const [active, setActive] = useState<number | null>(null)
+  const picks = matchingGroups(groups, value)
+  const list = open && picks.length > 0
+  const move = (step: number) =>
+    setActive((a) => (a === null ? (step > 0 ? 0 : picks.length - 1) : (a + step + picks.length) % picks.length))
+  return (
+    <div className="relative">
+      <Input
+        maxLength={13}
+        value={value}
+        placeholder="建站"
+        onChange={(e) => {
+          onChange(e.target.value)
+          setOpen(true)
+          setActive(null)
+        }}
+        onFocus={() => setOpen(true)}
+        // A blur fires before the click below lands, so the list would be gone by
+        // the time it arrives; one tick is enough for the click to be delivered.
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={(e) => {
+          if (!list) return
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault()
+            move(e.key === "ArrowDown" ? 1 : -1)
+          } else if (e.key === "Enter" && active !== null) {
+            e.preventDefault()
+            onChange(picks[active])
+            setOpen(false)
+          } else if (e.key === "Escape") {
+            setOpen(false)
+          }
+        }}
+      />
+      {list && (
+        <div
+          role="listbox"
+          className="absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-md border bg-popover p-1 shadow-md"
+        >
+          {picks.map((g, i) => (
+            <button
+              key={g}
+              type="button"
+              role="option"
+              aria-selected={g === value}
+              className={`flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm ${
+                i === active ? "bg-accent text-accent-foreground" : "hover:bg-accent hover:text-accent-foreground"
+              }`}
+              // Keeps the field focused, so the click lands on a list that is
+              // still open.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange(g)
+                setOpen(false)
+              }}
+            >
+              {g}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
   node: Node
+  /** The group names already in use, for the opt-in list below. */
+  groups: string[]
+  groupDropdown: boolean
   onClose: () => void
   onSaved: () => void
 }) {
@@ -304,10 +387,15 @@ function NodeForm({ node, onClose, onSaved }: {
           </Field>
           {/* Filed beside the name rather than with the billing fields: this is how
               the node is grouped, not what it costs. The public page derives its tabs
-              from the values in use, so there is nothing to pick from -- only to type.
-              Empty means the node appears under every tab. */}
+              from the values in use, so there is nothing to pick from -- only to type,
+              unless the hub was started with --group-dropdown and the names are worth
+              offering. Empty means the node appears under every tab. */}
           <Field label="分组" hint="公开页按它分页签，例如「建站」「入口集群」。最多 13 字。留空则只在「全部节点」下出现">
-            <Input maxLength={13} value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
+            {groupDropdown ? (
+              <GroupPicker value={form.group} onChange={(v) => set("group", v)} groups={groups} />
+            ) : (
+              <Input maxLength={13} value={form.group} onChange={(e) => set("group", e.target.value)} placeholder="建站" />
+            )}
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="每月流量额度 (GB)" hint="留空或 0 不限">
@@ -944,12 +1032,14 @@ function DragHandle({ onStart, onEnd, onKey, disabled, title, label }: {
   )
 }
 
-function Nodes({ nodes, refresh, site, canProvision, provisionNote, agentLatest }: {
+function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdown, agentLatest }: {
   nodes: Node[]
   refresh: () => void
   site: string
   canProvision: boolean
   provisionNote: string
+  /** `--group-dropdown`: offer the groups in use under the group field. */
+  groupDropdown: boolean
   /** The newest agent release the hub has read, or null when it has not. */
   agentLatest: string | null
 }) {
@@ -1220,6 +1310,8 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, agentLatest 
       {editing && (
         <NodeForm
           node={editing}
+          groups={groups}
+          groupDropdown={groupDropdown}
           onClose={() => setEditing(null)}
           onSaved={refresh}
         />
@@ -3189,6 +3281,7 @@ export function Admin({
   site,
   canProvision,
   provisionNote,
+  groupDropdown,
   agentLatest,
   versions,
   reloadVersions,
@@ -3199,6 +3292,8 @@ export function Admin({
   site: string
   canProvision: boolean
   provisionNote: string
+  /** `--group-dropdown`: offer the groups in use as a list under that field. */
+  groupDropdown: boolean
   agentLatest: string | null
   /** Read once in `App`, which also marks the navigation with it. */
   versions: Versions | null
@@ -3229,7 +3324,7 @@ export function Admin({
             agentLatest={agentLatest}
           />
         ) : (
-          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} provisionNote={provisionNote} agentLatest={agentLatest} />
+          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} provisionNote={provisionNote} groupDropdown={groupDropdown} agentLatest={agentLatest} />
         )}
       </div>
   )

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict"
-import { addresses, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, isPublic, provisioningSite, trafficCorrection } from "./api.ts"
+import { addresses, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, isPublic, matchingGroups, provisioningSite, trafficCorrection } from "./api.ts"
 
 assert.deepEqual(changes({ public: true, price: 5 }, { price: 20 }), { price: 20 })
 assert.deepEqual(changes({ total_rx: "100", month_tx: "2" }, { total_rx: "100", month_tx: "3" }), { month_tx: "3" })
@@ -104,5 +104,19 @@ assert.equal(behind("1.8", "1.8.1"), true, "a missing component counts as 0")
 assert.equal(behind("", "1.9.0"), false, "nothing reported is not behind")
 assert.equal(behind("1.8.0", ""), false, "an unreachable GitHub leaves no latest")
 assert.equal(behind("dev-abc", "1.9.0"), true, "not 1.2.3 can only be compared for equality")
+
+// The opt-in group list (`--group-dropdown`). A field holding a known name is
+// offering to change it, so it lists every group; anything else is a new name
+// being typed, and filters.
+const NAMES = ["建站", "入口集群", "落地"]
+assert.deepEqual(matchingGroups(NAMES, ""), NAMES)
+assert.deepEqual(matchingGroups(NAMES, "建站"), NAMES, "a chosen name still lists the alternatives")
+assert.deepEqual(matchingGroups(NAMES, "  建站  "), NAMES, "the field's own spaces are not part of the name")
+assert.deepEqual(matchingGroups(NAMES, "落"), ["落地"])
+assert.deepEqual(matchingGroups(NAMES, "站"), ["建站"])
+assert.deepEqual(matchingGroups(NAMES, "不存在的"), [])
+assert.deepEqual(matchingGroups(["Edge", "edge-2"], "eDgE"), ["Edge", "edge-2"], "case-insensitive")
+assert.deepEqual(matchingGroups(["Edge", "edge-2"], "edge-2"), ["Edge", "edge-2"])
+assert.deepEqual(matchingGroups([], "x"), [])
 
 console.log("partial edits, traffic corrections, provisioning and address checks and theme-config checks passed")

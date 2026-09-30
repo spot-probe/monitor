@@ -73,6 +73,11 @@ pub struct App {
     /// set, or a loopback listener would place 127.0.0.1 in the install commands
     /// the panel builds.
     pub site: String,
+    /// `--group-dropdown`: whether the panel offers the group names already in
+    /// use as a list under the group field. Off by default -- the list is a help
+    /// only where there are many names, and that field is also how new ones are
+    /// made. Reported to the panel by `api::me`.
+    pub group_dropdown: bool,
     /// Parent directory containing one folder per installed public theme.
     pub themes: PathBuf,
     /// Alerts on their way out; see `notify::send`.
@@ -92,7 +97,13 @@ pub struct HubRelease {
 }
 
 impl App {
-    fn new(db: Db, site: String, themes: PathBuf, notes: tokio::sync::mpsc::Sender<notify::Note>) -> Self {
+    fn new(
+        db: Db,
+        site: String,
+        themes: PathBuf,
+        notes: tokio::sync::mpsc::Sender<notify::Note>,
+        group_dropdown: bool,
+    ) -> Self {
         Self {
             db,
             agents: RwLock::default(),
@@ -108,6 +119,7 @@ impl App {
                 .build()
                 .expect("http client"),
             site,
+            group_dropdown,
             themes,
             notes,
             hub_release: Mutex::default(),
@@ -117,7 +129,14 @@ impl App {
     #[cfg(test)]
     pub fn for_test(db: Db) -> Self {
         // Nothing delivers in tests; `notify::send` drops into the closed channel.
-        Self::new(db, String::new(), PathBuf::from("themes"), tokio::sync::mpsc::channel(1).0)
+        Self::new(db, String::new(), PathBuf::from("themes"), tokio::sync::mpsc::channel(1).0, false)
+    }
+
+    /// As `for_test`, with the group list switched on: the only startup flag the
+    /// panel can see, and so the only one worth a test of its own.
+    #[cfg(test)]
+    pub fn for_test_group_dropdown(db: Db) -> Self {
+        Self::new(db, String::new(), PathBuf::from("themes"), tokio::sync::mpsc::channel(1).0, true)
     }
 
     pub fn public_page(&self) -> bool {
@@ -301,6 +320,9 @@ struct Args {
     site: String,
     themes: PathBuf,
     reset_password: bool,
+    /// `--group-dropdown`: offer the group names already in use under the group
+    /// field in the panel. Off, that field stays a plain text box.
+    group_dropdown: bool,
 }
 
 /// The default listen address. A v6 wildcard also accepts IPv4 through
@@ -319,12 +341,18 @@ fn default_listen() -> &'static str {
 }
 
 fn parse_args() -> Result<Args> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Split from `parse_args` so the flags can be tested without a process's own
+/// argument list, which a test cannot set.
+fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args> {
     let mut listen = None;
     let mut database = "monitor.db".to_owned();
     let mut site = String::new();
     let mut themes = None;
     let mut reset_password = false;
-    let mut it = std::env::args().skip(1);
+    let mut group_dropdown = false;
     while let Some(arg) = it.next() {
         let mut value = || it.next().unwrap_or_default();
         match arg.as_str() {
@@ -333,6 +361,9 @@ fn parse_args() -> Result<Args> {
             "--site" => site = value(),
             "--themes" => themes = Some(PathBuf::from(value())),
             "--reset-password" => reset_password = true,
+            // Opt-in: the list is a help where many names are in use, and a
+            // question nobody needed answered everywhere else.
+            "--group-dropdown" => group_dropdown = true,
             "-h" | "--help" => {
                 println!(
                     "monitor-hub {}\n\n\
@@ -346,7 +377,10 @@ fn parse_args() -> Result<Args> {
                      hub answers on whatever ip:port it is asked, and the panel builds\n\
                      install commands from the address in the browser's bar.\n\
                      --reset-password replaces the emergency password, signs every session\n\
-                     out, prints the new password and exits. The database must exist.",
+                     out, prints the new password and exits. The database must exist.\n\
+                     --group-dropdown offers the group names already in use as a list\n\
+                     under the group field in the panel; without it that field is a\n\
+                     plain text box.",
                     env!("CARGO_PKG_VERSION")
                 );
                 std::process::exit(0);
@@ -366,6 +400,7 @@ fn parse_args() -> Result<Args> {
         site: site.trim_end_matches('/').to_owned(),
         themes,
         reset_password,
+        group_dropdown,
     })
 }
 
@@ -397,7 +432,13 @@ async fn main() -> Result<()> {
         warn!("SQLite keeps its temporary files in its default directory: {e:#}");
     }
     let (notes, inbox) = tokio::sync::mpsc::channel(notify::QUEUE);
-    let app = Arc::new(App::new(Db::open(&args.database)?, args.site.clone(), args.themes, notes));
+    let app = Arc::new(App::new(
+        Db::open(&args.database)?,
+        args.site.clone(),
+        args.themes,
+        notes,
+        args.group_dropdown,
+    ));
     let url = advertised_url(&args.site, args.listen);
     first_run(&app, &url)?;
     if exposed_over_plain_http(&url) {
@@ -758,7 +799,19 @@ mod tests {
             site.into(),
             PathBuf::from("themes"),
             tokio::sync::mpsc::channel(1).0,
+            false,
         )
+    }
+
+    /// The group list is opt-in: off unless the operator asks for it, in any
+    /// position among the other flags.
+    #[test]
+    fn the_group_list_is_a_flag_of_its_own() {
+        let args =
+            |extra: &[&str]| parse_args_from(extra.iter().map(|a| a.to_string())).expect("these flags parse");
+        assert!(!args(&[]).group_dropdown, "off by default");
+        assert!(args(&["--group-dropdown"]).group_dropdown);
+        assert!(args(&["--db", "other.db", "--group-dropdown"]).group_dropdown);
     }
 
     /// A request as a reverse proxy would forward it, or as it arrives with none

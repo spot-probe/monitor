@@ -80,6 +80,20 @@ export type Node = {
 export type PingTask = { id: number; name: string; target: string; interval: number; nodes: number[] }
 
 /** Form snapshots must never overwrite fields the user did not edit. */
+/// The groups worth offering under what has been typed, case-insensitively.
+///
+/// Holding a known name is not a search: the field is then showing a choice
+/// already made, and the list under it is there to change that choice -- filtering
+/// by the name itself would leave nothing to change to. So an exact match (and an
+/// empty field) lists every group, and anything else filters by substring while a
+/// new name is being typed. Order is the caller's: the panel sorts names the way
+/// the language does.
+export function matchingGroups(groups: string[], typed: string): string[] {
+  const q = typed.trim().toLocaleLowerCase()
+  if (!q || groups.some((g) => g.toLocaleLowerCase() === q)) return groups
+  return groups.filter((g) => g.toLocaleLowerCase().includes(q))
+}
+
 export function changes<T extends object>(initial: T, values: Partial<T>): Partial<T> {
   return Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== initial[key as keyof T])) as Partial<T>
 }
