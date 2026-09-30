@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
+import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, provisioningSite, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
@@ -75,14 +76,53 @@ function Addresses({ node }: { node: Node }) {
   )
 }
 
-function Field({ label, hint, suffix, className = "", children }: { label: string; hint?: string; suffix?: string; className?: string; children: React.ReactNode }) {
+/**
+ * The explanation a label keeps out of the way until it is asked for.
+ *
+ * A tap shows no tooltip on its own, so a click opens it as well; and both the
+ * trigger's own handlers and the label's would close it again -- the button sits
+ * inside a `<label>` that focuses the control it wraps -- so both are prevented.
+ */
+function Help({ children, width = "max-w-64" }: { children: React.ReactNode; width?: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Tooltip open={open} onOpenChange={setOpen}>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="说明"
+          className="text-muted-foreground hover:text-foreground"
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.preventDefault()
+            setOpen(true)
+          }}
+        >
+          <CircleQuestionMark className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      {/* text-wrap rather than the content's own text-balance, which breaks
+          multi-line Chinese halfway across the box. */}
+      <TooltipContent collisionPadding={16} className={`${width} space-y-1 text-left text-wrap`}>
+        {children}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function Field({ label, hint, help, suffix, className = "", children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; children: React.ReactNode }) {
   return (
     <div className={`space-y-2 ${className}`}>
       {/* The control goes inside the label, which is what associates the two. As
           siblings they were merely adjacent: a screen reader announced the input with
           no name, and clicking the label did not focus it. 27 inputs share this. */}
       <Label className="flex flex-col items-start gap-2 text-sm font-medium">
-        {label}
+        {/* The question mark sits inside the label as well, which is why it has to
+            cancel the label's own activation: see `Help`. */}
+        <span className="flex items-center gap-1.5">
+          {label}
+          {help ? <Help>{help}</Help> : null}
+        </span>
       {/* The unit sits inside the control rather than in the label: "离线宽限期（分钟）"
           made the label do two jobs, and the reader had to parse past the parenthesis to
           find the field's name. */}
@@ -441,7 +481,24 @@ function BillingForm({ node, onClose, onSaved }: {
                 placeholder="免费"
               />
             </Field>
-            <Field label="货币" hint={currencyHint(form.currency.toUpperCase()) ?? "三个字母的代码，如 USD、CNY、HKD"}>
+            <Field
+              label="货币"
+              hint={currencyHint(form.currency.toUpperCase())}
+              help={
+                <>
+                  <p>填三个字母的货币代码，大小写都行。</p>
+                  <p>
+                    例如：
+                    {["美元 USD", "人民币 CNY", "港币 HKD", "新台币 TWD", "欧元 EUR", "日元 JPY"].map((c, i) => (
+                      <span key={c}>
+                        {i > 0 && "、"}
+                        <span className="whitespace-nowrap">{c}</span>
+                      </span>
+                    ))}
+                  </p>
+                </>
+              }
+            >
               {/* Uppercased by CSS: rewriting the value mid-composition would
                   break an input method, and the hub stores it uppercased. */}
               <Input
@@ -1913,16 +1970,23 @@ function Themes() {
     <div className="space-y-4">
       <Card className="gap-4 p-5">
         <div>
-          <h3 className="text-sm font-medium">安装主题</h3>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            填主题的 GitHub 仓库地址，例如 <code>https://github.com/作者/仓库</code>；仓库首页、Releases 页、
-            某个版本的页面都可以，总是安装最新的 release。
-            <br />
-            也可以上传 release 里的 <code>theme.tar.gz</code>，<b>不要选 Source code</b>。两种方式都是同名主题整体替换。
-            <br />
-            主题的 <code>url</code> 指向 GitHub 仓库时，卡片上的 <RefreshCw className="inline size-3" /> 检查更新，
-            版本没变就不下载。
-            <br />
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-sm font-medium">安装主题</h3>
+            <Help width="max-w-[min(28rem,calc(100vw-2rem))]">
+              <p>
+                填主题的 GitHub 仓库地址，例如 <span className="whitespace-nowrap">https://github.com/作者/仓库</span>
+              </p>
+              <p>仓库首页、Releases 页的地址都可以，总是安装最新的 release。</p>
+              <p>也可以上传 release 里的 theme.tar.gz，不要选 Source code。</p>
+              <p>两种方式都是同名主题整体替换。</p>
+              <p>
+                主题的 url 指向 GitHub 仓库时，卡片上的 <RefreshCw className="inline size-3" /> 检查更新，
+                版本没变就不下载。
+              </p>
+            </Help>
+          </div>
+          {/* Stays in view: it is the one line about what installing permits. */}
+          <p className="mt-1 text-xs text-muted-foreground">
             主题代码在访客浏览器中执行，请只安装可信来源。
           </p>
         </div>
