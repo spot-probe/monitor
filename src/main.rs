@@ -439,6 +439,17 @@ async fn main() -> Result<()> {
         notes,
         args.group_dropdown,
     ));
+    // A stored window above the ceiling is read as the ceiling, and the hourly prune
+    // then deletes the history past it. That is the one change here that can take
+    // away history an operator had been keeping, so it is said out loud rather than
+    // left to be noticed from a chart that stops early.
+    if let Some(stored) = above_ceiling(&app) {
+        warn!(
+            "retention_days is set to {stored}, above the ceiling of {}: it is read as {} days,              and history older than that will be pruned",
+            db::MAX_RETENTION_DAYS,
+            db::MAX_RETENTION_DAYS
+        );
+    }
     let url = advertised_url(&args.site, args.listen);
     first_run(&app, &url)?;
     if exposed_over_plain_http(&url) {
@@ -604,6 +615,16 @@ async fn shutdown() {
 /// The address printed at startup: `--site` when given, otherwise the listen
 /// address with any wildcard resolved to a concrete one, since
 /// `http://0.0.0.0:28080` cannot be opened in a browser.
+/// The stored retention window when it is **above** the ceiling, for the caller to
+/// warn about: the ceiling is what everything else reads, and the hourly prune
+/// deletes the history past it.
+fn above_ceiling(app: &App) -> Option<i64> {
+    app.db
+        .get("retention_days")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|days| *days > db::MAX_RETENTION_DAYS)
+}
+
 fn advertised_url(site: &str, listen: SocketAddr) -> String {
     if !site.is_empty() {
         return site.to_owned();
@@ -808,6 +829,19 @@ fn until_next_hour<Tz: TimeZone>(now: DateTime<Tz>) -> std::time::Duration {
 mod tests {
     use super::*;
     use axum::http::{StatusCode, Uri};
+
+    /// A window above the ceiling is read as the ceiling -- and the operator is told,
+    /// because the pruning that follows deletes the history past it.
+    #[test]
+    fn a_stored_window_above_the_ceiling_is_reported() {
+        let app = app("");
+        assert_eq!(above_ceiling(&app), None, "unset is not above it");
+        app.db.set("retention_days", "30").unwrap();
+        assert_eq!(above_ceiling(&app), None, "and neither is a sane one");
+        app.db.set("retention_days", "9999").unwrap();
+        assert_eq!(above_ceiling(&app), Some(9999));
+        assert_eq!(app.db.retention_days(), db::MAX_RETENTION_DAYS, "read as the ceiling");
+    }
 
     fn app(site: &str) -> App {
         App::new(
