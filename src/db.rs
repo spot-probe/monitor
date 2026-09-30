@@ -156,6 +156,42 @@ CREATE TABLE IF NOT EXISTS ping_record (
   PRIMARY KEY (node_id, ts, task_id)
 ) WITHOUT ROWID;
 
+-- The two summary layers, for history older than `DETAIL_DAYS`. An hour is
+-- written once it has ended and stayed quiet for a further hour (an agent may
+-- report up to an hour late, and a probe's answer lands with the next frame),
+-- and the minute rows it was built from are deleted only afterwards.
+--
+-- `minutes` is how many minute rows went into the average, so a bucket that
+-- merges several hours weights each by its own count; a bucket built from a
+-- half-reported hour must not count as much as a full one.
+--
+-- `swap_used` and `load1` are carried here, unlike the rest of the minute
+-- table's columns, because this hub's charts draw them: a tier without them
+-- would drop two series from every window wider than the detail window. `load1`
+-- is nullable in `metric` too -- an agent reporting no load is not an agent
+-- reporting zero -- and `AVG` over an hour of nulls stays null.
+CREATE TABLE IF NOT EXISTS metric_hour (
+  node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+  ts      INTEGER NOT NULL,
+  minutes INTEGER NOT NULL,
+  cpu REAL NOT NULL,
+  mem_used INTEGER NOT NULL, swap_used INTEGER NOT NULL, disk_used INTEGER NOT NULL,
+  net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
+  load1 REAL,
+  net_rx_max INTEGER NOT NULL, net_tx_max INTEGER NOT NULL,
+  PRIMARY KEY (node_id, ts)
+) WITHOUT ROWID;
+
+-- `latency` is the median of the hour's answers, NULL when none arrived; `lo`
+-- and `hi` bound them. `answered` weights that median when a chart point covers
+-- several hours.
+CREATE TABLE IF NOT EXISTS ping_hour (
+  node_id INTEGER NOT NULL, task_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+  answered INTEGER NOT NULL, lost INTEGER NOT NULL,
+  latency INTEGER, lo INTEGER, hi INTEGER,
+  PRIMARY KEY (node_id, ts, task_id)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
   expires_at INTEGER NOT NULL,
@@ -180,7 +216,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -355,6 +391,33 @@ fn migrate_to_10(conn: &Connection) -> Result<()> {
 /// country up by the machine's own address, let the panel override it, and give
 /// an address its answer back when a node returns to it -- and scattering them
 /// across three migrations would leave the same rule in three places.
+/// The summary tables, for databases already in service. The statements are the
+/// same as the ones in `SCHEMA`; `an_upgraded_release_matches_a_fresh_database`
+/// compares the columns of the two paths, so changing one side alone fails there
+/// rather than in production.
+fn migrate_to_12(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS metric_hour (
+  node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+  ts      INTEGER NOT NULL,
+  minutes INTEGER NOT NULL,
+  cpu REAL NOT NULL,
+  mem_used INTEGER NOT NULL, swap_used INTEGER NOT NULL, disk_used INTEGER NOT NULL,
+  net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
+  load1 REAL,
+  net_rx_max INTEGER NOT NULL, net_tx_max INTEGER NOT NULL,
+  PRIMARY KEY (node_id, ts)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS ping_hour (
+  node_id INTEGER NOT NULL, task_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+  answered INTEGER NOT NULL, lost INTEGER NOT NULL,
+  latency INTEGER, lo INTEGER, hi INTEGER,
+  PRIMARY KEY (node_id, ts, task_id)
+) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
 fn migrate_to_11(conn: &Connection) -> Result<()> {
     add_column(conn, "node", "country_ip TEXT NOT NULL DEFAULT ''")?;
     add_column(conn, "node", "country_prev_ip TEXT NOT NULL DEFAULT ''")?;
@@ -412,6 +475,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 11 {
         migrate_to_11(&tx)?;
     }
+    if from < 12 {
+        migrate_to_12(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -420,6 +486,16 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
 /// Every table a backup must carry before this build will restore it.
 const TABLES: [&str; 8] =
     ["setting", "node", "traffic", "metric", "ping_task", "ping_node", "ping_record", "session"];
+
+/// The summary layers: history older than the detail window is kept here, one row
+/// per hour rather than per minute. Deliberately not in `TABLES` -- that list is
+/// what a backup must already contain, and one taken before these existed does
+/// not, so listing them would refuse every older backup.
+///
+/// Test-visible only, for now: the rollup and the retention pass are what use it
+/// in production.
+#[cfg(test)]
+const HOUR_TABLES: [&str; 2] = ["metric_hour", "ping_hour"];
 
 /// One node's stored configuration and last known facts.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -2987,12 +3063,147 @@ mod tests {
         for column in ADDED {
             db.conn().execute(&format!("ALTER TABLE node DROP COLUMN {column}"), []).unwrap();
         }
+        // Opening the file above writes this build's schema, so the tables a later
+        // migration adds are present and have to be taken back out: a v10 file had
+        // no such table, and a fixture that keeps them passes a missing migration.
+        for table in HOUR_TABLES {
+            db.conn().execute(&format!("DROP TABLE {table}"), []).unwrap();
+        }
         db.conn()
             .execute_batch(&format!(
                 "INSERT INTO node (id, name, token, ip, country, created_at) {rows};
                                      PRAGMA user_version = 10;"
             ))
             .unwrap();
+    }
+
+    /// Every row of each table as one string, so two databases can be compared
+    /// whole: a row count says nothing about the values a migration rewrote.
+    fn dump(conn: &Connection, tables: &[&str]) -> Vec<(String, String)> {
+        tables
+            .iter()
+            .map(|t| {
+                let mut stmt = conn.prepare(&format!("SELECT * FROM {t} ORDER BY 1")).unwrap();
+                let width = stmt.column_count();
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| {
+                        let cells: Vec<String> =
+                            (0..width).map(|i| format!("{:?}", r.get_ref(i).unwrap())).collect();
+                        Ok(cells.join("|"))
+                    })
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                ((*t).to_owned(), rows.join("\n"))
+            })
+            .collect()
+    }
+
+    /// A backup taken before the summary tables existed restores. `check_backup`
+    /// runs the migrations on the upload, and it is the only place a table added
+    /// by a migration is load-bearing: the startup path applies `SCHEMA` first,
+    /// whose `CREATE TABLE IF NOT EXISTS` would create it anyway.
+    ///
+    /// Without that migration the file is refused as not a hub backup, which is
+    /// what an older release's export would then get.
+    #[test]
+    fn a_backup_from_before_the_summary_tables_still_restores() {
+        let scratch = Scratch::new();
+        let copy = format!("{}.old", scratch.0);
+        let db = Db::open(&scratch.0).unwrap();
+        db.create_node(&Node { name: "old".into(), ..Default::default() }, "token-old").unwrap();
+        db.backup_into(&copy).unwrap();
+
+        // The file as the previous release left it: no summary tables, and its own
+        // version stamp.
+        {
+            let old = Connection::open(&copy).unwrap();
+            for table in HOUR_TABLES {
+                old.execute(&format!("DROP TABLE {table}"), []).unwrap();
+            }
+            old.execute_batch("PRAGMA user_version = 11").unwrap();
+        }
+
+        db.check_backup(&copy).unwrap();
+        db.restore_from(&copy).unwrap();
+        // The uploaded file becomes the database this hub runs on, and
+        // `restore_from` does not reapply `SCHEMA`: whatever the migration put in
+        // the upload is what the hub will have. (A restart would repair it, which
+        // is exactly why this is asserted here rather than left to the next one.)
+        {
+            let conn = db.conn();
+            assert!(columns_of(&conn, "metric_hour").unwrap().contains("minutes"));
+            assert!(columns_of(&conn, "ping_hour").unwrap().contains("answered"));
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+        }
+        assert_eq!(db.nodes().unwrap()[0].name, "old");
+        let _ = std::fs::remove_file(&copy);
+    }
+
+    /// A database the previous release wrote, opened by this build, has to end up
+    /// with the same tables and the same columns as one this build creates: a
+    /// column `SCHEMA` gained without a migration, a migration that does not
+    /// reach `SCHEMA`, or a migration that changes data on its second run all
+    /// fail here.
+    ///
+    /// Started from the v10 fixture rather than from the release just before this
+    /// one, so every migration this build has runs, not only the newest.
+    #[test]
+    fn an_upgraded_release_matches_a_fresh_database() {
+        let file = std::env::temp_dir().join(format!("monitor-upgraded-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let path = file.to_str().unwrap();
+        a_v10_file(path, "VALUES (1,'known','t1','198.51.100.4','US',1)");
+        Connection::open(path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO traffic (node_id, total_rx) VALUES (1, 5000);
+                 INSERT INTO metric (node_id, ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, tcp, udp, procs)
+                   VALUES (1, 60, 12.5, 100, 0, 0, 0, 0, 0, 0, 0);
+                 INSERT INTO ping_task (id, name, target) VALUES (1, 'cm', '1.1.1.1:443');
+                 INSERT INTO ping_node VALUES (1, 1);
+                 INSERT INTO ping_record VALUES (1, 1, 60, 42);",
+            )
+            .unwrap();
+
+        let db = Db::open(path).unwrap();
+        let fresh = Db::open(":memory:").unwrap();
+        for table in TABLES {
+            assert_eq!(
+                columns_of(&db.conn(), table).unwrap(),
+                columns_of(&fresh.conn(), table).unwrap(),
+                "{table}"
+            );
+        }
+        // The summary tables are not in TABLES -- that list is what a backup must
+        // already contain, and an older backup does not -- so they are compared
+        // here instead.
+        for table in HOUR_TABLES {
+            assert_eq!(
+                columns_of(&db.conn(), table).unwrap(),
+                columns_of(&fresh.conn(), table).unwrap(),
+                "{table}"
+            );
+        }
+        let all: Vec<&str> = TABLES.iter().chain(HOUR_TABLES.iter()).copied().collect();
+        let upgraded = dump(&db.conn(), &all);
+        assert_eq!(upgraded.len(), all.len(), "every table is readable: {upgraded:#?}");
+        assert!(
+            upgraded.iter().any(|(t, rows)| t == "metric" && rows.contains("Real(12.5)")),
+            "the rows an older release wrote survive: {upgraded:#?}"
+        );
+
+        // An earlier build opening the file stamps its own, lower version, so the
+        // next upgrade runs every migration again -- and must change nothing.
+        db.conn().execute_batch("PRAGMA user_version = 10").unwrap();
+        drop(db);
+        let again = Db::open(path).unwrap();
+        assert_eq!(dump(&again.conn(), &all), upgraded, "a second run changes nothing");
+        let version: i64 = again.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(again);
+        let _ = std::fs::remove_file(&file);
     }
 
     /// Every country stored until now was looked up from the connection address,
