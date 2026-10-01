@@ -77,6 +77,12 @@ export type Node = {
   notify?: boolean
 }
 
+export type PingError = {
+  node_id: number
+  task_id: number
+  reason: string
+}
+
 export type PingTask = {
   /** `"icmp"` for an echo request; absent or `"tcp"` is a handshake. */
   kind?: string; id: number; name: string; target: string; interval: number; nodes: number[] }
