@@ -1964,11 +1964,12 @@ impl Db {
 
     pub fn ping_tasks(&self) -> Result<Vec<PingTask>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id, name, target, interval FROM ping_task ORDER BY sort, id")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, target, interval, kind FROM ping_task ORDER BY sort, id")?;
         let tasks: Vec<PingTask> = stmt
             .query_map([], |r| {
                 Ok(PingTask {
-                    kind: None,
+                    kind: r.get("kind")?,
                     id: r.get(0)?,
                     name: r.get(1)?,
                     target: r.get(2)?,
