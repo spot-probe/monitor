@@ -1554,7 +1554,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
             </p>
           )}
         </div>
-        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}>
+        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [], kind: "tcp" })}>
           <Plus /> 添加监控
         </Button>
       </div>
@@ -1655,7 +1655,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                     size="sm"
                     variant="outline"
                     className="mt-3"
-                    onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}
+                    onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [], kind: "tcp" })}
                   >
                     <Plus /> 添加监控
                   </Button>
@@ -1688,8 +1688,38 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   <Input type="number" min="5" max="3600" value={editing.interval ?? 60} onChange={(e) => setEditing({ ...editing, interval: Number(e.target.value) || 60 })} />
                 </Field>
               </div>
-              <Field label="目标地址" hint="host:port">
-                <Input value={editing.target ?? ""} onChange={(e) => setEditing({ ...editing, target: e.target.value })} placeholder="1.1.1.1:443" />
+              <Field
+                label="探测方式"
+                hint={
+                  editing.kind === "icmp"
+                    ? "发送 ICMP 回显请求。需要 agent 有相应权限（见文档），没有权限时这里会显示原因"
+                    : "与目标端口建立 TCP 连接，不需要额外权限"
+                }
+              >
+                {/* Two buttons rather than a select: there are exactly two, and the
+                    chosen one has to be visible without opening anything. */}
+                <div className="flex gap-2">
+                  {([["tcp", "TCP ping"], ["icmp", "ICMP ping"]] as const).map(([value, label]) => (
+                    <Button
+                      key={value}
+                      type="button"
+                      variant={editing.kind === value ? "default" : "outline"}
+                      onClick={() => setEditing({ ...editing, kind: value })}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              </Field>
+              <Field
+                label="目标地址"
+                hint={editing.kind === "icmp" ? "主机名或 IP，不要端口" : "host:port"}
+              >
+                <Input
+                  value={editing.target ?? ""}
+                  onChange={(e) => setEditing({ ...editing, target: e.target.value })}
+                  placeholder={editing.kind === "icmp" ? "1.1.1.1" : "1.1.1.1:443"}
+                />
               </Field>
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
