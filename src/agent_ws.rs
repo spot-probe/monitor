@@ -1004,6 +1004,7 @@ mod tests {
         let probe = |name: &str| {
             app.db
                 .save_ping_task(&PingTask {
+                    kind: None,
                     id: 0,
                     name: name.into(),
                     target: "1.1.1.1:443".into(),

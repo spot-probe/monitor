@@ -2373,6 +2373,7 @@ mod tests {
         let app = std::sync::Arc::new(app());
         let save = |name: &str, target: &str| {
             let task = PingTask {
+                kind: None,
                 id: 0,
                 name: name.to_owned(),
                 target: target.to_owned(),
@@ -2429,6 +2430,7 @@ mod tests {
         let app = std::sync::Arc::new(app());
         let save = |interval| {
             let task = PingTask {
+                kind: None,
                 id: 0,
                 name: "probe".into(),
                 target: "1.1.1.1:443".into(),
@@ -2542,6 +2544,7 @@ mod tests {
     fn task(app: &App, nodes: Vec<i64>) -> i64 {
         app.db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "probe".into(),
                 target: "1.1.1.1:443".into(),

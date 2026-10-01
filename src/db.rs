@@ -671,6 +671,26 @@ pub struct PingTask {
     pub interval: i64,
     #[serde(default)]
     pub nodes: Vec<i64>,
+    /// `"icmp"` for an echo request. Absent means `"tcp"`, which is what every task
+    /// was before this field existed -- so an old hub, an old backup and an old panel
+    /// all keep working, and a task that says nothing is a handshake.
+    ///
+    /// `None` rather than a defaulted `String` on purpose: the column does not exist
+    /// in the schema yet, so the read path cannot supply it, and every construction
+    /// site would otherwise have to name a value it does not have an opinion about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl PingTask {
+    /// What this task probes: `"tcp"` unless it says otherwise. Empty is treated as
+    /// absent, because the panel sends an empty string for a field it does not fill.
+    pub fn probe_kind(&self) -> &str {
+        match self.kind.as_deref() {
+            Some(kind) if !kind.is_empty() => kind,
+            _ => "tcp",
+        }
+    }
 }
 
 /// Points SQLite's temporary files -- the copy `VACUUM` rebuilds the database
@@ -1919,6 +1939,7 @@ impl Db {
         let tasks: Vec<PingTask> = stmt
             .query_map([], |r| {
                 Ok(PingTask {
+                    kind: None,
                     id: r.get(0)?,
                     name: r.get(1)?,
                     target: r.get(2)?,
@@ -2881,6 +2902,7 @@ mod tests {
         // must be assigned, or the result is not this node's to file.
         let task = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3197,8 +3219,14 @@ mod tests {
     fn deleting_a_node_takes_its_data_with_it() {
         let db = db();
         let id = node(&db, 1);
-        let probe =
-            |nodes| PingTask { id: 0, name: "cm".into(), target: "1.1.1.1:443".into(), interval: 60, nodes };
+        let probe = |nodes| PingTask {
+            kind: None,
+            id: 0,
+            name: "cm".into(),
+            target: "1.1.1.1:443".into(),
+            interval: 60,
+            nodes,
+        };
         let task = db.save_ping_task(&probe(vec![id])).unwrap();
         db.accumulate(id, "b", Some((10, 10))).unwrap();
         db.insert_metric(id, 1, &serde_json::json!({"cpu": 1.0})).unwrap();
@@ -3213,7 +3241,7 @@ mod tests {
         // `delete_node` the new machine would draw the old one's chart.
         let fresh = node(&db, 1);
         assert_eq!(fresh, id, "the id is reused, which is what makes this reachable");
-        db.save_ping_task(&PingTask { id: task, nodes: vec![fresh], ..probe(vec![]) }).unwrap();
+        db.save_ping_task(&PingTask { kind: None, id: task, nodes: vec![fresh], ..probe(vec![]) }).unwrap();
         assert!(db.ping_records(fresh, 0, 60).unwrap().0.is_empty(), "and it starts with no history");
     }
 
@@ -3226,6 +3254,7 @@ mod tests {
         let db = db();
         let id = node(&db, 1);
         let probe = |name: &str| PingTask {
+            kind: None,
             id: 0,
             name: name.into(),
             target: "1.1.1.1:443".into(),
@@ -3254,6 +3283,7 @@ mod tests {
         let rows = || db.conn().query_row("SELECT COUNT(*) FROM ping_record", [], |r| r.get::<_, i64>(0));
         let task = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3412,6 +3442,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = |name: &str| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: name.into(),
                 target: "1.1.1.1:443".into(),
@@ -3751,6 +3782,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3865,6 +3897,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -4039,6 +4072,7 @@ mod tests {
         let id = node(&app_db, 1);
         let _ = app_db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -4060,6 +4094,28 @@ mod tests {
         // three do not, so the median is 30 and the loss is 50%.
         assert_eq!(stitched[0]["loss"], 50, "three of six did not answer");
         assert_eq!(stitched[0]["latency"], 30, "the median of 30, 12 and 44");
+    }
+
+    /// A task that says nothing about how it probes is a TCP probe: that is what every
+    /// task was before the field existed, and what an old hub, an old panel and an old
+    /// backup all send. Empty counts as absent, because the panel sends an empty string
+    /// for a field it does not fill.
+    #[test]
+    fn a_task_without_a_kind_probes_tcp() {
+        let bare: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1:443"})).unwrap();
+        assert_eq!(bare.probe_kind(), "tcp", "absent means a handshake");
+        let empty: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1", "kind": ""}))
+                .unwrap();
+        assert_eq!(empty.probe_kind(), "tcp", "an empty string is a field nobody filled in");
+        let echo: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1", "kind": "icmp"}))
+                .unwrap();
+        assert_eq!(echo.probe_kind(), "icmp");
+        // And a task that says nothing serialises without the field at all: an
+        // existing payload must not change by a byte because this exists.
+        assert!(!serde_json::to_string(&bare).unwrap().contains("kind"));
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
@@ -4351,6 +4407,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = |nodes: Vec<i64>, task| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: task,
                 name: "cm".into(),
                 target: "1.1.1.1:443".into(),
@@ -4388,6 +4445,7 @@ mod tests {
         let (a, b) = (node(&db, 1), node(&db, 1));
         let id = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "cf".into(),
                 target: "1.1.1.1:443".into(),
@@ -4399,6 +4457,7 @@ mod tests {
 
         // Reassigning to one node must drop the other's copy.
         db.save_ping_task(&PingTask {
+            kind: None,
             id,
             name: "cf".into(),
             target: "1.1.1.1:443".into(),
@@ -4420,6 +4479,7 @@ mod tests {
         let id = node(&db, 1);
         let save = |task: i64, nodes: Vec<i64>| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: task,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
