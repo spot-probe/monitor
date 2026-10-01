@@ -1273,7 +1273,21 @@ pub async fn reorder_ping_tasks(_: Admin, State(app): State<Shared>, Json(order)
 
 pub async fn ping_tasks(_: Admin, State(app): State<Shared>) -> Response {
     match app.db.ping_tasks() {
-        Ok(tasks) => Json(json!({"tasks": tasks})).into_response(),
+        // The reasons ride along, when there are any: a probe that cannot run must not
+        // reach the panel as an unexplained 100% loss. A **list** rather than a map from
+        // task to one reason, because two nodes can fail for different reasons and
+        // showing one of them would be picking a story.
+        Ok(tasks) => {
+            let errors: Vec<serde_json::Value> = app
+                .db
+                .ping_errors()
+                .into_iter()
+                .map(|((node_id, task_id), reason)| {
+                    json!({"node_id": node_id, "task_id": task_id, "reason": reason})
+                })
+                .collect();
+            Json(json!({"tasks": tasks, "errors": errors})).into_response()
+        }
         Err(e) => fail(e),
     }
 }
