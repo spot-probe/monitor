@@ -334,7 +334,16 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             // same rule for a counter it cannot read.
             let latency = rpc.params.get("latency_ms").and_then(|v| v.as_i64());
             if let (true, Some(latency)) = (task_id > 0, latency) {
+                // A sample is the end of any explanation this task was carrying.
+                app.db.note_ping_error(node_id, task_id, None);
                 app.db.insert_ping(node_id, task_id, Utc::now().timestamp(), latency)?;
+            } else if task_id > 0 {
+                // No sample, and the agent said why: kept so the panel can show it
+                // instead of an unexplained 100% loss. A malformed frame carries no
+                // reason and clears none, which is why this is not an `else`.
+                if let Some(reason) = rpc.params.get("error").and_then(|v| v.as_str()) {
+                    app.db.note_ping_error(node_id, task_id, Some(reason));
+                }
             }
         }
         other => debug!("node {node_id} sent unknown method {other}"),

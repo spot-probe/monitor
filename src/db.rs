@@ -12,7 +12,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-pub struct Db(Mutex<Connection>);
+pub struct Db {
+    conn: Mutex<Connection>,
+    /// Why the last probe of a node's task produced no sample, and when that was said,
+    /// keyed by `(node, task)`.
+    ///
+    /// In memory rather than in a column: this is the **current** explanation, not
+    /// history -- a row would exist only to be overwritten, and the pattern is one
+    /// write per probe round. It is what keeps a probe that cannot run (no permission,
+    /// no route) from reaching the panel as an unexplained 100% loss.
+    ping_errors: Mutex<std::collections::HashMap<(i64, i64), (String, i64)>>,
+}
+
+/// How long a reason stays worth showing. A probe that failed once and has been quiet
+/// since is not news; one that is failing every round keeps its reason fresh.
+const PING_ERROR_TTL: i64 = 600;
 
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -975,11 +989,35 @@ impl Db {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         migrate(&conn, if fresh { SCHEMA_VERSION } else { version })?;
-        Ok(Self(Mutex::new(conn)))
+        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default() })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records why a probe produced no sample, or forgets the reason once one arrives:
+    /// a task that starts working must stop explaining itself.
+    pub fn note_ping_error(&self, node_id: i64, task_id: i64, error: Option<&str>) {
+        let mut errors = self.ping_errors.lock().unwrap_or_else(|e| e.into_inner());
+        match error {
+            Some(text) => {
+                errors.insert((node_id, task_id), (text.to_owned(), Utc::now().timestamp()));
+            }
+            None => {
+                errors.remove(&(node_id, task_id));
+            }
+        }
+    }
+
+    /// The reasons still worth showing, by `(node, task)`. Anything older than
+    /// [`PING_ERROR_TTL`] is dropped on the way out rather than swept on a timer: it is
+    /// read far less often than it is written.
+    pub fn ping_errors(&self) -> std::collections::HashMap<(i64, i64), String> {
+        let mut errors = self.ping_errors.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = Utc::now().timestamp() - PING_ERROR_TTL;
+        errors.retain(|_, (_, at)| *at >= cutoff);
+        errors.iter().map(|(k, (text, _))| (*k, text.clone())).collect()
     }
 
     // ---- settings ----
@@ -4187,6 +4225,28 @@ mod tests {
             1,
             "still exactly one such column"
         );
+    }
+
+    /// A reason is remembered while it is fresh, forgotten the moment a sample arrives,
+    /// and dropped once it has gone quiet: a task that was fixed elsewhere must stop
+    /// explaining itself, or the panel keeps showing yesterday's cause.
+    #[test]
+    fn a_ping_error_is_remembered_then_forgotten() {
+        let db = db();
+        let id = node(&db, 1);
+        assert!(db.ping_errors().is_empty(), "nothing has failed yet");
+        db.note_ping_error(id, 7, Some("ICMP needs CAP_NET_RAW"));
+        assert_eq!(db.ping_errors().get(&(id, 7)).map(String::as_str), Some("ICMP needs CAP_NET_RAW"));
+        // A sample arriving is the end of the explanation.
+        db.note_ping_error(id, 7, None);
+        assert!(db.ping_errors().is_empty(), "a working probe stops explaining itself");
+        // And one that has gone quiet is dropped, so a cause cannot outlive the facts.
+        db.note_ping_error(id, 7, Some("stale"));
+        db.ping_errors
+            .lock()
+            .unwrap()
+            .insert((id, 7), ("stale".into(), Utc::now().timestamp() - PING_ERROR_TTL - 1));
+        assert!(db.ping_errors().is_empty(), "a reason older than the window is not shown");
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
