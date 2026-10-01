@@ -2010,16 +2010,18 @@ impl Db {
         let tx = conn.transaction()?;
         let id = if t.id > 0 {
             tx.execute(
-                "UPDATE ping_task SET name=?2, target=?3, interval=?4 WHERE id=?1",
-                params![t.id, t.name, t.target, t.interval],
+                "UPDATE ping_task SET name=?2, target=?3, interval=?4, kind=?5 WHERE id=?1",
+                // `probe_kind()` rather than the field: an absent or empty kind is
+                // written as `tcp`, so the column always says what the task does.
+                params![t.id, t.name, t.target, t.interval, t.probe_kind()],
             )?;
             t.id
         } else {
             tx.execute(
                 // At the end, as in `create_node`.
-                "INSERT INTO ping_task (name, target, interval, sort)
-                 VALUES (?1,?2,?3,(SELECT COALESCE(MAX(sort),-1)+1 FROM ping_task))",
-                params![t.name, t.target, t.interval],
+                "INSERT INTO ping_task (name, target, interval, sort, kind)
+                 VALUES (?1,?2,?3,(SELECT COALESCE(MAX(sort),-1)+1 FROM ping_task),?4)",
+                params![t.name, t.target, t.interval, t.probe_kind()],
             )?;
             tx.last_insert_rowid()
         };
