@@ -1627,7 +1627,16 @@ function Ping({ nodes }: { nodes: Node[] }) {
                       </p>
                     ))}
                 </TableCell>
-                <TableCell className="tnum text-sm">{t.target}</TableCell>
+                <TableCell className="tnum text-sm">
+                  {t.target}
+                  {/* Only the echo gets a label. TCP is the default and the common case,
+                      so a badge on every row would be noise; what a reader needs to see is
+                      the probe that is **not** a handshake -- it is also the one that can
+                      fail for a reason the row has to explain. */}
+                  {t.kind === "icmp" && (
+                    <span className="ml-2 rounded border px-1.5 py-0.5 text-xs text-muted-foreground">ICMP</span>
+                  )}
+                </TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
                 <TableCell>
