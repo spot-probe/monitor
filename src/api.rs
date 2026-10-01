@@ -1302,6 +1302,50 @@ fn valid_target(target: &str) -> bool {
     !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0)
 }
 
+/// Whether `target` fits the grammar of what this task probes: `host:port` for a
+/// handshake, a **bare** host for an echo.
+///
+/// ICMP has no port, so a task that names one is a mistake worth refusing here rather
+/// than letting the agent resolve `1.1.1.1:443` as a hostname and report nothing --
+/// the chart would show a probe at 100% loss with no log saying why.
+fn valid_target_for(kind: &str, target: &str) -> bool {
+    if kind != "icmp" {
+        return valid_target(target);
+    }
+    // Brackets around an IPv6 literal are accepted, so the string a handshake uses
+    // for the same host still works once the port is dropped.
+    let host = target.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')).unwrap_or(target);
+    if host.is_empty() {
+        return false;
+    }
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        return true;
+    }
+    // Otherwise a name or an IPv4 literal: no colon anywhere, or it is a port or an
+    // unbracketed IPv6 address that did not parse.
+    !host.contains(':') && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+#[cfg(test)]
+mod ear_target_tests {
+    use super::valid_target_for;
+
+    /// The two grammars, so neither drifts into the other: an echo takes a bare host
+    /// (a port is a mistake), a handshake still takes `host:port` and still refuses a
+    /// bare host.
+    #[test]
+    fn a_target_is_checked_against_what_the_task_probes() {
+        for good in ["1.1.1.1", "example.com", "2606:4700:4700::1111", "[2606:4700:4700::1111]"] {
+            assert!(valid_target_for("icmp", good), "{good} is a valid echo target");
+        }
+        for bad in ["", "1.1.1.1:443", "[2606:4700:4700::1111]:443", "1.1.1.1:", "host:port"] {
+            assert!(!valid_target_for("icmp", bad), "{bad} is not an echo target");
+        }
+        assert!(valid_target_for("tcp", "1.1.1.1:443"), "the handshake grammar is untouched");
+        assert!(!valid_target_for("tcp", "1.1.1.1"), "and still wants its port");
+    }
+}
+
 pub async fn save_ping_task(_: Admin, State(app): State<Shared>, Json(mut task): Json<PingTask>) -> Response {
     // Trimmed into the stored value rather than a discarded copy: what reaches
     // the agent is `task.target`, and a trailing space from a paste passes
@@ -1315,8 +1359,11 @@ pub async fn save_ping_task(_: Admin, State(app): State<Shared>, Json(mut task):
     }
     // A TCP probe requires an explicit port; a bare host would silently never
     // connect.
-    if !valid_target(&task.target) {
-        return bad("target must be host:port, for example 1.1.1.1:443 or [2606:4700:4700::1111]:443");
+    if !valid_target_for(task.probe_kind(), &task.target) {
+        return bad(match task.probe_kind() {
+            "icmp" => "an ICMP target is a bare host, for example 1.1.1.1 or example.com",
+            _ => "target must be host:port, for example 1.1.1.1:443 or [2606:4700:4700::1111]:443",
+        });
     }
     // Refused rather than clamped, for the reason `setting_error` gives for
     // `retention_days`: the agent clamps this again on arrival, so an
