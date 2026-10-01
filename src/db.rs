@@ -138,8 +138,16 @@ CREATE TABLE IF NOT EXISTS ping_task (
   -- would leave an upgraded database with a different column order from a fresh
   -- one. The panel's order; every probe ties at 0 on an upgraded database, so
   -- `ORDER BY sort, id` keeps the order it listed them in.
-  sort     INTEGER NOT NULL DEFAULT 0
+  sort     INTEGER NOT NULL DEFAULT 0,
+  kind     TEXT    NOT NULL DEFAULT 'tcp'
 );
+-- `kind` is `tcp` (a handshake, what every task was before the column existed) or
+-- `icmp` (an echo request), and it is declared last for the same reason `sort` is:
+-- see `migrate_to_10`. The note lives out here rather than beside the column because
+-- **a `--` comment inside a CREATE TABLE breaks `ALTER TABLE ... DROP COLUMN`** --
+-- SQLite rewrites the statement and the comment swallows what follows, which is an
+-- "incomplete input" error. Tests that reduce a database to an older version drop
+-- columns, so a comment in there is a trap for them, not a note for a reader.
 
 CREATE TABLE IF NOT EXISTS ping_node (
   task_id INTEGER NOT NULL REFERENCES ping_task(id) ON DELETE CASCADE,
@@ -216,7 +224,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -429,6 +437,24 @@ fn migrate_to_11(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Every probe was a TCP handshake before this column existed; the default says so, so
+/// an upgraded hub behaves exactly as it did until someone asks for an echo.
+///
+/// Twice-safe like every other step, which for `ADD COLUMN` means asking first: the
+/// migration tests build a file with the current schema and then reduce it, so a step
+/// that assumed the column was absent would refuse to run there -- and a step that
+/// merely swallowed the error would never be shown to do anything at all.
+fn migrate_to_13(conn: &Connection) -> Result<()> {
+    let has_kind: i64 =
+        conn.query_row("SELECT COUNT(*) FROM pragma_table_info('ping_task') WHERE name = 'kind'", [], |r| {
+            r.get(0)
+        })?;
+    if has_kind == 0 {
+        conn.execute_batch("ALTER TABLE ping_task ADD COLUMN kind TEXT NOT NULL DEFAULT 'tcp';")?;
+    }
+    Ok(())
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -477,6 +503,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 12 {
         migrate_to_12(&tx)?;
+    }
+    if from < 13 {
+        migrate_to_13(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
@@ -4116,6 +4145,45 @@ mod tests {
         // And a task that says nothing serialises without the field at all: an
         // existing payload must not change by a byte because this exists.
         assert!(!serde_json::to_string(&bare).unwrap().contains("kind"));
+    }
+
+    /// A file that really lacks `kind` gains it, and the row that pre-dates it is a
+    /// TCP probe afterwards.
+    ///
+    /// Deliberately drops the column first: the other fixtures are built with the
+    /// current schema and only pretend to be older, so they cannot show that the step
+    /// does anything -- deleting `migrate_to_13` would leave them green. This one
+    /// fails without it.
+    #[test]
+    fn a_file_without_the_kind_column_gains_it_as_tcp() {
+        let db = db();
+        let id = node(&db, 1);
+        db.save_ping_task(&PingTask {
+            id: 0,
+            name: "p".into(),
+            target: "1.1.1.1:443".into(),
+            interval: 60,
+            nodes: vec![id],
+            kind: None,
+        })
+        .unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE ping_task DROP COLUMN kind", []).unwrap();
+        migrate(&conn, 12).unwrap();
+        let kind: String = conn.query_row("SELECT kind FROM ping_task LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "tcp", "a task from before the column is a handshake");
+        // Twice-safe: running the step again changes nothing.
+        migrate(&conn, 12).unwrap();
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM pragma_table_info('ping_task') WHERE name='kind'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            1,
+            "still exactly one such column"
+        );
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
