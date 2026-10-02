@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { PageSkeleton } from "@/components/ui/page-skeleton"
+import { EmptyState } from "@/components/ui/empty-state"
 import { RetryState } from "@/components/ui/retry-state"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -2199,6 +2200,10 @@ function Themes() {
   	// 统一到共享原语：形状按该页实际长相给（这里分别是卡片网格与表格）。
   	return <PageSkeleton shape="cards" rows={4} />
   }
+  // 空列表也要说话：只有一个标题加一片空白，读起来像「加载失败」，而不是「还没有」。
+  if (themes.length === 0) {
+  	return <EmptyState title="还没有装主题" hint="公开页现在用的是 hub 内置的默认主题；从 GitHub 装一份，或上传一个主题包，就会出现在这里。" />
+  }
   return (
     <div className="space-y-4">
       <Card className="gap-4 p-5">
@@ -2904,6 +2909,10 @@ function Sessions() {
   	) : (
   		<PageSkeleton shape="list" rows={5} />
   	)
+  }
+  // 空列表也要说话：只有一个标题加一片空白，读起来像「加载失败」，而不是「还没有」。
+  if (rows.length === 0) {
+  	return <EmptyState title="还没有登录会话" hint="用 GitHub 或应急密码登录之后，这里会列出每一个已登录的浏览器，可以逐个撤销。" />
   }
   return (
     <Card className="gap-4 p-5">
