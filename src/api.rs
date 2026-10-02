@@ -1040,6 +1040,31 @@ pub async fn create_node(
 /// own rather than depending on someone returning to close it.
 const REGISTER_WINDOW: i64 = 3600;
 
+/// The longest a registration window may be opened for, in minutes. The panel offers
+/// presets up to this; the hub enforces it, because a limit that lives only in the
+/// interface is not a limit.
+const REGISTER_WINDOW_MAX_MINUTES: i64 = REGISTER_WINDOW / 60;
+
+/// What the panel asks for when it opens a window. Absent means the full hour, which
+/// is what it used to ask for and still is the default.
+#[derive(serde::Deserialize)]
+pub struct RegisterWindow {
+    #[serde(default)]
+    minutes: Option<i64>,
+}
+
+/// The length of the window that is currently open, for the one place that has to
+/// look back to its start. Kept in a setting rather than assumed to be
+/// [`REGISTER_WINDOW`]: with a five-minute window, subtracting an hour counts nodes
+/// that registered *before* it opened, and the window can look full on arrival.
+fn register_window_len(app: &Shared) -> i64 {
+    app.db
+        .get("register_window")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|w| *w > 0 && *w <= REGISTER_WINDOW)
+        .unwrap_or(REGISTER_WINDOW)
+}
+
 /// How many nodes one window may register.
 ///
 /// Without it, whoever holds the key for the hour could fill the node table. A
@@ -1090,7 +1115,7 @@ pub async fn agent_register(
         app.registrations.record_failure(ip);
         return closed();
     }
-    match app.db.nodes_created_since(until - REGISTER_WINDOW) {
+    match app.db.nodes_created_since(until - register_window_len(&app)) {
         Ok(n) if n >= REGISTER_LIMIT => {
             return (StatusCode::FORBIDDEN, "this window has registered enough nodes").into_response()
         }
@@ -1128,13 +1153,26 @@ pub async fn open_register(
     State(app): State<Shared>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
+    body: Option<Json<RegisterWindow>>,
 ) -> Response {
     if let Some(block) = provisioning_block(&app, &headers, peer.ip()) {
         return (StatusCode::FORBIDDEN, provisioning_denied(block)).into_response();
     }
+    // Clamped here rather than trusted: the panel sends what it offers, but the cap
+    // has to hold for anything that can reach this endpoint.
+    let minutes = body
+        .and_then(|Json(b)| b.minutes)
+        .unwrap_or(REGISTER_WINDOW_MAX_MINUTES)
+        .clamp(1, REGISTER_WINDOW_MAX_MINUTES);
+    let window = minutes * 60;
     let key = random_token();
-    let until = (Utc::now().timestamp() + REGISTER_WINDOW).to_string();
-    match app.db.set("register_key", &key).and_then(|()| app.db.set("register_until", &until)) {
+    let until = (Utc::now().timestamp() + window).to_string();
+    match app
+        .db
+        .set("register_key", &key)
+        .and_then(|()| app.db.set("register_until", &until))
+        .and_then(|()| app.db.set("register_window", &window.to_string()))
+    {
         Ok(()) => Json(json!({"register_key": key, "register_until": until})).into_response(),
         Err(e) => fail(e),
     }
@@ -1142,7 +1180,12 @@ pub async fn open_register(
 
 /// Closes the window early, before the hour elapses.
 pub async fn close_register(_: Admin, State(app): State<Shared>) -> Response {
-    match app.db.set("register_key", "").and_then(|()| app.db.set("register_until", "0")) {
+    match app
+        .db
+        .set("register_key", "")
+        .and_then(|()| app.db.set("register_until", "0"))
+        .and_then(|()| app.db.set("register_window", "0"))
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => fail(e),
     }
@@ -2272,7 +2315,9 @@ mod tests {
                 StatusCode::FORBIDDEN
             );
             assert_eq!(
-                open_register(Admin, State(app.clone()), conn(far_ip()), headers.clone()).await.status(),
+                open_register(Admin, State(app.clone()), conn(far_ip()), headers.clone(), None)
+                    .await
+                    .status(),
                 StatusCode::FORBIDDEN
             );
             assert_eq!(
@@ -2352,11 +2397,11 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(
-            open_register(Admin, State(state.clone()), conn(local_ip()), lan.clone()).await.status(),
+            open_register(Admin, State(state.clone()), conn(local_ip()), lan.clone(), None).await.status(),
             StatusCode::OK
         );
         assert_eq!(
-            open_register(Admin, State(state.clone()), conn(far_ip()), lan).await.status(),
+            open_register(Admin, State(state.clone()), conn(far_ip()), lan, None).await.status(),
             StatusCode::FORBIDDEN,
             "the same request from the network is not a private entry"
         );
@@ -3233,7 +3278,7 @@ mod tests {
         assert!(app.db.nodes().unwrap().is_empty());
 
         assert_eq!(
-            open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await.status(),
+            open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers(), None).await.status(),
             StatusCode::OK
         );
         let key = app.db.get("register_key").unwrap();
@@ -3261,18 +3306,61 @@ mod tests {
 
         // Reopened, then closed manually: the key from the open window stops
         // working.
-        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await;
+        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers(), None).await;
         let key = app.db.get("register_key").unwrap();
         assert_eq!(close_register(Admin, State(app.clone())).await.status(), StatusCode::NO_CONTENT);
         assert_eq!(register(Some(&key), "c").await.status(), StatusCode::FORBIDDEN);
         assert_eq!(app.db.nodes().unwrap().len(), 1);
     }
 
+    /// A window may be shorter than the hour, but never longer -- and the hub has to
+    /// remember how long it actually is.
+    ///
+    /// The lookback at the start of a window used to subtract the constant
+    /// `REGISTER_WINDOW` from its end. Once the length is a parameter, that counts
+    /// nodes which registered *before* a short window opened, so a five-minute window
+    /// can refuse the first machine to arrive, claiming it is full.
+    #[tokio::test]
+    async fn a_window_is_never_longer_than_an_hour_and_remembers_its_own_length() {
+        let app = std::sync::Arc::new(app());
+        let headers = domain_headers();
+        let open = |minutes: Option<i64>| {
+            open_register(
+                Admin,
+                State(app.clone()),
+                conn(far_ip()),
+                headers.clone(),
+                Some(Json(RegisterWindow { minutes })),
+            )
+        };
+
+        assert_eq!(open(Some(5)).await.status(), StatusCode::OK);
+        let left: i64 =
+            app.db.get("register_until").unwrap().parse::<i64>().unwrap() - Utc::now().timestamp();
+        assert!((294..=300).contains(&left), "五分钟的窗口应剩约 300 秒，实际 {left}");
+        assert_eq!(app.db.get("register_window").as_deref(), Some("300"));
+        // The one that mattered: the lookback must follow the real length.
+        assert_eq!(register_window_len(&app), 300, "起点反推应用真实时长，而不是一小时");
+
+        // Longer than the cap is clamped, not refused: the panel asks for presets, and
+        // anything else that reaches this endpoint gets the hour at most.
+        assert_eq!(open(Some(999)).await.status(), StatusCode::OK);
+        let left: i64 =
+            app.db.get("register_until").unwrap().parse::<i64>().unwrap() - Utc::now().timestamp();
+        assert!((3594..=3600).contains(&left), "封顶应为一小时，实际 {left}");
+        assert_eq!(app.db.get("register_window").as_deref(), Some("3600"));
+
+        // No body at all keeps the old behaviour, which is what an un-upgraded panel sends.
+        assert_eq!(open(None).await.status(), StatusCode::OK);
+        assert_eq!(app.db.get("register_window").as_deref(), Some("3600"));
+    }
+
     /// The ceiling on the anonymous route: a leaked key cannot fill the table.
     #[tokio::test]
+
     async fn one_window_stops_registering_at_the_limit() {
         let app = std::sync::Arc::new(app());
-        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers()).await;
+        open_register(Admin, State(app.clone()), conn(far_ip()), domain_headers(), None).await;
         let key = app.db.get("register_key").unwrap();
         for i in 0..REGISTER_LIMIT {
             node(&app, &format!("n{i}"), true);
