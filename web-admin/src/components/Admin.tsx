@@ -2641,7 +2641,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   if (!s) {
   	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
   	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
-  	return <PageSkeleton shape="form" rows={3} />
+  	return <PageSkeleton shape="cards" rows={3} />
   }
   const text = (k: string) => String(s[k] ?? "")
   // A credential is sent only when something was typed: the field starts empty
@@ -2948,7 +2948,10 @@ function Sessions() {
 function Security({ site }: { site: string }) {
   const { s, set, save } = useSettings()
   const [password, setPassword] = useState("")
-  if (!s) return null
+  if (!s) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架。
+  	return <PageSkeleton shape="form" rows={3} />
+  }
   const callback = `${site}/api/auth/github/callback`
 
   return (
