@@ -1652,7 +1652,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   )}
                 </TableCell>
                 <TableCell className="text-sm">
-                  {(stats[t.id]?.loss ?? 0) > 0 ? (
+                  {stats[t.id]?.last == null ? (
+                      <span className="text-sm text-muted-foreground">—</span>
+                    ) : (stats[t.id]?.loss ?? 0) > 0 ? (
                     <span className={(stats[t.id]?.loss ?? 0) >= 5 ? "text-danger-fg" : "text-warn-fg"}>
                       {stats[t.id]?.loss}%
                     </span>
