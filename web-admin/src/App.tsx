@@ -3,9 +3,9 @@ import { ChevronRight, ExternalLink, KeyRound, LogOut, Moon, PanelLeftClose, Pan
 import { Toaster } from "sonner"
 
 import { ADMIN_ITEMS, ADMIN_SECTIONS, Admin, updatesAvailable, useVersions } from "@/components/Admin"
+import { PageSkeleton } from "@/components/ui/page-skeleton"
 import { Login } from "@/components/Login"
 import { Button } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
 type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; group_dropdown?: boolean; login: string; version: string }
@@ -403,7 +403,7 @@ export default function App() {
               the reader nothing new. */}
           {error && <p className="text-sm text-danger-fg">{error}</p>}
           {!nodes ? (
-            <Skeleton className="h-64" />
+            <PageSkeleton shape="list" rows={4} />
           ) : (
             <Admin
               path={path}

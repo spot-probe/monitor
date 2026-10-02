@@ -11,6 +11,9 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { PageSkeleton } from "@/components/ui/page-skeleton"
+import { EmptyState } from "@/components/ui/empty-state"
+import { RetryState } from "@/components/ui/retry-state"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -189,11 +192,15 @@ function Section({ title, hint, action, children }: { title: string; hint?: stri
 }
 
 
-function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose, onConfirm, children }: {
+function ConfirmDialog({ title, description, confirmLabel, busy = false, tone = "danger", onClose, onConfirm, children }: {
   title: string
   description: string
   confirmLabel: string
   busy?: boolean
+  /** `danger` (the default) paints the confirm button red. Not every confirmation
+   *  is a deletion: reclaiming space is maintenance, and a red button there teaches
+   *  the reader that red does not mean anything in particular. */
+  tone?: "danger" | "default"
   onClose: () => void
   onConfirm: () => void
   children?: React.ReactNode
@@ -208,7 +215,7 @@ function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose
         {children}
         <DialogFooter className="border-t pt-4">
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
+          <Button variant={tone === "danger" ? "destructive" : "default"} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -797,9 +804,12 @@ function useRegisterWindow() {
   return {
     key,
     left: key === "" ? 0 : Math.max(0, until - now),
-    async open() {
+    async open(minutes: number) {
       try {
-        const w = await api<{ register_key: string; register_until: string }>("/register-window", { method: "POST" })
+        const w = await api<{ register_key: string; register_until: string }>("/register-window", {
+          method: "POST",
+          body: JSON.stringify({ minutes }),
+        })
         setKey(w.register_key)
         setUntil(Number(w.register_until))
       } catch (e) {
@@ -824,8 +834,10 @@ function RegisterDialog({ site, reg, onClose }: {
   reg: ReturnType<typeof useRegisterWindow>
   onClose: () => void
 }) {
+  const [minutes, setMinutes] = useState(60)
   const command = reg.left > 0 ? registerCommand(site, reg.key) : ""
   const clock = `${Math.floor(reg.left / 60)}:${String(reg.left % 60).padStart(2, "0")}`
+  const span = minutes === 60 ? "一小时" : `${minutes} 分钟`
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -835,7 +847,7 @@ function RegisterDialog({ site, reg, onClose }: {
         </DialogHeader>
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            开一个一小时的注册窗口。期间这条命令在任意机器上跑一次，那台机器就会自己出现在
+            开一个{span}的注册窗口。期间这条命令在任意机器上跑一次，那台机器就会自己出现在
             列表里，名字取自它的 hostname。命令里没有任何一台机器的凭证，可以直接进循环。
           </p>
           {command ? (
@@ -855,14 +867,37 @@ function RegisterDialog({ site, reg, onClose }: {
               </div>
             </div>
           ) : (
-            <Button onClick={reg.open}>开启一小时窗口</Button>
+            // 时长预设而不是自由输入：常见选择一眼可选，也不必校验越界（hub 同样封顶，
+            // 那里才是真正说了算的地方）。上限就是一小时。
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">窗口时长</Label>
+              <div className="flex flex-wrap gap-2">
+                {[5, 10, 15, 30, 60].map((m) => (
+                  <Button
+                    key={m}
+                    type="button"
+                    size="sm"
+                    variant={m === minutes ? "default" : "outline"}
+                    onClick={() => setMinutes(m)}
+                  >
+                    {m === 60 ? "1 小时" : `${m} 分钟`}
+                  </Button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
+        {/* 两种状态各有一套动作：没开窗时主动作是「开启窗口」，开好了主动作是「复制」。
+            原先「开启窗口」孤零零待在正文里，而页脚只有 关闭 / 复制，于是三个按钮分居两处。 */}
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>关闭</Button>
-          <Button onClick={() => copy(command)} disabled={!command}>
-            <Copy className="size-4" /> 复制
-          </Button>
+          {command ? (
+            <Button onClick={() => copy(command)}>
+              <Copy className="size-4" /> 复制
+            </Button>
+          ) : (
+            <Button onClick={() => reg.open(minutes)}>开启窗口</Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1160,7 +1195,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
       )}
 
       <Card className="overflow-x-auto p-0">
-        <Table>
+        <Table className="min-w-[880px]">
           <TableHeader>
             {/* Percentages, or the address column swallows every spare pixel
                 and pushes status across the table. The version column was taken
@@ -1171,14 +1206,22 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
               <TableHead className="w-[20%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
               <TableHead className="w-[9%]">版本</TableHead>
-              <TableHead className="w-[15%]">流量</TableHead>
-              <TableHead className="w-[10%]">价格</TableHead>
-              <TableHead className="w-[11%]">到期</TableHead>
+              <TableHead className="text-right w-[15%]">流量</TableHead>
+              <TableHead className="text-right w-[10%]">价格</TableHead>
+              <TableHead className="text-right w-[11%]">到期</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {visible.map((n, index) => (
+            {visible.length === 0 ? (
+            	<TableRow>
+            		<TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
+            			{nodes.length === 0
+            				? "还没有节点。用右上角的「添加节点」或「批量添加」，让机器自己登记。"
+            				: "没有匹配的节点，换个搜索词或分组试试。"}
+            		</TableCell>
+            	</TableRow>
+            ) : visible.map((n, index) => (
               <TableRow
                 key={n.id}
                 style={{ viewTransitionName: `node-${n.id}` }}
@@ -1284,16 +1327,16 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 </TableCell>
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
-                <TableCell className="tnum text-sm">
+                <TableCell className="tnum text-right text-sm">
                   {bytes(monthUsage(n))}
                   <span className="text-muted-foreground">
                     {" / "}{n.traffic_limit > 0 ? bytes(n.traffic_limit) : FOREVER}
                   </span>
                 </TableCell>
-                <TableCell className="tnum text-sm">
+                <TableCell className="tnum text-right text-sm">
                   {n.price > 0 ? money(n.price, n.currency) : "免费"}
                 </TableCell>
-                <TableCell className="text-sm">
+                <TableCell className="tnum text-right text-sm">
                   <Expiry date={n.expires_at} />
                 </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
@@ -1418,6 +1461,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // first fetch is still in flight and tells the operator there are no probes. Themes and
   // Sessions already guard this with a null; here a flag is enough and touches less.
   const [loaded, setLoaded] = useState(false)
+	// 首次请求失败时的原因。`load()` 原来把错误整个吞掉（`.catch(() => {})`），于是页面
+	// 显示「没有监控」——和「没能取到数据」长得一模一样，而这两件事需要完全不同的动作。
+	const [error, setError] = useState("")
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
@@ -1440,8 +1486,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
       .then((d) => {
         setTasks(d.tasks)
         setProbeErrors(d.errors ?? [])
+		setError("")
       })
-      .catch(() => {})
+		.catch((e) => setError((e as Error).message))
       .finally(() => setLoaded(true))
   }
 
@@ -1544,6 +1591,28 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Distinct nodes any probe runs on: coverage is the question this page answers.
   const covered = new Set(tasks.flatMap((t) => t.nodes)).size
 
+  // 首次请求未回：给一个和这张表同形的骨架，而不是先画一张空表再填（切换菜单时的顿挫感
+  // 就来自后者）。失败则停在那条原因上，并给一个重试入口 —— toast 会飘走，页面不会。
+  if (error) {
+  	return (
+  		<RetryState
+  			message={error}
+  			onRetry={() => { setError(""); setLoaded(false); load() }}
+  		/>
+  	)
+  }
+  if (!loaded) return <PageSkeleton shape="list" rows={3} />
+
+  // 一个监控都没有时，空表格只会让人以为坏了。这里说明它是空的、以及去哪儿加。
+  if (tasks.length === 0) {
+    return (
+      <EmptyState
+        title="还没有监控"
+        hint="右上角「添加监控」可以加一条：选 TCP 或 ICMP，勾上要跑它的节点，延迟与丢包就有了。"
+      />
+    )
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1551,7 +1620,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
             said nothing about what the page does. */}
         <div className="min-w-0 flex-1">
           <p className="text-xs leading-relaxed text-muted-foreground">
-            每个节点独立 TCP 连接目标端口并上报耗时，公开页据此画出延迟与丢包。勾选运行节点，即可让一台机器同时探多个目标。
+            每个节点独立探测目标并上报耗时：默认是 TCP 握手，也可以选 ICMP 回显。公开页据此画出延迟与丢包。勾选运行节点，即可让一台机器同时探多个目标。
           </p>
           {tasks.length > 0 && (
             <p className="mt-1.5 text-xs text-muted-foreground">
@@ -1566,7 +1635,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       </div>
 
       <Card className="overflow-x-auto p-0">
-        <Table>
+        <Table className="min-w-[760px]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[18%]">名称</TableHead>
@@ -2056,6 +2125,11 @@ function Themes() {
   const [busy, setBusy] = useState("")
   const [doomed, setDoomed] = useState<Theme | null>(null)
   const [zoomed, setZoomed] = useState<Theme | null>(null)
+	// 哪些预览图已经到了、哪些主题根本没有预览图。两者都是为了让卡片**从第一帧就占住**
+	// 预览图的位置：原先的写法是「图加载完才显示」（为的是不闪一个空边框盒子），代价就是
+	// 图到的那一刻卡片长高，把读者正在看的东西顶走。骨架能同时满足这两件事。
+	const [previewLoaded, setPreviewLoaded] = useState<Set<string>>(new Set())
+	const [previewMissing, setPreviewMissing] = useState<Set<string>>(new Set())
   const [configuring, setConfiguring] = useState<{ theme: Theme; saved: Record<string, unknown> } | null>(null)
   const [repo, setRepo] = useState("")
   const picker = useRef<HTMLInputElement>(null)
@@ -2140,12 +2214,12 @@ function Themes() {
   }
 
   if (!themes) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-28" />
-        <Skeleton className="h-64" />
-      </div>
-    )
+  	// 统一到共享原语：形状按该页实际长相给（这里分别是卡片网格与表格）。
+  	return <PageSkeleton shape="cards" rows={4} />
+  }
+  // 空列表也要说话：只有一个标题加一片空白，读起来像「加载失败」，而不是「还没有」。
+  if (themes.length === 0) {
+  	return <EmptyState title="还没有装主题" hint="公开页现在用的是 hub 内置的默认主题；从 GitHub 装一份，或上传一个主题包，就会出现在这里。" />
   }
   return (
     <div className="space-y-4">
@@ -2225,18 +2299,27 @@ function Themes() {
                 缩略图被压到卡片那点宽度，比例不是 16:9 的还会被 object-cover
                 裁掉边，所以图本身要能点开看原尺寸——就地开一个对话框，不跳走。 */}
             <button
-              type="button"
-              title="查看完整预览图"
-              hidden
-              className="cursor-zoom-in"
-              onClick={() => setZoomed(theme)}
+            	type="button"
+            	title="查看完整预览图"
+            	className="group relative block w-full cursor-zoom-in"
+            	onClick={() => setZoomed(theme)}
             >
-              <img
-                src={`/api/themes/${theme.short}/preview`}
-                alt={`${theme.name} 预览图`}
-                onLoad={(e) => { e.currentTarget.parentElement!.hidden = false }}
-                className="aspect-video w-full rounded-md border object-cover object-top"
-              />
+            	{previewMissing.has(theme.short) ? (
+            		<span className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+            			这个主题没有预览图
+            		</span>
+            	) : (
+            		<>
+            			{!previewLoaded.has(theme.short) && <Skeleton className="aspect-video w-full rounded-md" />}
+            			<img
+            				src={`/api/themes/${theme.short}/preview`}
+            				alt={`${theme.name} 预览图`}
+            				onLoad={() => setPreviewLoaded((s) => new Set(s).add(theme.short))}
+            				onError={() => setPreviewMissing((s) => new Set(s).add(theme.short))}
+            				className={`${previewLoaded.has(theme.short) ? "" : "hidden"} aspect-video w-full rounded-md border object-cover object-top`}
+            			/>
+            		</>
+            	)}
             </button>
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
@@ -2361,12 +2444,22 @@ type Settings = Record<string, string | boolean>
 // Two pages write settings, and each loads only what it displays.
 function useSettings() {
   const [s, setS] = useState<Settings | null>(null)
-  const load = useCallback(() => { api<Settings>("/settings").then(setS).catch(() => {}) }, [])
+  const [error, setError] = useState("")
+  // 失败要能被页面看见：原来 `.catch(() => {})` 把原因吞掉，`s` 永远是 null，
+  // 于是设置页与安全页会一直停在骨架上，看起来像「一直在加载」。
+  const load = useCallback(() => {
+  	api<Settings>("/settings")
+  		.then((v) => { setS(v); setError("") })
+  		.catch((e: Error) => setError(e.message))
+  }, [])
   useEffect(() => { load() }, [load])
   return {
+    error,
     s,
     // Discards unsaved edits by re-reading the hub's copy. Per-card saving means the
     // only way back is to ask for the stored values again.
+    // 清掉失败原因再重取：页面只该说「重试」，不该碰到 setError。
+    retry: () => { setError(""); load() },
     reload: load,
     set: (k: string, v: string) => setS((old) => ({ ...(old ?? {}), [k]: v })),
     save: async (patch: Record<string, string>) => {
@@ -2391,8 +2484,15 @@ function useSettings() {
 }
 
 function SettingsTab() {
-  const { s, set, save } = useSettings()
-  if (!s) return null
+  const { s, set, save, error, retry } = useSettings()
+  if (!s) {
+  	// 加载中与失败要分开：失败时停在原因上并给一个重试入口。
+  	return error ? (
+  		<RetryState message={error} onRetry={retry} />
+  	) : (
+  		<PageSkeleton shape="form" rows={3} />
+  	)
+  }
 
   return (
     <div className="space-y-4">
@@ -2597,7 +2697,11 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
 function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   const { s, set, save, reload } = useSettings()
   const [testing, setTesting] = useState(false)
-  if (!s) return null
+  if (!s) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="cards" rows={3} />
+  }
   const text = (k: string) => String(s[k] ?? "")
   // A credential is sent only when something was typed: the field starts empty
   // because the hub never returns the stored value.
@@ -2798,7 +2902,8 @@ function Sessions() {
   const [doomed, setDoomed] = useState<Session | null>(null)
   const [busy, setBusy] = useState("")
 
-  const load = () => api<Session[]>("/sessions").then(setRows).catch((e: Error) => toast.error(e.message))
+  const [error, setError] = useState("")
+  const load = () => api<Session[]>("/sessions").then((r) => { setRows(r); setError("") }).catch((e: Error) => { setError(e.message); toast.error(e.message) })
   useEffect(() => { load() }, [])
 
   async function remove(id: string) {
@@ -2815,12 +2920,16 @@ function Sessions() {
   }
 
   if (!rows) {
-    return (
-      <Card className="gap-4 p-5">
-        <Skeleton className="h-5 w-24" />
-        <Skeleton className="h-40" />
-      </Card>
-    )
+  	// 失败与加载中要分开：原来只 toast，`rows` 永远是 null，于是骨架一直转下去。
+  	return error ? (
+  		<RetryState message={error} onRetry={() => { setError(""); load() }} />
+  	) : (
+  		<PageSkeleton shape="list" rows={5} />
+  	)
+  }
+  // 空列表也要说话：只有一个标题加一片空白，读起来像「加载失败」，而不是「还没有」。
+  if (rows.length === 0) {
+  	return <EmptyState title="还没有登录会话" hint="用 GitHub 或应急密码登录之后，这里会列出每一个已登录的浏览器，可以逐个撤销。" />
   }
   return (
     <Card className="gap-4 p-5">
@@ -2838,7 +2947,7 @@ function Sessions() {
           comparable down a list. Still capped and scrolled -- the card must not grow
           with the number of sessions. */}
       <div className="max-h-72 overflow-y-auto">
-        <Table>
+        <Table className="min-w-[620px]">
           <TableHeader>
             <TableRow>
               <TableHead>登录时间</TableHead>
@@ -2901,9 +3010,16 @@ function Sessions() {
 }
 
 function Security({ site }: { site: string }) {
-  const { s, set, save } = useSettings()
+  const { s, set, save, error, retry } = useSettings()
   const [password, setPassword] = useState("")
-  if (!s) return null
+  if (!s) {
+  	// 加载中与失败要分开：失败时停在原因上并给一个重试入口。
+  	return error ? (
+  		<RetryState message={error} onRetry={retry} />
+  	) : (
+  		<PageSkeleton shape="form" rows={3} />
+  	)
+  }
   const callback = `${site}/api/auth/github/callback`
 
   return (
@@ -3006,7 +3122,8 @@ function Data() {
   const abort = useRef<AbortController | null>(null)
   const picker = useRef<HTMLInputElement>(null)
 
-  const load = () => api<DbInfo>("/db").then(setInfo).catch((e: Error) => toast.error(e.message))
+  const [error, setError] = useState("")
+  const load = () => api<DbInfo>("/db").then((r) => { setInfo(r); setError("") }).catch((e: Error) => { setError(e.message); toast.error(e.message) })
   useEffect(() => { load() }, [])
 
   async function vacuum() {
@@ -3044,7 +3161,14 @@ function Data() {
     setPending(null)
   }
 
-  if (!info) return null
+  if (!info) {
+  	// 失败与加载中要分开：原来只 toast，`rows` 永远是 null，于是骨架一直转下去。
+  	return error ? (
+  		<RetryState message={error} onRetry={() => { setError(""); load() }} />
+  	) : (
+  		<PageSkeleton shape="list" rows={5} />
+  	)
+  }
   const stat = (label: string, value: string) => (
     <div key={label}>
       <div className="text-xs text-muted-foreground">{label}</div>
@@ -3125,6 +3249,7 @@ function Data() {
           title="回收空间？"
           description="超出保留天数的历史明细会被删除，然后重建数据库文件。累计流量不受影响。"
           confirmLabel="开始回收"
+          tone="default"
           busy={!!busy}
           onClose={() => setConfirm(null)}
           onConfirm={vacuum}
@@ -3198,7 +3323,11 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
   agentLatest: string | null
 }) {
   const [saving, setSaving] = useState(false)
-  if (!versions) return null
+  if (!versions) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="list" rows={3} />
+  }
   const outdated = nodes.filter((n) => n.agent_old)
   const offline = outdated.filter((n) => !n.online).length
   // The same refusal the node page carries for its install command, and for the
