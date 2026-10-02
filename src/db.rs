@@ -2119,18 +2119,33 @@ impl Db {
     /// and this makes the backstop deterministic should a database arrive there
     /// by another route.
     pub fn ping_tasks_for(&self, node_id: i64) -> Result<Vec<serde_json::Value>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT t.id, t.target, t.interval FROM ping_task t
-             JOIN ping_node n ON n.task_id = t.id WHERE n.node_id = ?1 ORDER BY t.id",
-        )?;
-        let rows = stmt.query_map([node_id], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?, "target": r.get::<_, String>(1)?,
-                "interval": r.get::<_, i64>(2)?
-            }))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        // **Derived from `ping_tasks` rather than its own SELECT.** Two hand-written
+        // queries over the same table are how the agent's list silently lost `kind`
+        // while the panel's kept it: an ICMP task was then probed as a TCP handshake to a
+        // host with no port, which produces no sample and explains nothing -- a real hub
+        // showed 100% loss with the target plainly answering in 8 ms. One source of truth
+        // means a field added for the panel cannot go missing here.
+        //
+        // `name` is deliberately not sent: a probe name routinely carries a hostname or a
+        // customer (see `ping_task_names`), and the agent has no use for it -- it reports
+        // by task id.
+        //
+        // The order is the panel's `sort, id` rather than this function's old `id`. The
+        // agent matches tasks by id and does not draw them, so the order is not its
+        // concern; keeping one order is the point.
+        Ok(self
+            .ping_tasks()?
+            .into_iter()
+            .filter(|t| t.nodes.contains(&node_id))
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "target": t.target,
+                    "interval": t.interval,
+                    "kind": t.probe_kind(),
+                })
+            })
+            .collect())
     }
 
     /// Probe names keyed by id, for labelling one node's latency chart. Names
