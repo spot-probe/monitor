@@ -1004,7 +1004,6 @@ mod tests {
         assert_eq!(dispatch(&app, id, "192.168.1.2", &hello("192.168.1.5", "")).unwrap(), None);
     }
 
-    #[test]
     /// The task list the **agent** is sent carries the probe kind.
     ///
     /// This is the guard the fix needed: the panel reads a *different* query, so a test
@@ -1049,6 +1048,7 @@ mod tests {
         assert!(kinds.contains(&"tcp"), "{message}");
     }
 
+    #[test]
     fn ping_results_are_recorded_and_bad_ones_ignored() {
         let app = app();
         let id = node(&app);
