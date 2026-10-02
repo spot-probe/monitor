@@ -1621,7 +1621,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   {probeErrors
                     .filter((e) => e.task_id === t.id)
                     .map((e) => (
-                      <p key={e.node_id} className={`mt-0.5 text-xs break-all{clamp} ${WARN}`}>
+                      <p key={e.node_id} className={`mt-0.5 text-xs break-all line-clamp-2 ${WARN}`}>
                         {e.reason}
                         {probeErrors.filter((x) => x.task_id === t.id).length > 1 ? `（节点 ${e.node_id}）` : ""}
                       </p>
