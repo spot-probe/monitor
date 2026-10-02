@@ -1621,7 +1621,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   {probeErrors
                     .filter((e) => e.task_id === t.id)
                     .map((e) => (
-                      <p key={e.node_id} className={`mt-0.5 text-xs ${WARN}`}>
+                      <p key={e.node_id} className={`mt-0.5 text-xs break-all{clamp} ${WARN}`}>
                         {e.reason}
                         {probeErrors.filter((x) => x.task_id === t.id).length > 1 ? `（节点 ${e.node_id}）` : ""}
                       </p>
@@ -1744,7 +1744,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   placeholder={editing.kind === "icmp" ? "1.1.1.1" : "1.1.1.1:443"}
                 />
               </Field>
-              <div className="space-y-2">
+              <div className="space-y-2 border-t pt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label className="text-sm font-medium">运行节点</Label>
                   <div className="flex items-center gap-1">
