@@ -2053,6 +2053,11 @@ function Themes() {
   const [busy, setBusy] = useState("")
   const [doomed, setDoomed] = useState<Theme | null>(null)
   const [zoomed, setZoomed] = useState<Theme | null>(null)
+	// 哪些预览图已经到了、哪些主题根本没有预览图。两者都是为了让卡片**从第一帧就占住**
+	// 预览图的位置：原先的写法是「图加载完才显示」（为的是不闪一个空边框盒子），代价就是
+	// 图到的那一刻卡片长高，把读者正在看的东西顶走。骨架能同时满足这两件事。
+	const [previewLoaded, setPreviewLoaded] = useState<Set<string>>(new Set())
+	const [previewMissing, setPreviewMissing] = useState<Set<string>>(new Set())
   const [configuring, setConfiguring] = useState<{ theme: Theme; saved: Record<string, unknown> } | null>(null)
   const [repo, setRepo] = useState("")
   const picker = useRef<HTMLInputElement>(null)
@@ -2222,18 +2227,27 @@ function Themes() {
                 缩略图被压到卡片那点宽度，比例不是 16:9 的还会被 object-cover
                 裁掉边，所以图本身要能点开看原尺寸——就地开一个对话框，不跳走。 */}
             <button
-              type="button"
-              title="查看完整预览图"
-              hidden
-              className="cursor-zoom-in"
-              onClick={() => setZoomed(theme)}
+            	type="button"
+            	title="查看完整预览图"
+            	className="group relative block w-full cursor-zoom-in"
+            	onClick={() => setZoomed(theme)}
             >
-              <img
-                src={`/api/themes/${theme.short}/preview`}
-                alt={`${theme.name} 预览图`}
-                onLoad={(e) => { e.currentTarget.parentElement!.hidden = false }}
-                className="aspect-video w-full rounded-md border object-cover object-top"
-              />
+            	{previewMissing.has(theme.short) ? (
+            		<span className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+            			这个主题没有预览图
+            		</span>
+            	) : (
+            		<>
+            			{!previewLoaded.has(theme.short) && <Skeleton className="aspect-video w-full rounded-md" />}
+            			<img
+            				src={`/api/themes/${theme.short}/preview`}
+            				alt={`${theme.name} 预览图`}
+            				onLoad={() => setPreviewLoaded((s) => new Set(s).add(theme.short))}
+            				onError={() => setPreviewMissing((s) => new Set(s).add(theme.short))}
+            				className={`${previewLoaded.has(theme.short) ? "" : "hidden"} aspect-video w-full rounded-md border object-cover object-top`}
+            			/>
+            		</>
+            	)}
             </button>
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
