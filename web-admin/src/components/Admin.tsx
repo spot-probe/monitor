@@ -2422,12 +2422,22 @@ type Settings = Record<string, string | boolean>
 // Two pages write settings, and each loads only what it displays.
 function useSettings() {
   const [s, setS] = useState<Settings | null>(null)
-  const load = useCallback(() => { api<Settings>("/settings").then(setS).catch(() => {}) }, [])
+  const [error, setError] = useState("")
+  // 失败要能被页面看见：原来 `.catch(() => {})` 把原因吞掉，`s` 永远是 null，
+  // 于是设置页与安全页会一直停在骨架上，看起来像「一直在加载」。
+  const load = useCallback(() => {
+  	api<Settings>("/settings")
+  		.then((v) => { setS(v); setError("") })
+  		.catch((e: Error) => setError(e.message))
+  }, [])
   useEffect(() => { load() }, [load])
   return {
+    error,
     s,
     // Discards unsaved edits by re-reading the hub's copy. Per-card saving means the
     // only way back is to ask for the stored values again.
+    // 清掉失败原因再重取：页面只该说「重试」，不该碰到 setError。
+    retry: () => { setError(""); load() },
     reload: load,
     set: (k: string, v: string) => setS((old) => ({ ...(old ?? {}), [k]: v })),
     save: async (patch: Record<string, string>) => {
@@ -2452,11 +2462,14 @@ function useSettings() {
 }
 
 function SettingsTab() {
-  const { s, set, save } = useSettings()
+  const { s, set, save, error, retry } = useSettings()
   if (!s) {
-  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
-  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
-  	return <PageSkeleton shape="form" rows={3} />
+  	// 加载中与失败要分开：失败时停在原因上并给一个重试入口。
+  	return error ? (
+  		<RetryState message={error} onRetry={retry} />
+  	) : (
+  		<PageSkeleton shape="form" rows={3} />
+  	)
   }
 
   return (
@@ -2867,7 +2880,8 @@ function Sessions() {
   const [doomed, setDoomed] = useState<Session | null>(null)
   const [busy, setBusy] = useState("")
 
-  const load = () => api<Session[]>("/sessions").then(setRows).catch((e: Error) => toast.error(e.message))
+  const [error, setError] = useState("")
+  const load = () => api<Session[]>("/sessions").then((r) => { setRows(r); setError("") }).catch((e: Error) => { setError(e.message); toast.error(e.message) })
   useEffect(() => { load() }, [])
 
   async function remove(id: string) {
@@ -2884,8 +2898,12 @@ function Sessions() {
   }
 
   if (!rows) {
-  	// 统一到共享原语：形状按该页实际长相给（这里分别是卡片网格与表格）。
-  	return <PageSkeleton shape="list" rows={5} />
+  	// 失败与加载中要分开：原来只 toast，`rows` 永远是 null，于是骨架一直转下去。
+  	return error ? (
+  		<RetryState message={error} onRetry={() => { setError(""); load() }} />
+  	) : (
+  		<PageSkeleton shape="list" rows={5} />
+  	)
   }
   return (
     <Card className="gap-4 p-5">
@@ -2966,11 +2984,15 @@ function Sessions() {
 }
 
 function Security({ site }: { site: string }) {
-  const { s, set, save } = useSettings()
+  const { s, set, save, error, retry } = useSettings()
   const [password, setPassword] = useState("")
   if (!s) {
-  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架。
-  	return <PageSkeleton shape="form" rows={3} />
+  	// 加载中与失败要分开：失败时停在原因上并给一个重试入口。
+  	return error ? (
+  		<RetryState message={error} onRetry={retry} />
+  	) : (
+  		<PageSkeleton shape="form" rows={3} />
+  	)
   }
   const callback = `${site}/api/auth/github/callback`
 
@@ -3074,7 +3096,8 @@ function Data() {
   const abort = useRef<AbortController | null>(null)
   const picker = useRef<HTMLInputElement>(null)
 
-  const load = () => api<DbInfo>("/db").then(setInfo).catch((e: Error) => toast.error(e.message))
+  const [error, setError] = useState("")
+  const load = () => api<DbInfo>("/db").then((r) => { setInfo(r); setError("") }).catch((e: Error) => { setError(e.message); toast.error(e.message) })
   useEffect(() => { load() }, [])
 
   async function vacuum() {
@@ -3113,9 +3136,12 @@ function Data() {
   }
 
   if (!info) {
-  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
-  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
-  	return <PageSkeleton shape="list" rows={4} />
+  	// 失败与加载中要分开：原来只 toast，`rows` 永远是 null，于是骨架一直转下去。
+  	return error ? (
+  		<RetryState message={error} onRetry={() => { setError(""); load() }} />
+  	) : (
+  		<PageSkeleton shape="list" rows={5} />
+  	)
   }
   const stat = (label: string, value: string) => (
     <div key={label}>
