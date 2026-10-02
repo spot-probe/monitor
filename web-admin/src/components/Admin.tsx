@@ -2429,7 +2429,11 @@ function useSettings() {
 
 function SettingsTab() {
   const { s, set, save } = useSettings()
-  if (!s) return null
+  if (!s) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="form" rows={3} />
+  }
 
   return (
     <div className="space-y-4">
@@ -2634,7 +2638,11 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
 function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   const { s, set, save, reload } = useSettings()
   const [testing, setTesting] = useState(false)
-  if (!s) return null
+  if (!s) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="form" rows={3} />
+  }
   const text = (k: string) => String(s[k] ?? "")
   // A credential is sent only when something was typed: the field starts empty
   // because the hub never returns the stored value.
@@ -3081,7 +3089,11 @@ function Data() {
     setPending(null)
   }
 
-  if (!info) return null
+  if (!info) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="list" rows={4} />
+  }
   const stat = (label: string, value: string) => (
     <div key={label}>
       <div className="text-xs text-muted-foreground">{label}</div>
@@ -3235,7 +3247,11 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
   agentLatest: string | null
 }) {
   const [saving, setSaving] = useState(false)
-  if (!versions) return null
+  if (!versions) {
+  	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
+  	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
+  	return <PageSkeleton shape="list" rows={3} />
+  }
   const outdated = nodes.filter((n) => n.agent_old)
   const offline = outdated.filter((n) => !n.online).length
   // The same refusal the node page carries for its install command, and for the
