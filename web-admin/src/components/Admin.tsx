@@ -799,9 +799,12 @@ function useRegisterWindow() {
   return {
     key,
     left: key === "" ? 0 : Math.max(0, until - now),
-    async open() {
+    async open(minutes: number) {
       try {
-        const w = await api<{ register_key: string; register_until: string }>("/register-window", { method: "POST" })
+        const w = await api<{ register_key: string; register_until: string }>("/register-window", {
+          method: "POST",
+          body: JSON.stringify({ minutes }),
+        })
         setKey(w.register_key)
         setUntil(Number(w.register_until))
       } catch (e) {
@@ -826,8 +829,10 @@ function RegisterDialog({ site, reg, onClose }: {
   reg: ReturnType<typeof useRegisterWindow>
   onClose: () => void
 }) {
+  const [minutes, setMinutes] = useState(60)
   const command = reg.left > 0 ? registerCommand(site, reg.key) : ""
   const clock = `${Math.floor(reg.left / 60)}:${String(reg.left % 60).padStart(2, "0")}`
+  const span = minutes === 60 ? "一小时" : `${minutes} 分钟`
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -837,7 +842,7 @@ function RegisterDialog({ site, reg, onClose }: {
         </DialogHeader>
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            开一个一小时的注册窗口。期间这条命令在任意机器上跑一次，那台机器就会自己出现在
+            开一个{span}的注册窗口。期间这条命令在任意机器上跑一次，那台机器就会自己出现在
             列表里，名字取自它的 hostname。命令里没有任何一台机器的凭证，可以直接进循环。
           </p>
           {command ? (
@@ -857,14 +862,37 @@ function RegisterDialog({ site, reg, onClose }: {
               </div>
             </div>
           ) : (
-            <Button onClick={reg.open}>开启一小时窗口</Button>
+            // 时长预设而不是自由输入：常见选择一眼可选，也不必校验越界（hub 同样封顶，
+            // 那里才是真正说了算的地方）。上限就是一小时。
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">窗口时长</Label>
+              <div className="flex flex-wrap gap-2">
+                {[5, 10, 15, 30, 60].map((m) => (
+                  <Button
+                    key={m}
+                    type="button"
+                    size="sm"
+                    variant={m === minutes ? "default" : "outline"}
+                    onClick={() => setMinutes(m)}
+                  >
+                    {m === 60 ? "1 小时" : `${m} 分钟`}
+                  </Button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
+        {/* 两种状态各有一套动作：没开窗时主动作是「开启窗口」，开好了主动作是「复制」。
+            原先「开启窗口」孤零零待在正文里，而页脚只有 关闭 / 复制，于是三个按钮分居两处。 */}
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>关闭</Button>
-          <Button onClick={() => copy(command)} disabled={!command}>
-            <Copy className="size-4" /> 复制
-          </Button>
+          {command ? (
+            <Button onClick={() => copy(command)}>
+              <Copy className="size-4" /> 复制
+            </Button>
+          ) : (
+            <Button onClick={() => reg.open(minutes)}>开启窗口</Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
