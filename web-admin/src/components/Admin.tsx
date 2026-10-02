@@ -1173,14 +1173,22 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
               <TableHead className="w-[20%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
               <TableHead className="w-[9%]">版本</TableHead>
-              <TableHead className="w-[15%]">流量</TableHead>
-              <TableHead className="w-[10%]">价格</TableHead>
-              <TableHead className="w-[11%]">到期</TableHead>
+              <TableHead className="text-right w-[15%]">流量</TableHead>
+              <TableHead className="text-right w-[10%]">价格</TableHead>
+              <TableHead className="text-right w-[11%]">到期</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {visible.map((n, index) => (
+            {visible.length === 0 ? (
+            	<TableRow>
+            		<TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
+            			{nodes.length === 0
+            				? "还没有节点。用右上角的「添加节点」或「批量添加」，让机器自己登记。"
+            				: "没有匹配的节点，换个搜索词或分组试试。"}
+            		</TableCell>
+            	</TableRow>
+            ) : visible.map((n, index) => (
               <TableRow
                 key={n.id}
                 style={{ viewTransitionName: `node-${n.id}` }}
@@ -1286,16 +1294,16 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 </TableCell>
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
-                <TableCell className="tnum text-sm">
+                <TableCell className="tnum text-right text-sm">
                   {bytes(monthUsage(n))}
                   <span className="text-muted-foreground">
                     {" / "}{n.traffic_limit > 0 ? bytes(n.traffic_limit) : FOREVER}
                   </span>
                 </TableCell>
-                <TableCell className="tnum text-sm">
+                <TableCell className="tnum text-right text-sm">
                   {n.price > 0 ? money(n.price, n.currency) : "免费"}
                 </TableCell>
-                <TableCell className="text-sm">
+                <TableCell className="tnum text-right text-sm">
                   <Expiry date={n.expires_at} />
                 </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
