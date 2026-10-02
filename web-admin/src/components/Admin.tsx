@@ -1195,7 +1195,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
       )}
 
       <Card className="overflow-x-auto p-0">
-        <Table>
+        <Table className="min-w-[880px]">
           <TableHeader>
             {/* Percentages, or the address column swallows every spare pixel
                 and pushes status across the table. The version column was taken
@@ -1635,7 +1635,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       </div>
 
       <Card className="overflow-x-auto p-0">
-        <Table>
+        <Table className="min-w-[760px]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[18%]">名称</TableHead>
@@ -2944,7 +2944,7 @@ function Sessions() {
           comparable down a list. Still capped and scrolled -- the card must not grow
           with the number of sessions. */}
       <div className="max-h-72 overflow-y-auto">
-        <Table>
+        <Table className="min-w-[620px]">
           <TableHeader>
             <TableRow>
               <TableHead>登录时间</TableHead>
