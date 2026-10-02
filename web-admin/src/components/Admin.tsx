@@ -3246,10 +3246,9 @@ function Data() {
           title="回收空间？"
           description="超出保留天数的历史明细会被删除，然后重建数据库文件。累计流量不受影响。"
           confirmLabel="开始回收"
-            tone="default"
+          tone="default"
           busy={!!busy}
-          onClose={() =
-setConfirm(null)}
+          onClose={() => setConfirm(null)}
           onConfirm={vacuum}
         />
       )}
