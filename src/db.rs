@@ -12,7 +12,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-pub struct Db(Mutex<Connection>);
+pub struct Db {
+    conn: Mutex<Connection>,
+    /// Why the last probe of a node's task produced no sample, and when that was said,
+    /// keyed by `(node, task)`.
+    ///
+    /// In memory rather than in a column: this is the **current** explanation, not
+    /// history -- a row would exist only to be overwritten, and the pattern is one
+    /// write per probe round. It is what keeps a probe that cannot run (no permission,
+    /// no route) from reaching the panel as an unexplained 100% loss.
+    ping_errors: Mutex<std::collections::HashMap<(i64, i64), (String, i64)>>,
+}
+
+/// How long a reason stays worth showing. A probe that failed once and has been quiet
+/// since is not news; one that is failing every round keeps its reason fresh.
+const PING_ERROR_TTL: i64 = 600;
 
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -138,8 +152,16 @@ CREATE TABLE IF NOT EXISTS ping_task (
   -- would leave an upgraded database with a different column order from a fresh
   -- one. The panel's order; every probe ties at 0 on an upgraded database, so
   -- `ORDER BY sort, id` keeps the order it listed them in.
-  sort     INTEGER NOT NULL DEFAULT 0
+  sort     INTEGER NOT NULL DEFAULT 0,
+  kind     TEXT    NOT NULL DEFAULT 'tcp'
 );
+-- `kind` is `tcp` (a handshake, what every task was before the column existed) or
+-- `icmp` (an echo request), and it is declared last for the same reason `sort` is:
+-- see `migrate_to_10`. The note lives out here rather than beside the column because
+-- **a `--` comment inside a CREATE TABLE breaks `ALTER TABLE ... DROP COLUMN`** --
+-- SQLite rewrites the statement and the comment swallows what follows, which is an
+-- "incomplete input" error. Tests that reduce a database to an older version drop
+-- columns, so a comment in there is a trap for them, not a note for a reader.
 
 CREATE TABLE IF NOT EXISTS ping_node (
   task_id INTEGER NOT NULL REFERENCES ping_task(id) ON DELETE CASCADE,
@@ -216,7 +238,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -429,6 +451,24 @@ fn migrate_to_11(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Every probe was a TCP handshake before this column existed; the default says so, so
+/// an upgraded hub behaves exactly as it did until someone asks for an echo.
+///
+/// Twice-safe like every other step, which for `ADD COLUMN` means asking first: the
+/// migration tests build a file with the current schema and then reduce it, so a step
+/// that assumed the column was absent would refuse to run there -- and a step that
+/// merely swallowed the error would never be shown to do anything at all.
+fn migrate_to_13(conn: &Connection) -> Result<()> {
+    let has_kind: i64 =
+        conn.query_row("SELECT COUNT(*) FROM pragma_table_info('ping_task') WHERE name = 'kind'", [], |r| {
+            r.get(0)
+        })?;
+    if has_kind == 0 {
+        conn.execute_batch("ALTER TABLE ping_task ADD COLUMN kind TEXT NOT NULL DEFAULT 'tcp';")?;
+    }
+    Ok(())
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
@@ -477,6 +517,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 12 {
         migrate_to_12(&tx)?;
+    }
+    if from < 13 {
+        migrate_to_13(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
@@ -671,6 +714,26 @@ pub struct PingTask {
     pub interval: i64,
     #[serde(default)]
     pub nodes: Vec<i64>,
+    /// `"icmp"` for an echo request. Absent means `"tcp"`, which is what every task
+    /// was before this field existed -- so an old hub, an old backup and an old panel
+    /// all keep working, and a task that says nothing is a handshake.
+    ///
+    /// `None` rather than a defaulted `String` on purpose: the column does not exist
+    /// in the schema yet, so the read path cannot supply it, and every construction
+    /// site would otherwise have to name a value it does not have an opinion about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl PingTask {
+    /// What this task probes: `"tcp"` unless it says otherwise. Empty is treated as
+    /// absent, because the panel sends an empty string for a field it does not fill.
+    pub fn probe_kind(&self) -> &str {
+        match self.kind.as_deref() {
+            Some(kind) if !kind.is_empty() => kind,
+            _ => "tcp",
+        }
+    }
 }
 
 /// Points SQLite's temporary files -- the copy `VACUUM` rebuilds the database
@@ -926,11 +989,35 @@ impl Db {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         migrate(&conn, if fresh { SCHEMA_VERSION } else { version })?;
-        Ok(Self(Mutex::new(conn)))
+        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default() })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records why a probe produced no sample, or forgets the reason once one arrives:
+    /// a task that starts working must stop explaining itself.
+    pub fn note_ping_error(&self, node_id: i64, task_id: i64, error: Option<&str>) {
+        let mut errors = self.ping_errors.lock().unwrap_or_else(|e| e.into_inner());
+        match error {
+            Some(text) => {
+                errors.insert((node_id, task_id), (text.to_owned(), Utc::now().timestamp()));
+            }
+            None => {
+                errors.remove(&(node_id, task_id));
+            }
+        }
+    }
+
+    /// The reasons still worth showing, by `(node, task)`. Anything older than
+    /// [`PING_ERROR_TTL`] is dropped on the way out rather than swept on a timer: it is
+    /// read far less often than it is written.
+    pub fn ping_errors(&self) -> std::collections::HashMap<(i64, i64), String> {
+        let mut errors = self.ping_errors.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = Utc::now().timestamp() - PING_ERROR_TTL;
+        errors.retain(|_, (_, at)| *at >= cutoff);
+        errors.iter().map(|(k, (text, _))| (*k, text.clone())).collect()
     }
 
     // ---- settings ----
@@ -1915,10 +2002,12 @@ impl Db {
 
     pub fn ping_tasks(&self) -> Result<Vec<PingTask>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id, name, target, interval FROM ping_task ORDER BY sort, id")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, target, interval, kind FROM ping_task ORDER BY sort, id")?;
         let tasks: Vec<PingTask> = stmt
             .query_map([], |r| {
                 Ok(PingTask {
+                    kind: r.get("kind")?,
                     id: r.get(0)?,
                     name: r.get(1)?,
                     target: r.get(2)?,
@@ -1959,16 +2048,18 @@ impl Db {
         let tx = conn.transaction()?;
         let id = if t.id > 0 {
             tx.execute(
-                "UPDATE ping_task SET name=?2, target=?3, interval=?4 WHERE id=?1",
-                params![t.id, t.name, t.target, t.interval],
+                "UPDATE ping_task SET name=?2, target=?3, interval=?4, kind=?5 WHERE id=?1",
+                // `probe_kind()` rather than the field: an absent or empty kind is
+                // written as `tcp`, so the column always says what the task does.
+                params![t.id, t.name, t.target, t.interval, t.probe_kind()],
             )?;
             t.id
         } else {
             tx.execute(
                 // At the end, as in `create_node`.
-                "INSERT INTO ping_task (name, target, interval, sort)
-                 VALUES (?1,?2,?3,(SELECT COALESCE(MAX(sort),-1)+1 FROM ping_task))",
-                params![t.name, t.target, t.interval],
+                "INSERT INTO ping_task (name, target, interval, sort, kind)
+                 VALUES (?1,?2,?3,(SELECT COALESCE(MAX(sort),-1)+1 FROM ping_task),?4)",
+                params![t.name, t.target, t.interval, t.probe_kind()],
             )?;
             tx.last_insert_rowid()
         };
@@ -2881,6 +2972,7 @@ mod tests {
         // must be assigned, or the result is not this node's to file.
         let task = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3197,8 +3289,14 @@ mod tests {
     fn deleting_a_node_takes_its_data_with_it() {
         let db = db();
         let id = node(&db, 1);
-        let probe =
-            |nodes| PingTask { id: 0, name: "cm".into(), target: "1.1.1.1:443".into(), interval: 60, nodes };
+        let probe = |nodes| PingTask {
+            kind: None,
+            id: 0,
+            name: "cm".into(),
+            target: "1.1.1.1:443".into(),
+            interval: 60,
+            nodes,
+        };
         let task = db.save_ping_task(&probe(vec![id])).unwrap();
         db.accumulate(id, "b", Some((10, 10))).unwrap();
         db.insert_metric(id, 1, &serde_json::json!({"cpu": 1.0})).unwrap();
@@ -3213,7 +3311,7 @@ mod tests {
         // `delete_node` the new machine would draw the old one's chart.
         let fresh = node(&db, 1);
         assert_eq!(fresh, id, "the id is reused, which is what makes this reachable");
-        db.save_ping_task(&PingTask { id: task, nodes: vec![fresh], ..probe(vec![]) }).unwrap();
+        db.save_ping_task(&PingTask { kind: None, id: task, nodes: vec![fresh], ..probe(vec![]) }).unwrap();
         assert!(db.ping_records(fresh, 0, 60).unwrap().0.is_empty(), "and it starts with no history");
     }
 
@@ -3226,6 +3324,7 @@ mod tests {
         let db = db();
         let id = node(&db, 1);
         let probe = |name: &str| PingTask {
+            kind: None,
             id: 0,
             name: name.into(),
             target: "1.1.1.1:443".into(),
@@ -3254,6 +3353,7 @@ mod tests {
         let rows = || db.conn().query_row("SELECT COUNT(*) FROM ping_record", [], |r| r.get::<_, i64>(0));
         let task = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3412,6 +3512,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = |name: &str| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: name.into(),
                 target: "1.1.1.1:443".into(),
@@ -3751,6 +3852,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -3865,6 +3967,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -4039,6 +4142,7 @@ mod tests {
         let id = node(&app_db, 1);
         let _ = app_db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),
@@ -4060,6 +4164,89 @@ mod tests {
         // three do not, so the median is 30 and the loss is 50%.
         assert_eq!(stitched[0]["loss"], 50, "three of six did not answer");
         assert_eq!(stitched[0]["latency"], 30, "the median of 30, 12 and 44");
+    }
+
+    /// A task that says nothing about how it probes is a TCP probe: that is what every
+    /// task was before the field existed, and what an old hub, an old panel and an old
+    /// backup all send. Empty counts as absent, because the panel sends an empty string
+    /// for a field it does not fill.
+    #[test]
+    fn a_task_without_a_kind_probes_tcp() {
+        let bare: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1:443"})).unwrap();
+        assert_eq!(bare.probe_kind(), "tcp", "absent means a handshake");
+        let empty: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1", "kind": ""}))
+                .unwrap();
+        assert_eq!(empty.probe_kind(), "tcp", "an empty string is a field nobody filled in");
+        let echo: PingTask =
+            serde_json::from_value(serde_json::json!({"name": "p", "target": "1.1.1.1", "kind": "icmp"}))
+                .unwrap();
+        assert_eq!(echo.probe_kind(), "icmp");
+        // And a task that says nothing serialises without the field at all: an
+        // existing payload must not change by a byte because this exists.
+        assert!(!serde_json::to_string(&bare).unwrap().contains("kind"));
+    }
+
+    /// A file that really lacks `kind` gains it, and the row that pre-dates it is a
+    /// TCP probe afterwards.
+    ///
+    /// Deliberately drops the column first: the other fixtures are built with the
+    /// current schema and only pretend to be older, so they cannot show that the step
+    /// does anything -- deleting `migrate_to_13` would leave them green. This one
+    /// fails without it.
+    #[test]
+    fn a_file_without_the_kind_column_gains_it_as_tcp() {
+        let db = db();
+        let id = node(&db, 1);
+        db.save_ping_task(&PingTask {
+            id: 0,
+            name: "p".into(),
+            target: "1.1.1.1:443".into(),
+            interval: 60,
+            nodes: vec![id],
+            kind: None,
+        })
+        .unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE ping_task DROP COLUMN kind", []).unwrap();
+        migrate(&conn, 12).unwrap();
+        let kind: String = conn.query_row("SELECT kind FROM ping_task LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "tcp", "a task from before the column is a handshake");
+        // Twice-safe: running the step again changes nothing.
+        migrate(&conn, 12).unwrap();
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM pragma_table_info('ping_task') WHERE name='kind'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            1,
+            "still exactly one such column"
+        );
+    }
+
+    /// A reason is remembered while it is fresh, forgotten the moment a sample arrives,
+    /// and dropped once it has gone quiet: a task that was fixed elsewhere must stop
+    /// explaining itself, or the panel keeps showing yesterday's cause.
+    #[test]
+    fn a_ping_error_is_remembered_then_forgotten() {
+        let db = db();
+        let id = node(&db, 1);
+        assert!(db.ping_errors().is_empty(), "nothing has failed yet");
+        db.note_ping_error(id, 7, Some("ICMP needs CAP_NET_RAW"));
+        assert_eq!(db.ping_errors().get(&(id, 7)).map(String::as_str), Some("ICMP needs CAP_NET_RAW"));
+        // A sample arriving is the end of the explanation.
+        db.note_ping_error(id, 7, None);
+        assert!(db.ping_errors().is_empty(), "a working probe stops explaining itself");
+        // And one that has gone quiet is dropped, so a cause cannot outlive the facts.
+        db.note_ping_error(id, 7, Some("stale"));
+        db.ping_errors
+            .lock()
+            .unwrap()
+            .insert((id, 7), ("stale".into(), Utc::now().timestamp() - PING_ERROR_TTL - 1));
+        assert!(db.ping_errors().is_empty(), "a reason older than the window is not shown");
     }
 
     /// A fold counts exactly the minutes of its own hour: the window is
@@ -4351,6 +4538,7 @@ mod tests {
         let id = node(&db, 1);
         let probe = |nodes: Vec<i64>, task| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: task,
                 name: "cm".into(),
                 target: "1.1.1.1:443".into(),
@@ -4388,6 +4576,7 @@ mod tests {
         let (a, b) = (node(&db, 1), node(&db, 1));
         let id = db
             .save_ping_task(&PingTask {
+                kind: None,
                 id: 0,
                 name: "cf".into(),
                 target: "1.1.1.1:443".into(),
@@ -4399,6 +4588,7 @@ mod tests {
 
         // Reassigning to one node must drop the other's copy.
         db.save_ping_task(&PingTask {
+            kind: None,
             id,
             name: "cf".into(),
             target: "1.1.1.1:443".into(),
@@ -4420,6 +4610,7 @@ mod tests {
         let id = node(&db, 1);
         let save = |task: i64, nodes: Vec<i64>| {
             db.save_ping_task(&PingTask {
+                kind: None,
                 id: task,
                 name: "p".into(),
                 target: "1.1.1.1:443".into(),

@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingTask, type Source } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingError, type PingTask, type Source } from "@/lib/api"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -1422,6 +1422,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
   const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[] }>>({})
+  // Why a probe produced nothing, when the agent said why: without this the row shows
+  // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
+  const [probeErrors, setProbeErrors] = useState<PingError[]>([])
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1433,8 +1436,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
   const ordered = drag.order.map((id) => listed.get(id)).filter((t): t is PingTask => Boolean(t))
 
   function load() {
-    return api<{ tasks: PingTask[] }>("/ping-tasks")
-      .then((d) => setTasks(d.tasks))
+    return api<{ tasks: PingTask[]; errors?: PingError[] }>("/ping-tasks")
+      .then((d) => {
+        setTasks(d.tasks)
+        setProbeErrors(d.errors ?? [])
+      })
       .catch(() => {})
       .finally(() => setLoaded(true))
   }
@@ -1554,7 +1560,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
             </p>
           )}
         </div>
-        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}>
+        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [], kind: "tcp" })}>
           <Plus /> 添加监控
         </Button>
       </div>
@@ -1612,8 +1618,25 @@ function Ping({ nodes }: { nodes: Node[] }) {
                     />
                     <span className="font-medium">{t.name}</span>
                   </div>
+                  {probeErrors
+                    .filter((e) => e.task_id === t.id)
+                    .map((e) => (
+                      <p key={e.node_id} className={`mt-0.5 text-xs break-all line-clamp-2 ${WARN}`}>
+                        {e.reason}
+                        {probeErrors.filter((x) => x.task_id === t.id).length > 1 ? `（节点 ${e.node_id}）` : ""}
+                      </p>
+                    ))}
                 </TableCell>
-                <TableCell className="tnum text-sm">{t.target}</TableCell>
+                <TableCell className="tnum text-sm">
+                  {t.target}
+                  {/* Only the echo gets a label. TCP is the default and the common case,
+                      so a badge on every row would be noise; what a reader needs to see is
+                      the probe that is **not** a handshake -- it is also the one that can
+                      fail for a reason the row has to explain. */}
+                  {t.kind === "icmp" && (
+                    <span className="ml-2 rounded border px-1.5 py-0.5 text-xs text-muted-foreground">ICMP</span>
+                  )}
+                </TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
                 <TableCell>
@@ -1655,7 +1678,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                     size="sm"
                     variant="outline"
                     className="mt-3"
-                    onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}
+                    onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [], kind: "tcp" })}
                   >
                     <Plus /> 添加监控
                   </Button>
@@ -1688,10 +1711,40 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   <Input type="number" min="5" max="3600" value={editing.interval ?? 60} onChange={(e) => setEditing({ ...editing, interval: Number(e.target.value) || 60 })} />
                 </Field>
               </div>
-              <Field label="目标地址" hint="host:port">
-                <Input value={editing.target ?? ""} onChange={(e) => setEditing({ ...editing, target: e.target.value })} placeholder="1.1.1.1:443" />
+              <Field
+                label="探测方式"
+                hint={
+                  editing.kind === "icmp"
+                    ? "发送 ICMP 回显请求。需要 agent 有相应权限（见文档），没有权限时这里会显示原因"
+                    : "与目标端口建立 TCP 连接，不需要额外权限"
+                }
+              >
+                {/* Two buttons rather than a select: there are exactly two, and the
+                    chosen one has to be visible without opening anything. */}
+                <div className="flex gap-2">
+                  {([["tcp", "TCP ping"], ["icmp", "ICMP ping"]] as const).map(([value, label]) => (
+                    <Button
+                      key={value}
+                      type="button"
+                      variant={editing.kind === value ? "default" : "outline"}
+                      onClick={() => setEditing({ ...editing, kind: value })}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
               </Field>
-              <div className="space-y-2">
+              <Field
+                label="目标地址"
+                hint={editing.kind === "icmp" ? "主机名或 IP，不要端口" : "host:port"}
+              >
+                <Input
+                  value={editing.target ?? ""}
+                  onChange={(e) => setEditing({ ...editing, target: e.target.value })}
+                  placeholder={editing.kind === "icmp" ? "1.1.1.1" : "1.1.1.1:443"}
+                />
+              </Field>
+              <div className="space-y-2 border-t pt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label className="text-sm font-medium">运行节点</Label>
                   <div className="flex items-center gap-1">
@@ -3309,6 +3362,8 @@ export const ADMIN_SECTIONS = [
 
 /** Flattened, for the header: the page's own label and the group it belongs to. */
 export const ADMIN_ITEMS = ADMIN_SECTIONS.flatMap((section) => section.items)
+
+const WARN = 'text-destructive'
 
 export function Admin({
   path,

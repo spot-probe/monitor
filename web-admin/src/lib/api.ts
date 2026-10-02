@@ -77,7 +77,15 @@ export type Node = {
   notify?: boolean
 }
 
-export type PingTask = { id: number; name: string; target: string; interval: number; nodes: number[] }
+export type PingError = {
+  node_id: number
+  task_id: number
+  reason: string
+}
+
+export type PingTask = {
+  /** `"icmp"` for an echo request; absent or `"tcp"` is a handshake. */
+  kind?: string; id: number; name: string; target: string; interval: number; nodes: number[] }
 
 /** Form snapshots must never overwrite fields the user did not edit. */
 /// The groups worth offering under what has been typed, case-insensitively.
