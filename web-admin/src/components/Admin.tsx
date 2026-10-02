@@ -11,6 +11,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { PageSkeleton } from "@/components/ui/page-skeleton"
+import { RetryState } from "@/components/ui/retry-state"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -1418,6 +1420,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // first fetch is still in flight and tells the operator there are no probes. Themes and
   // Sessions already guard this with a null; here a flag is enough and touches less.
   const [loaded, setLoaded] = useState(false)
+	// 首次请求失败时的原因。`load()` 原来把错误整个吞掉（`.catch(() => {})`），于是页面
+	// 显示「没有监控」——和「没能取到数据」长得一模一样，而这两件事需要完全不同的动作。
+	const [error, setError] = useState("")
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
@@ -1440,8 +1445,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
       .then((d) => {
         setTasks(d.tasks)
         setProbeErrors(d.errors ?? [])
+		setError("")
       })
-      .catch(() => {})
+		.catch((e) => setError((e as Error).message))
       .finally(() => setLoaded(true))
   }
 
@@ -1544,6 +1550,18 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Distinct nodes any probe runs on: coverage is the question this page answers.
   const covered = new Set(tasks.flatMap((t) => t.nodes)).size
 
+  // 首次请求未回：给一个和这张表同形的骨架，而不是先画一张空表再填（切换菜单时的顿挫感
+  // 就来自后者）。失败则停在那条原因上，并给一个重试入口 —— toast 会飘走，页面不会。
+  if (error) {
+  	return (
+  		<RetryState
+  			message={error}
+  			onRetry={() => { setError(""); setLoaded(false); load() }}
+  		/>
+  	)
+  }
+  if (!loaded) return <PageSkeleton shape="list" rows={3} />
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1551,7 +1569,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
             said nothing about what the page does. */}
         <div className="min-w-0 flex-1">
           <p className="text-xs leading-relaxed text-muted-foreground">
-            每个节点独立 TCP 连接目标端口并上报耗时，公开页据此画出延迟与丢包。勾选运行节点，即可让一台机器同时探多个目标。
+            每个节点独立探测目标并上报耗时：默认是 TCP 握手，也可以选 ICMP 回显。公开页据此画出延迟与丢包。勾选运行节点，即可让一台机器同时探多个目标。
           </p>
           {tasks.length > 0 && (
             <p className="mt-1.5 text-xs text-muted-foreground">
