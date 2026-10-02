@@ -1004,6 +1004,50 @@ mod tests {
         assert_eq!(dispatch(&app, id, "192.168.1.2", &hello("192.168.1.5", "")).unwrap(), None);
     }
 
+    /// The task list the **agent** is sent carries the probe kind.
+    ///
+    /// This is the guard the fix needed: the panel reads a *different* query, so a test
+    /// that only checks `/api/ping-tasks` passes while the agent silently receives no
+    /// `kind` -- and then probes an ICMP task as a TCP handshake to a host with no port,
+    /// reporting nothing and explaining nothing.
+    #[test]
+    fn the_task_list_sent_to_an_agent_carries_the_probe_kind() {
+        let app = app();
+        let id = node(&app);
+        app.db
+            .save_ping_task(&PingTask {
+                id: 0,
+                name: "p".into(),
+                target: "1.1.1.1".into(),
+                interval: 60,
+                nodes: vec![id],
+                kind: Some("icmp".into()),
+            })
+            .unwrap();
+        let message = ping_tasks_message(&app, id);
+        let sent: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(sent["method"], "ping.tasks");
+        assert_eq!(sent["params"][0]["kind"], "icmp", "{message}");
+        assert_eq!(sent["params"][0]["target"], "1.1.1.1");
+        // And a task that says nothing is sent as a handshake, so an old hub's task list
+        // cannot arrive here without a kind and be probed as something else.
+        app.db
+            .save_ping_task(&PingTask {
+                id: 0,
+                name: "t".into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+                kind: None,
+            })
+            .unwrap();
+        let message = ping_tasks_message(&app, id);
+        let sent: serde_json::Value = serde_json::from_str(&message).unwrap();
+        let kinds: Vec<&str> =
+            sent["params"].as_array().unwrap().iter().filter_map(|t| t["kind"].as_str()).collect();
+        assert!(kinds.contains(&"tcp"), "{message}");
+    }
+
     #[test]
     fn ping_results_are_recorded_and_bad_ones_ignored() {
         let app = app();
