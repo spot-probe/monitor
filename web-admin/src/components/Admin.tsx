@@ -192,11 +192,15 @@ function Section({ title, hint, action, children }: { title: string; hint?: stri
 }
 
 
-function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose, onConfirm, children }: {
+function ConfirmDialog({ title, description, confirmLabel, busy = false, tone = "danger", onClose, onConfirm, children }: {
   title: string
   description: string
   confirmLabel: string
   busy?: boolean
+  /** `danger` (the default) paints the confirm button red. Not every confirmation
+   *  is a deletion: reclaiming space is maintenance, and a red button there teaches
+   *  the reader that red does not mean anything in particular. */
+  tone?: "danger" | "default"
   onClose: () => void
   onConfirm: () => void
   children?: React.ReactNode
@@ -211,7 +215,7 @@ function ConfirmDialog({ title, description, confirmLabel, busy = false, onClose
         {children}
         <DialogFooter className="border-t pt-4">
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
+          <Button variant={tone === "danger" ? "destructive" : "default"} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1598,6 +1602,16 @@ function Ping({ nodes }: { nodes: Node[] }) {
   	)
   }
   if (!loaded) return <PageSkeleton shape="list" rows={3} />
+
+  // 一个监控都没有时，空表格只会让人以为坏了。这里说明它是空的、以及去哪儿加。
+  if (tasks.length === 0) {
+    return (
+      <EmptyState
+        title="还没有监控"
+        hint="右上角「添加监控」可以加一条：选 TCP 或 ICMP，勾上要跑它的节点，延迟与丢包就有了。"
+      />
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -3232,8 +3246,10 @@ function Data() {
           title="回收空间？"
           description="超出保留天数的历史明细会被删除，然后重建数据库文件。累计流量不受影响。"
           confirmLabel="开始回收"
+            tone="default"
           busy={!!busy}
-          onClose={() => setConfirm(null)}
+          onClose={() =
+setConfirm(null)}
           onConfirm={vacuum}
         />
       )}
