@@ -349,9 +349,8 @@ not_started() {
 # only once it actually got through. So the process check above cannot tell
 # "reporting" from "retrying" -- this waits for the first connection.
 wait_for_connected() {
-	local deadline
-	deadline=$(( $(date +%s) + 10 ))
-	while [ "$(date +%s)" -lt "$deadline" ]; do
+	wait_deadline=$(( $(date +%s) + 10 ))
+	while [ "$(date +%s)" -lt "$wait_deadline" ]; do
 		if [ "$INIT" = openrc ]; then
 			tail -n +"$1" "$LOG_FILE" 2>/dev/null | grep -q 'connected to' && return 0
 		else
@@ -365,32 +364,32 @@ wait_for_connected() {
 # What to say at the end, and it says what was *checked*: the process, whether it
 # reached the hub, and the command that proves ICMP works without the hub at all.
 report_started() {
-	local pid gid low high log_base hint
-	log_base="$1"
-	hint="$2"
+	report_base="$1"
+	report_hint="$2"
 	if [ "$INIT" = openrc ]; then
-		pid=$(pidof monitor-agent 2>/dev/null || echo unknown)
+		report_pid=$(pidof monitor-agent 2>/dev/null || echo unknown)
 	else
-		pid=$(systemctl show -p MainPID --value monitor-agent 2>/dev/null || echo unknown)
+		report_pid=$(systemctl show -p MainPID --value monitor-agent 2>/dev/null || echo unknown)
 	fi
-	echo "monitor-agent is running (pid $pid)"
-	if wait_for_connected "$log_base"; then
+	echo "monitor-agent is running (pid $report_pid)"
+	if wait_for_connected "$report_base"; then
 		echo "connected to $SERVER"
 	else
-		echo "warning: running, but it did not reach $SERVER within 10s -- see: $2" >&2
+		echo "warning: running, but it did not reach $SERVER within 10s -- see: $report_hint" >&2
 	fi
 	echo "check it by hand (no hub needed): $BIN --ping 1.1.1.1"
 	# ICMP needs either this range to cover the agent's gid or CAP_NET_RAW on the
 	# service. `1 0` is the kernel default and allows nobody -- which is what a
 	# real machine turned out to have.
-	gid=$(id -g monitor-agent 2>/dev/null || echo "")
+	report_gid=$(id -g monitor-agent 2>/dev/null || echo "")
 	range=$(sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo "")
-	if [ -n "$gid" ] && [ -n "$range" ]; then
+	if [ -n "$report_gid" ] && [ -n "$range" ]; then
+		# shellcheck disable=SC2086 -- deliberate: split "low high" into two words
 		set -- $range
-		low=$1
-		high=$2
-		if [ -n "$low" ] && [ -n "$high" ] && { [ "$gid" -lt "$low" ] || [ "$gid" -gt "$high" ]; }; then
-			echo "warning: net.ipv4.ping_group_range is \"$range\" and does not cover monitor-agent's gid ($gid);" >&2
+		report_low=$1
+		report_high=$2
+		if [ -n "$report_low" ] && [ -n "$report_high" ] && { [ "$report_gid" -lt "$report_low" ] || [ "$report_gid" -gt "$report_high" ]; }; then
+			echo "warning: net.ipv4.ping_group_range is \"$range\" and does not cover monitor-agent's gid ($report_gid);" >&2
 			echo "         ICMP probes will report a permission problem until it does (see the docs)" >&2
 		fi
 	fi
