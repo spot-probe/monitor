@@ -1633,9 +1633,12 @@ function Ping({ nodes }: { nodes: Node[] }) {
                       so a badge on every row would be noise; what a reader needs to see is
                       the probe that is **not** a handshake -- it is also the one that can
                       fail for a reason the row has to explain. */}
-                  {t.kind === "icmp" && (
-                    <span className="ml-2 rounded border px-1.5 py-0.5 text-xs text-muted-foreground">ICMP</span>
-                  )}
+                  {/* Both kinds are labelled now. With two probe types in one list the
+                      *absence* of a label reads as "unknown" rather than as "the default",
+                      which is what the operator asked after seeing ICMP next to nothing. */}
+                  <span className="ml-2 rounded border px-1.5 py-0.5 text-xs text-muted-foreground">
+                    {t.kind === "icmp" ? "ICMP" : "TCP"}
+                  </span>
                 </TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
