@@ -384,7 +384,9 @@ report_started() {
 	report_gid=$(id -g monitor-agent 2>/dev/null || echo "")
 	range=$(sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo "")
 	if [ -n "$report_gid" ] && [ -n "$range" ]; then
-		# shellcheck disable=SC2086 -- deliberate: split "low high" into two words
+		# Deliberate: this is word splitting, not a missing quote -- `"1 0"` has to
+		# become two words.
+		# shellcheck disable=SC2086
 		set -- $range
 		report_low=$1
 		report_high=$2
