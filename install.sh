@@ -344,6 +344,58 @@ not_started() {
 	exit 1
 }
 
+# "Active" only means the process did not exit: an agent with a wrong token or
+# address stays active while it redials forever, and the log says `connected to`
+# only once it actually got through. So the process check above cannot tell
+# "reporting" from "retrying" -- this waits for the first connection.
+wait_for_connected() {
+	local deadline
+	deadline=$(( $(date +%s) + 10 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if [ "$INIT" = openrc ]; then
+			tail -n +"$1" "$LOG_FILE" 2>/dev/null | grep -q 'connected to' && return 0
+		else
+			journalctl -u monitor-agent --since "$START_STAMP" --no-pager 2>/dev/null | grep -q 'connected to' && return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+# What to say at the end, and it says what was *checked*: the process, whether it
+# reached the hub, and the command that proves ICMP works without the hub at all.
+report_started() {
+	local pid gid low high log_base hint
+	log_base="$1"
+	hint="$2"
+	if [ "$INIT" = openrc ]; then
+		pid=$(pidof monitor-agent 2>/dev/null || echo unknown)
+	else
+		pid=$(systemctl show -p MainPID --value monitor-agent 2>/dev/null || echo unknown)
+	fi
+	echo "monitor-agent is running (pid $pid)"
+	if wait_for_connected "$log_base"; then
+		echo "connected to $SERVER"
+	else
+		echo "warning: running, but it did not reach $SERVER within 10s -- see: $2" >&2
+	fi
+	echo "check it by hand (no hub needed): $BIN --ping 1.1.1.1"
+	# ICMP needs either this range to cover the agent's gid or CAP_NET_RAW on the
+	# service. `1 0` is the kernel default and allows nobody -- which is what a
+	# real machine turned out to have.
+	gid=$(id -g monitor-agent 2>/dev/null || echo "")
+	range=$(sysctl -n net.ipv4.ping_group_range 2>/dev/null || echo "")
+	if [ -n "$gid" ] && [ -n "$range" ]; then
+		set -- $range
+		low=$1
+		high=$2
+		if [ -n "$low" ] && [ -n "$high" ] && { [ "$gid" -lt "$low" ] || [ "$gid" -gt "$high" ]; }; then
+			echo "warning: net.ipv4.ping_group_range is \"$range\" and does not cover monitor-agent's gid ($gid);" >&2
+			echo "         ICMP probes will report a permission problem until it does (see the docs)" >&2
+		fi
+	fi
+}
+
 if [ "$INIT" = openrc ]; then
 	cat >"$RC_FILE" <<RC
 #!/sbin/openrc-run
@@ -368,6 +420,7 @@ start_pre() {
 RC
 	chmod 0755 "$RC_FILE"
 	rc-update add monitor-agent default >/dev/null
+LOG_BASE=$(( $(wc -l <"$LOG_FILE" 2>/dev/null || echo 0) + 1 ))
 	rc-service monitor-agent restart
 	# supervise-daemon reports the service started while it respawns an agent
 	# that exits at once, so the process itself is what is looked for, inside
@@ -376,7 +429,7 @@ RC
 	sleep 3
 	pidof monitor-agent >/dev/null || not_started "$LOG_FILE"
 	rm -f "$BIN.old"
-	echo "monitor-agent installed; follow it with: tail -f $LOG_FILE"
+report_started "$LOG_BASE" "$LOG_FILE"
 	exit 0
 fi
 
@@ -415,6 +468,7 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable monitor-agent >/dev/null
+START_STAMP=$(date '+%Y-%m-%d %H:%M:%S')
 # restart rather than `enable --now`: --now leaves an already-running service
 # untouched, so reinstalling over a live agent would keep the old binary
 # running.
@@ -427,4 +481,4 @@ systemctl restart monitor-agent
 sleep 3
 systemctl is-active --quiet monitor-agent || not_started "journalctl -u monitor-agent -n 20"
 rm -f "$BIN.old"
-echo "monitor-agent installed; follow it with: journalctl -u monitor-agent -f"
+report_started 1 "journalctl -u monitor-agent -n 20"
