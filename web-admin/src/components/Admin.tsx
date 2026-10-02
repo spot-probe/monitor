@@ -2168,12 +2168,8 @@ function Themes() {
   }
 
   if (!themes) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-28" />
-        <Skeleton className="h-64" />
-      </div>
-    )
+  	// 统一到共享原语：形状按该页实际长相给（这里分别是卡片网格与表格）。
+  	return <PageSkeleton shape="cards" rows={4} />
   }
   return (
     <div className="space-y-4">
@@ -2860,12 +2856,8 @@ function Sessions() {
   }
 
   if (!rows) {
-    return (
-      <Card className="gap-4 p-5">
-        <Skeleton className="h-5 w-24" />
-        <Skeleton className="h-40" />
-      </Card>
-    )
+  	// 统一到共享原语：形状按该页实际长相给（这里分别是卡片网格与表格）。
+  	return <PageSkeleton shape="list" rows={5} />
   }
   return (
     <Card className="gap-4 p-5">
