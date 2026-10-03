@@ -3611,14 +3611,22 @@ export const ADMIN_SECTIONS = [
     ],
   },
   {
-    group: "系统设置",
-    items: [
-      { path: "/admin/notify", label: "通知", icon: Bell },
-      { path: "/admin/themes", label: "主题", icon: Palette },
-      { path: "/admin/security", label: "安全", icon: Shield },
-      { path: "/admin/settings", label: "设置", icon: Settings },
-      { path: "/admin/update", label: "更新", icon: ArrowUpCircle },
-    ],
+  	group: "站点配置",
+  	// 这一组是「这个 hub 自己的配置」：叫什么、留多久数据、对外长什么样。
+  	// 顺序按动它的频率：主题比设置常改，所以在前。
+  	items: [
+  		{ path: "/admin/themes", label: "主题", icon: Palette },
+  		{ path: "/admin/settings", label: "设置", icon: Settings },
+  	],
+  },
+  {
+  	group: "系统运维",
+  	// 这一组是「把它维持好」：出问题谁知道（通知）、谁能进来（安全）、跑的是哪个版本（更新）。
+  	items: [
+  		{ path: "/admin/notify", label: "通知", icon: Bell },
+  		{ path: "/admin/security", label: "安全", icon: Shield },
+  		{ path: "/admin/update", label: "更新", icon: ArrowUpCircle },
+  	],
   },
 ]
 
