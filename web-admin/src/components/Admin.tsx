@@ -2926,7 +2926,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       		<h4 className="flex items-center gap-2 text-sm font-medium">
       			<Bell className="size-4 text-muted-foreground" /> 消息提醒开关
       		</h4>
-      		<div className="divide-y">
+      		{/* 开关之间不画分割线：它们是并列的独立开关，一条线会读成「分组的上下两半」。
+      		    以后新增的开关直接加进这个列表，同样不带线。 */}
+      		<div>
       			<div className="flex items-center justify-between gap-4 rounded-lg py-3.5 transition-colors hover:bg-muted/40">
       				<span className="min-w-0">
       					<span id="notify-login-label" className="block text-sm font-medium">登录后台时提醒</span>
