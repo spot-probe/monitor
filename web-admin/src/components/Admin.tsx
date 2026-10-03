@@ -3021,6 +3021,7 @@ function Sessions() {
       toast.error((e as Error).message)
     } finally {
       setBusy("")
+      setDoomed(null)
     }
   }
 
