@@ -2569,63 +2569,76 @@ function SettingsTab() {
 
   return (
     <div className="space-y-4">
-      <Card className="gap-4 p-5">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="站点名称">
-            <Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
-          </Field>
-          <Field
-            label="历史数据保留天数"
-            hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
-          >
-            <Input
-              type="number"
-              min={1}
-              max={365}
-              value={String(s.retention_days ?? "")}
-              onChange={(e) => set("retention_days", e.target.value)}
-              placeholder="90"
-            />
-          </Field>
-          <Field
-            label="GitHub 代理"
-            hint="留空直连。仅在 hub 自己拉不到 GitHub Release 时填。这个地址返回的字节会被安装到每一台节点上，只填信得过的镜像"
-          >
-            <Input
-              value={String(s.github_proxy ?? "")}
-              onChange={(e) => set("github_proxy", e.target.value)}
-              placeholder="https://ghfast.top"
-            />
-          </Field>
-        </div>
-        {/* 不是 <label>：点文字不该切换开关，只有开关自己可点。
-            aria-labelledby 保住读屏软件那边的关联。 */}
-        <div className="flex items-center gap-2 text-sm">
-          <Switch
-            aria-labelledby="public-page-label"
-            checked={s.public_page !== "off"}
-            onCheckedChange={(v) => set("public_page", v ? "on" : "off")}
-          />
-          <span id="public-page-label">开放公开状态页，关闭后所有页面需登录</span>
-        </div>
-        <div>
-          <Button
-            size="sm"
-            onClick={() =>
-              save({
-                site_name: String(s.site_name ?? ""),
-                // `||` rather than `??`: the hub returns "" for an unset key
-                // rather than null, and "" is the one value this key's write path
-                // refuses.
-                retention_days: String(s.retention_days || "90"),
-                github_proxy: String(s.github_proxy ?? ""),
-                public_page: s.public_page === "off" ? "off" : "on",
-              })
-            }
-          >
-            保存站点设置
-          </Button>
-        </div>
+      <Card className="gap-6 p-6">
+      	<h3 className="flex items-center gap-2 text-base font-semibold">
+      		<Settings className="size-4 text-muted-foreground" /> 站点基本设置
+      	</h3>
+
+      	{/* 单列，而不是两列：这几项的说明长短差得多，两列时右边被撑高、左边留一大片空白。
+      	    说明放在输入框下方（这里的最长有两行），输入框本身限宽，免得在宽屏上拉成一条长线。 */}
+      	<div className="space-y-6">
+      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" className="max-w-lg">
+      			<Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
+      		</Field>
+      		<Field
+      			label="历史数据保留天数"
+      			suffix="天"
+      			className="max-w-xs"
+      			hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
+      		>
+      			<Input
+      				type="number"
+      				min={1}
+      				max={365}
+      				className="pr-9"
+      				value={String(s.retention_days ?? "")}
+      				onChange={(e) => set("retention_days", e.target.value)}
+      				placeholder="90"
+      			/>
+      		</Field>
+      		<Field
+      			label="GitHub 代理"
+      			className="max-w-lg"
+      			hint="留空直连。仅在 hub 自己拉不到 GitHub Release 时填。这个地址返回的字节会被安装到每一台节点上，只填信得过的镜像"
+      		>
+      			<Input value={String(s.github_proxy ?? "")} onChange={(e) => set("github_proxy", e.target.value)} placeholder="https://ghfast.top" />
+      		</Field>
+      	</div>
+
+      	{/* 与上面分开：这是「网站对外可见性」，不是站点基本信息。整行可读、右端对齐，
+      	    与通知页的开关行同一套写法。 */}
+      	<div className="flex items-center justify-between gap-4 border-t pt-5">
+      		<span className="min-w-0">
+      			<span id="public-page-label" className="block text-sm font-medium">开放公开状态页</span>
+      			<span className="mt-0.5 block text-xs text-muted-foreground">关闭后所有页面需登录才能访问</span>
+      		</span>
+      		<Switch
+      			className="shrink-0"
+      			aria-labelledby="public-page-label"
+      			checked={s.public_page !== "off"}
+      			onCheckedChange={(v) => set("public_page", v ? "on" : "off")}
+      		/>
+      	</div>
+
+      	{/* 分割线之上是读的部分，之下只剩提交。 */}
+      	<div className="flex justify-end gap-2 border-t pt-4">
+      		<Button
+      			size="sm"
+      			onClick={() =>
+      				save({
+      					site_name: String(s.site_name ?? ""),
+      					// `||` rather than `??`: the hub returns "" for an unset key
+      					// rather than null, and "" is the one value this key's write path
+      					// refuses.
+      					retention_days: String(s.retention_days || "90"),
+      					github_proxy: String(s.github_proxy ?? ""),
+      					public_page: s.public_page === "off" ? "off" : "on",
+      				})
+      			}
+      		>
+      			保存站点设置
+      		</Button>
+      	</div>
       </Card>
     </div>
   )
