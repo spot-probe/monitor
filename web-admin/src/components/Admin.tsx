@@ -1503,35 +1503,55 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
-/// 折线图：把若干条序列画在同一个坐标系里。
+/// 分位数（输入需已排序）。区间带取 P25–P75，线取 P50 / P90 / P99。
+function pctl(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const i = (sorted.length - 1) * p
+  const lo = Math.floor(i)
+  const hi = Math.ceil(i)
+  return lo === hi ? sorted[lo] : Math.round(sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo))
+}
+
+/// 百分位区间带：一张图同时回答「趋势」与「离散」。
 ///
-/// 手写 SVG 而不是引图表库：面板的首屏体积是量过的（一个 bundle 471 KB），为了两张图再塞进
-/// 100 KB 与「把它拆小」的方向相反。纵轴从 0 起 —— 不截断轴，代价是差异看起来比实际小，但那才是真的。
-function LineChart({ lines, height = 150 }: {
-  lines: { key: string; points: { ts: number; latency: number }[]; className?: string; width?: number }[]
+/// 原来这里是「合并线 + 最差三台」的折线图，旁边另有一张蜂群图看当前分布。区间带把两件事合起来：
+/// 中间那层带子是 P25–P75（一半的节点落在里面），P50 是中位数，P90/P99 是长尾。于是既看得见趋势，
+/// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
+/// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
+function BandChart({ points, height = 150 }: {
+  points: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[]
   height?: number
 }) {
-  const all = lines.flatMap((l) => l.points)
-  if (all.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
-  const t0 = Math.min(...all.map((p) => p.ts))
-  const t1 = Math.max(...all.map((p) => p.ts))
-  const hi = Math.max(1, ...all.map((p) => p.latency)) * 1.08
+  if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
+  const t0 = Math.min(...points.map((p) => p.ts))
+  const t1 = Math.max(...points.map((p) => p.ts))
+  const hi = Math.max(1, ...points.map((p) => p.p99)) * 1.08
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
   const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
+  const line = (f: (q: (typeof points)[number]) => number) =>
+    points.map((q) => `${x(q.ts).toFixed(1)},${y(f(q)).toFixed(1)}`).join(" ")
+  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形。
+  const band = `${points.map((q) => `${x(q.ts).toFixed(1)},${y(q.p75).toFixed(1)}`).join(" ")} ${[...points]
+    .reverse()
+    .map((q) => `${x(q.ts).toFixed(1)},${y(q.p25).toFixed(1)}`)
+    .join(" ")}`
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
-    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="各节点延迟随时间的变化">
+    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-      {lines.map((l) =>
-        l.points.length > 1 ? (
-          <polyline key={l.key} fill="none" stroke="currentColor" className={l.className} strokeWidth={l.width ?? 1.25}
-            vectorEffect="non-scaling-stroke"
-            points={l.points.map((p) => `${x(p.ts).toFixed(1)},${y(p.latency).toFixed(1)}`).join(" ")} />
-        ) : null,
-      )}
+      <polygon points={band} className="fill-primary/15" />
+      <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。图例已写明哪条是 P50，所以这里
+          只写数字。线是锯齿状的，标签放哪一段都会压上去 —— 于是给它垫一层与图底同色的底片。 */}
+      <rect x={w - 52} y={y(points[points.length - 1].p50) - 15} width={50} height={14} rx="3" className="fill-muted" />
+      <text x={w - 4} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
+        {points[points.length - 1].p50} ms
+      </text>
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -1540,30 +1560,64 @@ function LineChart({ lines, height = 150 }: {
   )
 }
 
-/// 点带图：每台节点一个圆点落在延迟轴上，回答「这个离群有多离群」——
-/// 是「一两个孤点」还是「整片右移」。纵轴随意错开几像素，只为让重叠的点看得见。
-function DotStrip({ values, marker, className = "" }: { values: number[]; marker?: number | null; className?: string }) {
-  if (values.length === 0) return null
+/// 按分位数切成 n 桶的切点（延迟的「正常」取决于目标，所以不写死毫秒阈值）。
+function bucketCuts(sorted: number[], n: number): number[] {
+  const cuts: number[] = []
+  for (let i = 1; i < n; i++) cuts.push(pctl(sorted, i / n))
+  return cuts
+}
+
+/// 某个值落在第几桶（0 起）。
+function bucketOf(v: number, cuts: number[]): number {
+  let i = 0
+  while (i < cuts.length && v > cuts[i]) i++
+  return i
+}
+
+/// 分桶直方图。替换原来的蜂群图 —— 散点看不出「一个簇里到底是 12 台还是 15 台」，直方图直接给数。
+/// 桶按分位数切，并把每桶真实的毫秒区间标出来；点某一桶会把下面的明细筛成那几台。
+function Histogram({ values, picked, onPick }: {
+  values: number[]
+  picked: number | null
+  onPick: (i: number | null) => void
+}) {
+  const s = [...values].sort((x, y) => x - y)
+  if (s.length < 4) return <p className="px-1 py-2 text-xs text-muted-foreground">节点太少，分不出分布。</p>
+  const cuts = bucketCuts(s, 5)
+  const counts = new Array(5).fill(0)
+  for (const v of s) counts[bucketOf(v, cuts)]++
+  const max = Math.max(...counts, 1)
   const w = 640
-  const h = 56
-  const base = h - 12
-  const hi = Math.max(1, ...values, marker ?? 0) * 1.06
-  const x = (v: number) => (v / hi) * w
+  const h = 96
+  const bw = w / 5
+  const label = (i: number) => {
+    const lo = i === 0 ? 0 : cuts[i - 1]
+    const hi = i === 4 ? null : cuts[i]
+    return hi == null ? `> ${lo} ms` : i === 0 ? `≤ ${hi} ms` : `${lo}–${hi} ms`
+  }
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className={className} role="img" aria-label="各节点平均延迟的分布">
-      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-      {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
-      {marker != null && (
-        <>
-          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-primary/70" strokeWidth="1" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
-          <text x={x(marker) + 3} y={12} fontSize="9" className="fill-muted-foreground">{marker} ms</text>
-        </>
-      )}
-      <text x="0" y={h - 2} fontSize="9" className="fill-muted-foreground">0</text>
-      <text x={w} y={h - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" role="img" aria-label="各节点平均延迟的分桶分布">
+      {counts.map((c, i) => {
+        const bh = Math.max(2, (c / max) * (h - 46))
+        const on = picked === i
+        return (
+          <g key={i} role="button" tabIndex={0} aria-pressed={on} aria-label={`${label(i)}：${c} 台`}
+              onClick={() => onPick(on ? null : i)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(on ? null : i) } }}
+              className="cursor-pointer outline-none focus-visible:opacity-80">
+            <rect x={i * bw + 4} y={2} width={bw - 8} height={h - 28} className={on ? "fill-muted" : "fill-transparent"} />
+            <rect x={i * bw + 10} y={h - 16 - bh} width={bw - 20} height={bh} rx="2"
+              className={i === 4 ? "fill-warn-fg/60" : i === 3 ? "fill-primary/45" : "fill-primary/30"}
+              stroke="currentColor" strokeWidth={on ? 1.5 : 0} vectorEffect="non-scaling-stroke" />
+            <text x={i * bw + bw / 2} y={h - 22 - bh} fontSize="10" textAnchor="middle" className="fill-foreground">{c}</text>
+            <text x={i * bw + bw / 2} y={h - 6} fontSize="9" textAnchor="middle" className="fill-muted-foreground">{label(i)}</text>
+          </g>
+        )
+      })}
     </svg>
   )
 }
+
 
 function Ping({ nodes }: { nodes: Node[] }) {
 	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
@@ -1579,7 +1633,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -1591,8 +1645,8 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
-	// 图例点中的是哪一台：其余折线淡出，用来在噪声里跟住一条线。null = 都不淡。
-	const [picked, setPicked] = useState<number | null>(null)
+	// 直方图点中的桶：null = 不过滤。切点按当前这批节点均值的分位数算，不写死毫秒。
+	const [bucket, setBucket] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1670,6 +1724,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			const series = ordered.map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
 			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
 			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
+			// 分位数：把同一时刻所有节点的样本排序后取。前端算得出来 —— 所以这件事不需要新接口。
+			const pct = ordered.map(([ts, samples]) => {
+				const s = [...samples].sort((x, y) => x - y)
+				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99) }
+			})
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
@@ -1677,6 +1736,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
           loss: Math.round(Math.max(0, ...(loss.get(taskId) ?? [0]))),
 					series,
 					points,
+					pct,
         }
       }
 		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
@@ -1902,7 +1962,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   	<Button
                   		variant="ghost"
                   		size="icon"
-                  		onClick={() => { setPicked(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
+                  		onClick={() => { setBucket(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
                   		title="节点明细"
                   		aria-label="节点明细"
                   		aria-expanded={openNodes === t.id}
@@ -2078,7 +2138,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
       		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
       		<DialogContent
-				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-3xl"
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-4xl"
 				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
 				onOpenAutoFocus={(e) => e.preventDefault()}
 			>
@@ -2099,18 +2159,20 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			{(() => {
       		const all = perNode[openTask.id] ?? []
       		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
+      		// 分位数切点只算一次：直方图与明细筛选共用同一套桶，点柱子才会得到相符的行。
+      		const avgSorted = all.map((p) => p.avg ?? 0).sort((x, y) => x - y)
+      		const cuts = bucketCuts(avgSorted, 5)
+      		const rows = bucket == null ? all : all.filter((p) => bucketOf(p.avg ?? 0, cuts) === bucket)
       		const top = all[0]
       		const line = stats[openTask.id]?.last ?? null
       							// 条以列表值为中线，按最大偏差归一：这几台的绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
       		const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
       		const dev = (v: number) => v - (line ?? v)
-      		const merged = stats[openTask.id]?.points ?? []
-      		const worst3 = all.slice(0, 3)
-      							const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
+      		const pct = stats[openTask.id]?.pct ?? []
       		return (
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
-      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
+      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted py-3">
       					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
       						<div key={k as string} className="px-4">
       							<div className="text-xs text-muted-foreground">{k as string}</div>
@@ -2121,47 +2183,46 @@ function Ping({ nodes }: { nodes: Node[] }) {
       					))}
       				</div>
 
-      				{merged.length > 1 && (
-      					<section className="mt-6 border-t border-foreground/20 pt-5">
+      				{pct.length > 1 && (
+      					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-      							<h4 className="text-sm font-semibold">延迟随时间</h4>
+      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
       							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
-      								<span className="text-muted-foreground">— 列表值</span>
-      								{worst3.map((p, i) => (
-      									<button key={p.node} type="button" aria-pressed={picked === p.node} title="点击只看这一条" onClick={() => setPicked(picked === p.node ? null : p.node)} className={`rounded px-1 transition-opacity hover:bg-muted ${colours[i]} ${picked == null || picked === p.node ? "" : "opacity-30"}`}>— {nodeName(p.node)} · {p.avg} ms</button>
-      								))}
+      								<span className="text-primary">— P50 中位数</span>
+      								<span className="text-warn-fg/70">— P90</span>
+      								<span className="text-warn-fg">— P99（最慢的那批）</span>
+      								<span className="text-primary/60">▉ 中间一半的节点（P25–P75）</span>
       							</div>
       						</div>
-      						<div className="rounded-lg bg-muted/40 p-3">
-				<LineChart
-      							lines={[
-      								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
-      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, width: picked === p.node ? 2.5 : 1.25, className: `${colours[i]}${picked == null || picked === p.node ? "" : " opacity-15"}` })),
-      							]}
-      						/>
+      						<div className="rounded-lg bg-muted p-3">
+				<BandChart points={pct} />
 			</div>
       					</section>
       				)}
 
-      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
-      						<h4 className="text-sm font-semibold">各节点平均</h4>
-      						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
+      						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点平均<Help>每台节点一个圆点，落在延迟轴上；竖线是上面那个列表值。纵轴上的错开只是为了不让重叠的点盖住彼此。</Help></h4>
       					</div>
-      					<div className="rounded-lg bg-muted/40 p-3">
-				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+      					<div className="rounded-lg bg-muted p-3">
+				<Histogram values={all.map((p) => p.avg ?? 0)} picked={bucket} onPick={setBucket} />
+				{bucket != null && (
+					<p className="mt-1 flex flex-wrap items-baseline gap-x-2 text-xs">
+						<span>只看第 {bucket + 1} 桶（{rows.length} 台）</span>
+						<button type="button" onClick={() => setBucket(null)} className="text-primary underline underline-offset-2">显示全部</button>
+					</p>
+				)}
 			</div>
       				</section>
 
-      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
-      						<h4 className="text-sm font-semibold">各节点明细</h4>
-      						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
+      						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点明细<Help>条形以列表值为中线：向右更慢、向左更快，条长按这些节点里最大的偏差归一。按最差在前排序。</Help></h4>
       					</div>
       					{/* 明细自己滚：上面两张图因此始终留在视野里，往下看节点时不用来回翻。这里给一个有边界
       					    的滚动区，是因为它**确实是**一个滚动区 —— 框线在标这件事，不是为了套卡片。 */}
       					<div className="mt-2 max-h-[42vh] overflow-y-auto overscroll-contain rounded-lg border">
-	      					<div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background px-2 pb-1 text-xs text-muted-foreground">
+	      					<div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-muted px-2 pb-1 text-xs text-muted-foreground">
 				<span className="w-40 shrink-0">节点</span>
 				<span className="min-w-0 flex-1">延迟分布</span>
 				<span className="w-16 shrink-0 text-right">平均</span>
@@ -2169,7 +2230,8 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				<span className="w-14 shrink-0 text-right">探测</span>
 			</div>
 			<div className="mt-1 space-y-1">
-	      						{all.map((p) => (
+{rows.length === 0 && <p className="px-1 py-2 text-xs text-muted-foreground">这一桶里没有节点。</p>}
+	      						{rows.map((p) => (
 	      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
 	      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
 	      								<span className="relative h-2 min-w-0 flex-1 rounded-sm bg-foreground/10">
