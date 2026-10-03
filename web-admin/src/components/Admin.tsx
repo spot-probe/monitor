@@ -1119,12 +1119,16 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
   const [deleting, setDeleting] = useState<Node | null>(null)
   const [removing, setRemoving] = useState(false)
   const [query, setQuery] = useState("")
+	// 只看 agent 需要升级的节点。与「未分组」那条筛选项同样的取舍：没有可筛的东西时
+	// 不出现，否则工具栏上会多一个按下去什么也不改变的按钮。
+	const [onlyOutdated, setOnlyOutdated] = useState(false)
   const [group, setGroup] = useState("all")
   const drag = useDragOrder(nodes.map((node) => node.id), "/nodes/order", refresh)
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const order = drag.order.map((id) => byId.get(id)).filter((node): node is Node => Boolean(node))
   // Name and address, the two things a row is looked up by. `order` itself stays
   // whole, because the order sent on drop is the order of every node.
+	const outdatedCount = order.filter((n) => n.agent_old).length
   const needle = query.trim().toLowerCase()
   // The group names are whatever the nodes actually use -- there is no separate list
   // to keep in step, and a value stops offering itself as soon as no node carries it.
@@ -1136,6 +1140,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
     .filter((n) => group === "all" || (group === "" ? !n.group : n.group === group))
     .filter((n) =>
       !needle || [n.name, n.ip, n.ipv4, n.ipv6, n.ipv4_pin, n.ipv6_pin].some((v) => v?.toLowerCase().includes(needle)))
+    .filter((n) => !onlyOutdated || n.agent_old)
   // Offered on the same terms as the install command: only where this panel is
   // the https domain entry an install command can name.
   const uninstall = canProvision ? uninstallCommand(site) : ""
@@ -1179,6 +1184,15 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+          {outdatedCount > 0 && (
+          	<Button
+          		variant={onlyOutdated ? "default" : "outline"}
+          		onClick={() => setOnlyOutdated((v) => !v)}
+          		title="只看 agent 需要升级的节点"
+          	>
+          		{onlyOutdated ? "只看待升级（点掉）" : `待升级 ${outdatedCount}`}
+          	</Button>
+          )}
         {/* An open window is visible from the list itself, so nobody has to
             remember they left one open. */}
         <Button variant="outline" disabled={!canProvision} onClick={() => setRegistering(true)}>
