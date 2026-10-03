@@ -2137,7 +2137,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
       		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
       		<DialogContent
-				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-5xl"
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-4xl"
 				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
 				onOpenAutoFocus={(e) => e.preventDefault()}
 			>
