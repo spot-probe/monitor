@@ -151,7 +151,8 @@ function Field({ label, hint, help, suffix, className = "", row = false, icon, c
   // row：一项压成一行 —— 标签与控件在左，说明在右。竖排时三行说明把卡片撑得很高，
   // 而它们本来就短；横排后一眼能扫完。单位仍是输入框内部的 suffix，与竖排同一套写法。
   // row：一项一行，且三列真的对齐（标签 / 控件 / 说明）——每行各自 flex 时列会参差。
-  // 关联改用 htmlFor + useId：标签不再是控件的父节点，但屏幕阅读器与点击仍然对得上。
+  // 关联仍靠 Label 包住控件（不用 htmlFor + useId）：两者只做兄弟时读屏念不出输入框的名字，
+  // 27 个输入框共用这一条。早前试过 id 关联，已推翻 —— 注释留在原处只会误导后来的人。
   // 外层不套小卡片：背景与圆角叠在一起会让整块发闷，分组交给分割线。
   // row：一项一行。控件仍然**放在 Label 里面**（关联靠这个，不靠 id：两者只做兄弟时
   // 读屏念不出输入框的名字，这一条 27 个输入框共用，不能破）。列之所以能跨行对齐，是因为
@@ -1501,7 +1502,71 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
+/// 折线图：把若干条序列画在同一个坐标系里。
+///
+/// 手写 SVG 而不是引图表库：面板的首屏体积是量过的（一个 bundle 471 KB），为了两张图再塞进
+/// 100 KB 与「把它拆小」的方向相反。纵轴从 0 起 —— 不截断轴，代价是差异看起来比实际小，但那才是真的。
+function LineChart({ lines, height = 150 }: {
+  lines: { key: string; points: { ts: number; latency: number }[]; className?: string; width?: number }[]
+  height?: number
+}) {
+  const all = lines.flatMap((l) => l.points)
+  if (all.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
+  const t0 = Math.min(...all.map((p) => p.ts))
+  const t1 = Math.max(...all.map((p) => p.ts))
+  const hi = Math.max(1, ...all.map((p) => p.latency)) * 1.08
+  const w = 640
+  const pad = 14
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
+  const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
+  const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="各节点延迟随时间的变化">
+      <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+      {lines.map((l) =>
+        l.points.length > 1 ? (
+          <polyline key={l.key} fill="none" stroke="currentColor" className={l.className} strokeWidth={l.width ?? 1.25}
+            vectorEffect="non-scaling-stroke"
+            points={l.points.map((p) => `${x(p.ts).toFixed(1)},${y(p.latency).toFixed(1)}`).join(" ")} />
+        ) : null,
+      )}
+      <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+      <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
+      <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
+      <text x={w} y={height - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{clock(t1)}</text>
+    </svg>
+  )
+}
+
+/// 点带图：每台节点一个圆点落在延迟轴上，回答「这个离群有多离群」——
+/// 是「一两个孤点」还是「整片右移」。纵轴随意错开几像素，只为让重叠的点看得见。
+function DotStrip({ values, marker, className = "" }: { values: number[]; marker?: number | null; className?: string }) {
+  if (values.length === 0) return null
+  const w = 640
+  const h = 56
+  const base = h - 12
+  const hi = Math.max(1, ...values, marker ?? 0) * 1.06
+  const x = (v: number) => (v / hi) * w
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className={className} role="img" aria-label="各节点平均延迟的分布">
+      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
+      {marker != null && (
+        <>
+          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-primary/70" strokeWidth="1" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
+          <text x={x(marker) + 3} y={12} fontSize="9" className="fill-muted-foreground">{marker} ms</text>
+        </>
+      )}
+      <text x="0" y={h - 2} fontSize="9" className="fill-muted-foreground">0</text>
+      <text x={w} y={h - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+    </svg>
+  )
+}
+
 function Ping({ nodes }: { nodes: Node[] }) {
+	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
+	const nodeName = (id: number) => nodes.find((n) => n.id === id)?.name ?? `节点 ${id}`
   const [tasks, setTasks] = useState<PingTask[]>([])
   // The list starts empty, so an empty-state check on `tasks.length` alone fires while the
   // first fetch is still in flight and tells the operator there are no probes. Themes and
@@ -1513,13 +1578,20 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
 	// 与 errors 分开：errors 是 agent **报回来**的原因，needs 是 hub **自己就知道**的事实
 	// （节点 agent 太旧、这种探测根本跑不了）。前者是「探测在失败」，后者是「探测还没开始」。
 	const [probeNeeds, setProbeNeeds] = useState<PingError[]>([])
+	// 逐节点的数字。上面那条线是各节点按时戳**平均**后的结果 —— 一台机器慢，平均线看不出来，
+	// 而合并后的丢包取的是最差的那台、却不说是哪台。这里把每个节点自己的均值/丢包/样本留下来。
+	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
+	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
+	const [openNodes, setOpenNodes] = useState<number | null>(null)
+	// 图例点中的是哪一台：其余折线淡出，用来在噪声里跟住一条线。null = 都不淡。
+	const [picked, setPicked] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1561,33 +1633,61 @@ function Ping({ nodes }: { nodes: Node[] }) {
     ).then((answers) => {
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
+		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
+		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
+		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; points: { ts: number; latency: number }[] }>>()
+		// 逐节点记录：延迟求和/次数（最后再除）、丢包、以及**该节点自己的序列** ——
+		// 序列是用来画每行那条迷你曲线的：一直慢与偶尔尖峰，均值分不出来。
+		const at = (taskId: number, node: number) => {
+			const per = byNode.get(taskId) ?? new Map()
+			if (!per.has(node)) per.set(node, { sum: 0, n: 0, loss: null, points: [] })
+			byNode.set(taskId, per)
+			return per.get(node)!
+		}
       const loss = new Map<number, number[]>()
-      for (const [, d] of answers) {
+      for (const [nid, d] of answers) {
         if (!d) continue
         for (const p of d.ping ?? []) {
           if (p.latency === null || p.latency === undefined) continue
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
+				// 同一节点、同一任务的样本累加（延迟求和与次数分开存，最后再除）。
+				const entry = at(p.task_id, nid)
+				entry.sum += p.latency
+				entry.n += 1
+				entry.points.push({ ts: p.ts, latency: p.latency })
           buckets.set(p.task_id, perTask)
         }
         for (const [id, pct] of Object.entries(d.loss ?? {})) {
           loss.set(Number(id), [...(loss.get(Number(id)) ?? []), pct])
+				at(Number(id), nid).loss = pct
         }
       }
       const next: typeof stats = {}
       for (const [taskId, perTs] of buckets) {
-        const series = [...perTs.entries()]
-          .sort((a, b) => a[0] - b[0])
-          .map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
+			const ordered = [...perTs.entries()].sort((a, b) => a[0] - b[0])
+			const series = ordered.map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
+			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
+			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
           // the thing worth seeing in a list.
           loss: Math.round(Math.max(0, ...(loss.get(taskId) ?? [0]))),
-          series,
+					series,
+					points,
         }
       }
-      setStats(next)
+		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
+		// 「哪台在拖后腿」—— 合并后的那一行按定义把它藏了起来。
+		const per: typeof perNode = {}
+		for (const [taskId, perNodes] of byNode) {
+			per[taskId] = [...perNodes.entries()]
+				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n, points: v.points }))
+				.sort((a, b) => b.loss - a.loss || (b.avg ?? -1) - (a.avg ?? -1))
+		}
+		setPerNode(per)
+		setStats(next)
     })
     return () => {
       alive = false
@@ -1654,6 +1754,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   if (!loaded) return <PageSkeleton shape="list" rows={3} />
 
   // 一个监控都没有时，空表格只会让人以为坏了。这里说明它是空的、以及去哪儿加。
+  // 弹窗在看哪一条：列表里那一行给的是各节点的平均，逐节点要摊开看。
+  const openTask = ordered.find((t) => t.id === openNodes) ?? null
+
   if (tasks.length === 0) {
     return (
       <EmptyState
@@ -1793,6 +1896,19 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   )}
                 </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
+                  {/* 只有一台节点时，明细与上面那一行是同一个数字，所以不显示这个开关。 */}
+                  {t.nodes.length >= 2 && (
+                  	<Button
+                  		variant="ghost"
+                  		size="icon"
+                  		onClick={() => { setPicked(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
+                  		title="节点明细"
+                  		aria-label="节点明细"
+                  		aria-expanded={openNodes === t.id}
+                  	>
+                  		<ChevronRight className={`transition-transform ${openNodes === t.id ? "rotate-90" : ""}`} />
+                  	</Button>
+                  )}
                   <Button variant="ghost" size="icon" onClick={() => setEditing(t)} title="编辑监控" aria-label="编辑监控"><Pencil /></Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(t)} title="删除监控" aria-label="删除监控">
                     <Trash2 className="text-destructive" />
@@ -1954,6 +2070,137 @@ function Ping({ nodes }: { nodes: Node[] }) {
           </DialogContent>
         </Dialog>
       )}
+      {/* 一行装不下的东西放这里：一条探测在列表里是一行（各节点按时间戳平均），
+          而「哪台在拖后腿」必须按节点摊开 —— 平均按定义会藏起离群的那台。 */}
+      {openTask && (
+      	<Dialog open onOpenChange={(open) => !open && setOpenNodes(null)}>
+      		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
+      		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
+      		<DialogContent
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-3xl"
+				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
+				onOpenAutoFocus={(e) => e.preventDefault()}
+			>
+      			<DialogHeader className="shrink-0">
+      				<DialogTitle className="flex flex-wrap items-baseline gap-x-2">
+      					{openTask.name}
+				<span className="flex flex-wrap items-center gap-2 text-sm font-normal text-muted-foreground">
+      						<span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">{openTask.target}</span>
+      						<span className="rounded border px-1.5 py-0.5 text-xs">{openTask.kind === "icmp" ? "ICMP" : "TCP"}</span>
+      						<span className="text-xs">共 {openTask.nodes.length} 台节点</span>
+      					</span>
+      					<Help>
+      						每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 平均会藏起离群的那台，所以逐节点摊在这里看。
+      					</Help>
+      				</DialogTitle>
+      			</DialogHeader>
+
+      			{(() => {
+      		const all = perNode[openTask.id] ?? []
+      		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
+      		const top = all[0]
+      		const line = stats[openTask.id]?.last ?? null
+      							// 条以列表值为中线，按最大偏差归一：这几台的绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
+      		const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
+      		const dev = (v: number) => v - (line ?? v)
+      		const merged = stats[openTask.id]?.points ?? []
+      		const worst3 = all.slice(0, 3)
+      							const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
+      		return (
+      			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
+      				{/* 一眼要看到的三个数：标签小、数字大。 */}
+      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
+      					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
+      						<div key={k as string} className="px-4">
+      							<div className="text-xs text-muted-foreground">{k as string}</div>
+      							<div className="tnum text-lg font-medium leading-tight">{v as string}</div>
+				{/* 最差是哪台直接挂在这一格里 —— 之前它单独一行吊在下面，显得游离。 */}
+				{badge ? <span className="mt-1 inline-block max-w-full truncate rounded bg-warn-fg/10 px-1.5 text-xs text-warn-fg">{badge as string}</span> : null}
+      						</div>
+      					))}
+      				</div>
+
+      				{merged.length > 1 && (
+      					<section className="mt-6 border-t border-foreground/20 pt-5">
+      						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      							<h4 className="text-sm font-semibold">延迟随时间</h4>
+      							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
+      								<span className="text-muted-foreground">— 列表值</span>
+      								{worst3.map((p, i) => (
+      									<button key={p.node} type="button" aria-pressed={picked === p.node} title="点击只看这一条" onClick={() => setPicked(picked === p.node ? null : p.node)} className={`rounded px-1 transition-opacity hover:bg-muted ${colours[i]} ${picked == null || picked === p.node ? "" : "opacity-30"}`}>— {nodeName(p.node)} · {p.avg} ms</button>
+      								))}
+      							</div>
+      						</div>
+      						<div className="rounded-lg bg-muted/40 p-3">
+				<LineChart
+      							lines={[
+      								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
+      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, width: picked === p.node ? 2.5 : 1.25, className: `${colours[i]}${picked == null || picked === p.node ? "" : " opacity-15"}` })),
+      							]}
+      						/>
+			</div>
+      					</section>
+      				)}
+
+      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
+      						<h4 className="text-sm font-semibold">各节点平均</h4>
+      						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
+      					</div>
+      					<div className="rounded-lg bg-muted/40 p-3">
+				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+			</div>
+      				</section>
+
+      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
+      						<h4 className="text-sm font-semibold">各节点明细</h4>
+      						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
+      					</div>
+      					{/* 明细自己滚：上面两张图因此始终留在视野里，往下看节点时不用来回翻。这里给一个有边界
+      					    的滚动区，是因为它**确实是**一个滚动区 —— 框线在标这件事，不是为了套卡片。 */}
+      					<div className="mt-2 max-h-[42vh] overflow-y-auto overscroll-contain rounded-lg border">
+	      					<div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background px-2 pb-1 text-xs text-muted-foreground">
+				<span className="w-40 shrink-0">节点</span>
+				<span className="min-w-0 flex-1">延迟分布</span>
+				<span className="w-16 shrink-0 text-right">平均</span>
+				<span className="w-12 shrink-0 text-right">丢包</span>
+				<span className="w-14 shrink-0 text-right">探测</span>
+			</div>
+			<div className="mt-1 space-y-1">
+	      						{all.map((p) => (
+	      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
+	      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
+	      								<span className="relative h-2 min-w-0 flex-1 rounded-sm bg-foreground/10">
+	      									<span className="absolute inset-y-[-3px] left-1/2 w-px bg-foreground/25" />
+	      									{p.avg != null && (
+	      										<span
+	      											className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
+	      											style={dev(p.avg) >= 0
+	      												? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
+	      												: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
+	      										/>
+	      									)}
+	      								</span>
+	      								<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
+	      								<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+	      								<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
+	      							</div>
+	      						))}
+	      					</div>
+      					</div>
+      				</section>
+      			</div>
+      		)
+      			})()}
+
+      			<DialogFooter className="shrink-0 border-t pt-4">
+      				<Button variant="ghost" onClick={() => setOpenNodes(null)}>关闭</Button>
+      			</DialogFooter>
+      		</DialogContent>
+      	</Dialog>
+      )}
+
       {deleting && (
         <ConfirmDialog
           title={`删除监控「${deleting.name}」？`}
