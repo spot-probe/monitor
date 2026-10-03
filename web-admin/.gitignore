@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright：登录后的会话状态，属于凭据，不进仓库
+e2e/.auth/
+
+# Playwright 的运行产物（失败时的 trace、截图）
+test-results/
+playwright-report/
