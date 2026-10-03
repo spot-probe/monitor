@@ -1545,9 +1545,11 @@ function BandChart({ points, height = 150 }: {
       <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
       <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
       <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。放右端并用 end 锚点，避免溢出。 */}
-      <text x={w - 2} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
-        P50 {points[points.length - 1].p50} ms
+      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。图例已写明哪条是 P50，所以这里
+          只写数字。线是锯齿状的，标签放哪一段都会压上去 —— 于是给它垫一层与图底同色的底片。 */}
+      <rect x={w - 52} y={y(points[points.length - 1].p50) - 15} width={50} height={14} rx="3" className="fill-muted" />
+      <text x={w - 4} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
+        {points[points.length - 1].p50} ms
       </text>
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
@@ -2135,7 +2137,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
       		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
       		<DialogContent
-				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-3xl"
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-5xl"
 				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
 				onOpenAutoFocus={(e) => e.preventDefault()}
 			>
