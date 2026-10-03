@@ -1314,6 +1314,41 @@ pub async fn reorder_ping_tasks(_: Admin, State(app): State<Shared>, Json(order)
     }
 }
 
+/// The oldest agent that can run a given probe kind.
+///
+/// `icmp` is 1.1.1, the first release whose agent could send an echo. An agent older
+/// than a kind does **not** refuse it -- it treats the task as a TCP handshake to a
+/// host with no port, which produces no sample and explains nothing. The first ICMP
+/// release did exactly that on a real hub: a flat 100% loss while the target answered
+/// in 8 ms. So the panel has to be told which nodes cannot run what.
+fn agent_floor(kind: &str) -> Option<&'static str> {
+    match kind {
+        "icmp" => Some("1.1.1"),
+        _ => None,
+    }
+}
+
+/// Versions compared the way they order, not as text (`1.9.0` is below `1.10.0`).
+/// Anything that does not parse is **not** judged: an agent that has reported no
+/// version (the empty string) is one we can say nothing about, and warning about
+/// every node would be noise rather than a finding.
+fn version_below(have: &str, need: &str) -> bool {
+    fn parse(v: &str) -> Option<(u32, u32, u32)> {
+        let mut parts = v.trim().trim_start_matches('v').split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().unwrap_or("0").parse().ok()?;
+        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some((major, minor, patch))
+    }
+    match (parse(have), parse(need)) {
+        (Some(h), Some(n)) => h < n,
+        _ => false,
+    }
+}
+
 pub async fn ping_tasks(_: Admin, State(app): State<Shared>) -> Response {
     match app.db.ping_tasks() {
         // The reasons ride along, when there are any: a probe that cannot run must not
@@ -1329,7 +1364,29 @@ pub async fn ping_tasks(_: Admin, State(app): State<Shared>) -> Response {
                     json!({"node_id": node_id, "task_id": task_id, "reason": reason})
                 })
                 .collect();
-            Json(json!({"tasks": tasks, "errors": errors})).into_response()
+            // Nodes whose agent cannot run the kind this task asks for. Separate from
+            // `errors` (which is what an agent *reported*): this is a fact the hub knows
+            // without asking, and it is the difference between "the probe is failing" and
+            // "the probe cannot start".
+            let versions = app.db.agent_versions().unwrap_or_default();
+            let mut needs: Vec<serde_json::Value> = Vec::new();
+            for task in &tasks {
+                let Some(floor) = agent_floor(task.probe_kind()) else { continue };
+                for node in &task.nodes {
+                    let Some(have) = versions.get(node) else { continue };
+                    if version_below(have, floor) {
+                        needs.push(json!({
+                            "node_id": node,
+                            "task_id": task.id,
+                            "reason": format!(
+                                "这台节点的 agent {have} 太旧，不支持 {} 探测（需要 {floor} 或更新）；升级 agent 后才会开始探测",
+                                task.probe_kind().to_uppercase()
+                            ),
+                        }));
+                    }
+                }
+            }
+            Json(json!({"tasks": tasks, "errors": errors, "needs": needs})).into_response()
         }
         Err(e) => fail(e),
     }
@@ -3320,6 +3377,26 @@ mod tests {
     /// `REGISTER_WINDOW` from its end. Once the length is a parameter, that counts
     /// nodes which registered *before* a short window opened, so a five-minute window
     /// can refuse the first machine to arrive, claiming it is full.
+    #[test]
+    fn versions_are_compared_as_versions_not_as_text() {
+        assert!(version_below("1.1.0", "1.1.1"), "1.1.0 低于 1.1.1");
+        assert!(!version_below("1.1.1", "1.1.1"), "同版本不算低于");
+        assert!(version_below("1.9.0", "1.10.0"), "1.9.0 低于 1.10.0 —— 按文本比会得到相反答案");
+        assert!(!version_below("2.0.0", "1.10.0"));
+        assert!(version_below("v1.0.0", "1.0.1"), "带 v 前缀也认");
+        // 无法解析的一律不评判：没上报过版本的 agent（空串）不是能下结论的对象，
+        // 否则每个节点都会报警，警告就不再是发现。
+        assert!(!version_below("", "1.1.1"), "空版本不评判");
+        assert!(!version_below("dev", "1.1.1"), "畸形版本不评判");
+        assert!(!version_below("1.1.1-rc1", "1.1.1"), "预发布后缀不评判");
+    }
+
+    #[test]
+    fn icmp_requires_the_first_agent_that_could_send_it() {
+        assert_eq!(agent_floor("icmp"), Some("1.1.1"));
+        assert_eq!(agent_floor("tcp"), None, "TCP 是最初就有的，没有下限");
+    }
+
     #[tokio::test]
     async fn a_window_is_never_longer_than_an_hour_and_remembers_its_own_length() {
         let app = std::sync::Arc::new(app());

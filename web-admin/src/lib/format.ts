@@ -148,3 +148,41 @@ export function monthUsage(node: { month_rx: number; month_tx: number; traffic_m
       return node.month_rx + node.month_tx
   }
 }
+
+/**
+ * 版本比较：`x.y.z` 按数值比（`1.9.0` 低于 `1.10.0`，按文本比会相反）。
+ * 解析不了的**一律"不评判"**：没上报过版本的 agent（空串）不是能下结论的对象，
+ * 否则每个节点都会报警，警告就不再是发现。
+ *
+ * 与 hub 侧 `version_below` 是同一条规则 —— hub 才是权威（它给的 `needs` 才是判据），
+ * 这里只是让弹窗能当场提醒，不必等一次保存。
+ */
+export function versionBelow(have: string, need: string): boolean {
+  const parse = (v: string): [number, number, number] | null => {
+    const parts = v.trim().replace(/^v/, "").split(".")
+    // `Number("")` is 0 in JS, so an empty segment must be rejected explicitly --
+    // otherwise an agent that has reported no version parses as 0.0.0 and every such
+    // node gets flagged. (The hub's Rust side uses `str::parse`, which already refuses
+    // the empty string; this keeps the two in agreement, and the test below pins it.)
+    const n = (x: string | undefined) => {
+      if (x === undefined) return 0
+      const t = x.trim()
+      return /^\d+$/.test(t) ? Number(t) : null
+    }
+    const major = n(parts[0])
+    const minor = n(parts[1])
+    const patch = n(parts[2])
+    if (major === null || minor === null || patch === null) return null
+    if (parts.length > 3) return null
+    return [major, minor, patch]
+  }
+  const a = parse(have)
+  const b = parse(need)
+  if (!a || !b) return false
+  if (a[0] !== b[0]) return a[0] < b[0]
+  if (a[1] !== b[1]) return a[1] < b[1]
+  return a[2] < b[2]
+}
+
+/** ICMP 探测需要的最低 agent 版本 —— 与 hub 的 `agent_floor("icmp")` 对应。 */
+export const ICMP_AGENT_FLOOR = "1.1.1"

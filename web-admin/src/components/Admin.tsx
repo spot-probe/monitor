@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton"
 import { PageSkeleton } from "@/components/ui/page-skeleton"
 import { EmptyState } from "@/components/ui/empty-state"
+import { ICMP_AGENT_FLOOR, versionBelow } from "@/lib/format"
 import { RetryState } from "@/components/ui/retry-state"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -1471,6 +1472,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
+	// 与 errors 分开：errors 是 agent **报回来**的原因，needs 是 hub **自己就知道**的事实
+	// （节点 agent 太旧、这种探测根本跑不了）。前者是「探测在失败」，后者是「探测还没开始」。
+	const [probeNeeds, setProbeNeeds] = useState<PingError[]>([])
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1482,10 +1486,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
   const ordered = drag.order.map((id) => listed.get(id)).filter((t): t is PingTask => Boolean(t))
 
   function load() {
-    return api<{ tasks: PingTask[]; errors?: PingError[] }>("/ping-tasks")
+    return api<{ tasks: PingTask[]; errors?: PingError[]; needs?: PingError[] }>("/ping-tasks")
       .then((d) => {
         setTasks(d.tasks)
         setProbeErrors(d.errors ?? [])
+		setProbeNeeds(d.needs ?? [])
 		setError("")
       })
 		.catch((e) => setError((e as Error).message))
@@ -1687,6 +1692,14 @@ function Ping({ nodes }: { nodes: Node[] }) {
                     />
                     <span className="font-medium">{t.name}</span>
                   </div>
+                  {probeNeeds
+                    .filter((n) => n.task_id === t.id)
+                    .map((n) => (
+                      <p key={`need-${n.node_id}`} className={`mt-0.5 text-xs break-all line-clamp-2 ${WARN}`}>
+                        需升级：{n.reason}
+                        {probeNeeds.filter((x) => x.task_id === t.id).length > 1 ? `（节点 ${n.node_id}）` : ""}
+                      </p>
+                    ))}
                   {probeErrors
                     .filter((e) => e.task_id === t.id)
                     .map((e) => (
@@ -1818,6 +1831,22 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   placeholder={editing.kind === "icmp" ? "1.1.1.1" : "1.1.1.1:443"}
                 />
               </Field>
+              {/* 保存前就说清：ICMP 需要 agent 1.1.1+，更早的 agent 不会拒绝这种任务，而是把它当 TCP
+                  握手跑 —— 一个读数都没有、也不说明原因（真机上就是这么表现的）。hub 在下发后也会
+                  把它算进 `needs`，两处用同一条版本规则。 */}
+              {editing.kind === "icmp" &&
+                (() => {
+                  const stale = nodes.filter(
+                    (n) => (editing.nodes ?? []).includes(n.id) && versionBelow(n.agent_version, ICMP_AGENT_FLOOR),
+                  )
+                  if (stale.length === 0) return null
+                  return (
+                    <p className={`text-xs ${WARN}`}>
+                      选中的 {stale.map((n) => n.name).join("、")} 的 agent 太旧（ICMP 需要 {ICMP_AGENT_FLOOR}{" "}
+                      或更新），它们不会发 ICMP —— 升级这些节点上的 agent 后才会开始探测。
+                    </p>
+                  )
+                })()}
               <div className="space-y-2 border-t pt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label className="text-sm font-medium">运行节点</Label>
