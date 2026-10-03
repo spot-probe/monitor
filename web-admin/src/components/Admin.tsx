@@ -1589,6 +1589,8 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
+	// 图例点中的是哪一台：其余折线淡出，用来在噪声里跟住一条线。null = 都不淡。
+	const [picked, setPicked] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1898,7 +1900,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   	<Button
                   		variant="ghost"
                   		size="icon"
-                  		onClick={() => setOpenNodes(openNodes === t.id ? null : t.id)}
+                  		onClick={() => { setPicked(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
                   		title="节点明细"
                   		aria-label="节点明细"
                   		aria-expanded={openNodes === t.id}
@@ -2105,14 +2107,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
       				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
-      					{[["列表值", line == null ? "—" : `${line} ms`], ["最差", top.avg == null ? "—" : `${top.avg} ms`], ["有数据的节点", `共 ${all.length} 台`]].map(([k, v]) => (
-      						<div key={k} className="px-4">
-      							<div className="text-xs text-muted-foreground">{k}</div>
-      							<div className="tnum text-lg font-medium leading-tight">{v}</div>
+      					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : nodeName(top.node)], ["有数据的节点", `共 ${all.length} 台`, null]].map(([k, v, badge]) => (
+      						<div key={k as string} className="px-4">
+      							<div className="text-xs text-muted-foreground">{k as string}</div>
+      							<div className="tnum text-lg font-medium leading-tight">{v as string}</div>
+				{/* 最差是哪台直接挂在这一格里 —— 之前它单独一行吊在下面，显得游离。 */}
+				{badge ? <span className="mt-1 inline-block max-w-full truncate rounded bg-warn-fg/10 px-1.5 text-xs text-warn-fg">{badge as string}</span> : null}
       						</div>
       					))}
       				</div>
-      				{top.avg != null && <p className="mt-2 text-xs text-muted-foreground">最差的是 {nodeName(top.node)}。</p>}
 
       				{merged.length > 1 && (
       					<section className="mt-5 border-t pt-4">
@@ -2121,15 +2124,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
       								<span className="text-muted-foreground">— 列表值</span>
       								{worst3.map((p, i) => (
-      									<span key={p.node} className={colours[i]}>— {nodeName(p.node)} · {p.avg} ms</span>
+      									<button key={p.node} type="button" aria-pressed={picked === p.node} title="点击只看这一条" onClick={() => setPicked(picked === p.node ? null : p.node)} className={`rounded px-1 transition-opacity hover:bg-muted ${colours[i]} ${picked == null || picked === p.node ? "" : "opacity-30"}`}>— {nodeName(p.node)} · {p.avg} ms</button>
       								))}
       							</div>
       						</div>
       						<div className="rounded-md bg-muted/20 p-2">
 				<LineChart
       							lines={[
-      								{ key: "merged", points: merged, className: "text-muted-foreground", width: 2 },
-      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, className: colours[i] })),
+      								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
+      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, width: picked === p.node ? 2.5 : 1.25, className: `${colours[i]}${picked == null || picked === p.node ? "" : " opacity-15"}` })),
       							]}
       						/>
 			</div>
@@ -2163,7 +2166,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
       								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
       								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
-      									<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
+      									<span className="absolute inset-y-[-3px] left-1/2 w-px bg-foreground/25" />
       									{p.avg != null && (
       										<span
       											className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
