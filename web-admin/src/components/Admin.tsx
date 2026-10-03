@@ -2071,91 +2071,109 @@ function Ping({ nodes }: { nodes: Node[] }) {
           而「哪台在拖后腿」必须按节点摊开 —— 平均按定义会藏起离群的那台。 */}
       {openTask && (
       	<Dialog open onOpenChange={(open) => !open && setOpenNodes(null)}>
-      		<DialogContent className="sm:max-w-3xl">
-      			<DialogHeader>
+      		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
+      		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
+      		<DialogContent
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-3xl"
+				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
+				onOpenAutoFocus={(e) => e.preventDefault()}
+			>
+      			<DialogHeader className="shrink-0">
       				<DialogTitle className="flex flex-wrap items-baseline gap-x-2">
       					{openTask.name}
       					<span className="text-sm font-normal text-muted-foreground">
       						{openTask.target} · {openTask.kind === "icmp" ? "ICMP" : "TCP"} · {openTask.nodes.length} 台节点
       					</span>
+      					<Help>
+      						每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 平均会藏起离群的那台，所以逐节点摊在这里看。
+      					</Help>
       				</DialogTitle>
-      				<DialogDescription className="leading-relaxed">
-      					每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 一台机器慢，平均线看不出来。
-      				</DialogDescription>
       			</DialogHeader>
-      	
+
       			{(() => {
-      				const all = perNode[openTask.id] ?? []
-      				if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
-      				const top = all[0]
-      				const line = stats[openTask.id]?.last ?? null
-      				// 条以列表值为中线，按最大偏差归一：绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
-      				const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
-      				const dev = (v: number) => v - (line ?? v)
-      				return (
-      					<>
-      						<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
-      							<span>列表值 <span className="tnum font-medium">{line ?? "—"} ms</span></span>
-      							<span>最差 <span className="tnum font-medium">{top.avg} ms</span>（{nodeName(top.node)}）</span>
-      							<span className="text-muted-foreground">共 {all.length} 台</span>
+      		const all = perNode[openTask.id] ?? []
+      		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
+      		const top = all[0]
+      		const line = stats[openTask.id]?.last ?? null
+      							// 条以列表值为中线，按最大偏差归一：这几台的绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
+      		const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
+      		const dev = (v: number) => v - (line ?? v)
+      		const merged = stats[openTask.id]?.points ?? []
+      		const worst3 = all.slice(0, 3)
+      							const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
+      		return (
+      			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+      				{/* 一眼要看到的三个数：标签小、数字大。 */}
+      				<div className="grid grid-cols-3 gap-3 rounded-lg bg-muted/40 px-4 py-3">
+      					{[["列表值", line == null ? "—" : `${line} ms`], ["最差", top.avg == null ? "—" : `${top.avg} ms`], ["有数据的节点", `共 ${all.length} 台`]].map(([k, v]) => (
+      						<div key={k}>
+      							<div className="text-xs text-muted-foreground">{k}</div>
+      							<div className="tnum text-lg font-medium leading-tight">{v}</div>
       						</div>
-      						<p className="mt-1 text-xs text-muted-foreground">条以列表值为中线，向右更慢、向左更快；条长按最大偏差归一。</p>
-      				{(() => {
-      					const merged = stats[openTask.id]?.points ?? []
-      					const worst3 = all.slice(0, 3)
-      					const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
-      					return (
-      						<>
-      							{merged.length > 1 && (
-      								<div className="mt-4">
-      									<p className="text-xs text-muted-foreground">延迟随时间 —— 看一台机器是「一直慢」还是「偶尔尖峰」</p>
-      									<LineChart
-      										lines={[
-      											{ key: "merged", points: merged, className: "text-muted-foreground", width: 2 },
-      											...worst3.map((p, i) => ({ key: String(p.node), points: p.points, className: colours[i] })),
-      										]}
-      									/>
-      									<div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
-      										<span className="text-muted-foreground">— 列表值 {line ?? "—"} ms</span>
-      										{worst3.map((p, i) => (
-      											<span key={p.node} className={colours[i]}>— {nodeName(p.node)} {p.avg} ms</span>
-      										))}
-      									</div>
-      								</div>
-      							)}
-      							<div className="mt-4">
-      								<p className="text-xs text-muted-foreground">每台节点一个点 —— 是「一两个孤点」还是「整片右移」</p>
-      								<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+      					))}
+      				</div>
+      				{top.avg != null && <p className="mt-2 text-xs text-muted-foreground">最差的是 {nodeName(top.node)}。</p>}
+
+      				{merged.length > 1 && (
+      					<section className="mt-5 border-t pt-4">
+      						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      							<h4 className="text-sm font-medium">延迟随时间</h4>
+      							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
+      								<span className="text-muted-foreground">— 列表值</span>
+      								{worst3.map((p, i) => (
+      									<span key={p.node} className={colours[i]}>— {nodeName(p.node)} · {p.avg} ms</span>
+      								))}
       							</div>
-      						</>
-      					)
-      				})()}
-      						<div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto pr-1">
-      							{all.map((p) => (
-      								<div key={p.node} className="flex items-center gap-3 text-xs">
-      									<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
-      									<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
-      										<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
-      										{p.avg != null && (
-      											<span
-      												className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
-      												style={dev(p.avg) >= 0
-      													? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
-      													: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
-      											/>
-      										)}
-      									</span>
-      									<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
-      									<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
-      									<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
-      								</div>
-      							))}
       						</div>
-      					</>
-      				)
+      						<LineChart
+      							lines={[
+      								{ key: "merged", points: merged, className: "text-muted-foreground", width: 2 },
+      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, className: colours[i] })),
+      							]}
+      						/>
+      					</section>
+      				)}
+
+      				<section className="mt-5 border-t pt-4">
+      					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
+      						<h4 className="text-sm font-medium">各节点平均</h4>
+      						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
+      					</div>
+      					<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+      				</section>
+
+      				<section className="mt-5 border-t pt-4">
+      					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
+      						<h4 className="text-sm font-medium">各节点明细</h4>
+      						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
+      					</div>
+      					<div className="mt-2 space-y-1">
+      						{all.map((p) => (
+      							<div key={p.node} className="flex items-center gap-3 text-xs">
+      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
+      								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
+      									<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
+      									{p.avg != null && (
+      										<span
+      											className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
+      											style={dev(p.avg) >= 0
+      												? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
+      												: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
+      										/>
+      									)}
+      								</span>
+      								<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
+      								<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+      								<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
+      							</div>
+      						))}
+      					</div>
+      				</section>
+      			</div>
+      		)
       			})()}
-      	
-      			<DialogFooter className="border-t pt-4">
+
+      			<DialogFooter className="shrink-0 border-t pt-4">
       				<Button variant="ghost" onClick={() => setOpenNodes(null)}>关闭</Button>
       			</DialogFooter>
       		</DialogContent>
