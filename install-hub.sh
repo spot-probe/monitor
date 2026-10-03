@@ -374,8 +374,12 @@ install_hub() {
 		if cp -f "$DATA/monitor.db" "$db_backup" 2>/dev/null; then
 			if [ -f "$DATA/monitor.db-wal" ]; then cp -f "$DATA/monitor.db-wal" "$db_backup-wal" 2>/dev/null || true; fi
 			# 只留最近三份：备份要能救急，不该把磁盘吃满。
-			ls -1t "$DATA/backups"/monitor-*.db 2>/dev/null | tail -n +4 | while read -r stale; do
-				rm -f "$stale" "$stale-wal"
+			# 文件名里就带时间戳，所以按名字排序就是按时间排序 —— 不必用 ls（shellcheck 也不建议）
+			# 或 find（BusyBox 未必有 -printf）。只留最新三份。
+			set -- "$DATA/backups"/monitor-*.db
+			while [ "$#" -gt 3 ]; do
+				rm -f "$1" "$1-wal"
+				shift
 			done
 			ok "备份" "$(basename "$db_backup")"
 		else
