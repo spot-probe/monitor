@@ -77,6 +77,10 @@ pub async fn watch(app: Shared) {
     tokio::time::sleep(FIRST).await;
     loop {
         refresh(&app).await;
+        // Piggybacks on this read rather than adding a schedule of its own: the
+        // release that was just fetched, and the hub's own tag through the
+        // panel's cache, are both in hand here.
+        crate::notify::announce_update(&app).await;
         tokio::time::sleep(INTERVAL).await;
     }
 }

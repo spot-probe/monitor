@@ -82,9 +82,9 @@ pub struct App {
     pub themes: PathBuf,
     /// Alerts on their way out; see `notify::send`.
     pub notes: tokio::sync::mpsc::Sender<notify::Note>,
-    /// The tag this hub's own repository last published. Filled when an
-    /// administrator opens the panel rather than on a timer, so a hub nobody
-    /// opens makes no outbound request; see `api::version`.
+    /// The tag this hub's own repository last published. Filled by whichever
+    /// comes first, an administrator opening the panel or the daily update alert,
+    /// so a hub nobody opens is still told about a release; see `api::hub_latest`.
     pub hub_release: Mutex<HubRelease>,
 }
 
