@@ -1502,6 +1502,8 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
 }
 
 function Ping({ nodes }: { nodes: Node[] }) {
+	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
+	const nodeName = (id: number) => nodes.find((n) => n.id === id)?.name ?? `节点 ${id}`
   const [tasks, setTasks] = useState<PingTask[]>([])
   // The list starts empty, so an empty-state check on `tasks.length` alone fires while the
   // first fetch is still in flight and tells the operator there are no probes. Themes and
@@ -1520,6 +1522,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	// 与 errors 分开：errors 是 agent **报回来**的原因，needs 是 hub **自己就知道**的事实
 	// （节点 agent 太旧、这种探测根本跑不了）。前者是「探测在失败」，后者是「探测还没开始」。
 	const [probeNeeds, setProbeNeeds] = useState<PingError[]>([])
+	// 逐节点的数字。上面那条线是各节点按时戳**平均**后的结果 —— 一台机器慢，平均线看不出来，
+	// 而合并后的丢包取的是最差的那台、却不说是哪台。这里把每个节点自己的均值/丢包/样本留下来。
+	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number }[]>>({})
+	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
+	const [openNodes, setOpenNodes] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1561,17 +1568,30 @@ function Ping({ nodes }: { nodes: Node[] }) {
     ).then((answers) => {
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
+		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
+		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
+		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null }>>()
+		const remember = (taskId: number, node: number, patch: Partial<{ sum: number; n: number; loss: number | null }>) => {
+			const per = byNode.get(taskId) ?? new Map()
+			const cur = per.get(node) ?? { sum: 0, n: 0, loss: null }
+			per.set(node, { ...cur, ...patch })
+			byNode.set(taskId, per)
+		}
       const loss = new Map<number, number[]>()
-      for (const [, d] of answers) {
+      for (const [nid, d] of answers) {
         if (!d) continue
         for (const p of d.ping ?? []) {
           if (p.latency === null || p.latency === undefined) continue
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
+				// 同一节点、同一任务的样本累加（延迟求和与次数分开存，最后再除）。
+				const per = byNode.get(p.task_id)?.get(nid) ?? { sum: 0, n: 0, loss: null }
+				remember(p.task_id, nid, { sum: per.sum + p.latency, n: per.n + 1 })
           buckets.set(p.task_id, perTask)
         }
         for (const [id, pct] of Object.entries(d.loss ?? {})) {
           loss.set(Number(id), [...(loss.get(Number(id)) ?? []), pct])
+				remember(Number(id), nid, { loss: pct })
         }
       }
       const next: typeof stats = {}
@@ -1587,7 +1607,16 @@ function Ping({ nodes }: { nodes: Node[] }) {
           series,
         }
       }
-      setStats(next)
+		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
+		// 「哪台在拖后腿」—— 合并后的那一行按定义把它藏了起来。
+		const per: typeof perNode = {}
+		for (const [taskId, perNodes] of byNode) {
+			per[taskId] = [...perNodes.entries()]
+				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n }))
+				.sort((a, b) => b.loss - a.loss || (b.avg ?? -1) - (a.avg ?? -1))
+		}
+		setPerNode(per)
+		setStats(next)
     })
     return () => {
       alive = false
@@ -1699,6 +1728,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
           </TableHeader>
           <TableBody>
             {ordered.map((t, index) => (
+              <>
               <TableRow
                 key={t.id}
                 data-dragging={drag.dragging === t.id || undefined}
@@ -1793,12 +1823,49 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   )}
                 </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
+                  {/* 只有一台节点时，明细与上面那一行是同一个数字，所以不显示这个开关。 */}
+                  {t.nodes.length >= 2 && (
+                  	<Button
+                  		variant="ghost"
+                  		size="icon"
+                  		onClick={() => setOpenNodes(openNodes === t.id ? null : t.id)}
+                  		title="节点明细"
+                  		aria-label="节点明细"
+                  		aria-expanded={openNodes === t.id}
+                  	>
+                  		<ChevronRight className={`transition-transform ${openNodes === t.id ? "rotate-90" : ""}`} />
+                  	</Button>
+                  )}
                   <Button variant="ghost" size="icon" onClick={() => setEditing(t)} title="编辑监控" aria-label="编辑监控"><Pencil /></Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(t)} title="删除监控" aria-label="删除监控">
                     <Trash2 className="text-destructive" />
                   </Button>
                 </TableCell>
               </TableRow>
+            {openNodes === t.id && (
+            	<TableRow className="bg-muted/30 hover:bg-muted/30">
+            		<TableCell colSpan={7} className="py-3">
+            			<div className="space-y-1">
+            				{(perNode[t.id] ?? []).slice(0, 12).map((p) => (
+            					<div key={p.node} className="flex items-center gap-3 text-xs">
+            						<span className="min-w-0 flex-1 truncate">{nodeName(p.node)}</span>
+            						<span className="tnum w-20 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
+            						<span className={`tnum w-14 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+            						<span className="tnum w-16 text-right text-muted-foreground">{p.samples} 次</span>
+            					</div>
+            				))}
+            				{(perNode[t.id]?.length ?? 0) > 12 && (
+            					<p className="text-xs text-muted-foreground">另有 {perNode[t.id].length - 12} 台未列出（按丢包、延迟从差到好）</p>
+            				)}
+            				{/* 展开却一片空白最让人困惑：还没收到上报时要说出来。 */}
+            				{(perNode[t.id]?.length ?? 0) === 0 && (
+            					<p className="text-xs text-muted-foreground">还没有收到任何节点的上报。</p>
+            				)}
+            			</div>
+            		</TableCell>
+            	</TableRow>
+            )}
+              </>
             ))}
             {loaded && tasks.length === 0 && (
               <TableRow>
