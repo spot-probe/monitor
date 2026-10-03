@@ -1053,6 +1053,16 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Node id to the agent version it reported, for the one caller that judges whether
+    /// a node can run a probe kind at all. `nodes()` would answer too and is much
+    /// heavier; this is a single column.
+    pub fn agent_versions(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id, agent_version FROM node")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn node(&self, id: i64) -> Result<Option<Node>> {
         Ok(self
             .conn()

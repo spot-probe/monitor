@@ -4,7 +4,7 @@
 // read used to be rewritten into one the form invented, so saving a price turned
 // `weekly` into `yearly`. These are the pure functions the form now calls.
 import assert from "node:assert/strict"
-import { cycleFields, cycleOk, cyclePatch, cycleValue, money } from "./format.ts"
+import { cycleFields, cycleOk, cyclePatch, cycleValue, money, versionBelow } from "./format.ts"
 
 // A named length and a length without a name are both readable, and a whole
 // number of years is shown in years.
@@ -59,3 +59,19 @@ assert.equal(money(1234.5, "USDT"), "USDT\u00A01,234.50", "four letters: from be
 assert.equal(money(1234.5, ""), "1,234.50")
 
 console.log("billing cycle fields, patch and bounds passed")
+
+// Version comparison, used to tell the operator *before* saving that a node's agent
+// cannot run the kind they picked. Two properties matter and are easy to get wrong:
+// it must order numerically (`1.9.0` is below `1.10.0`, text says otherwise), and it
+// must refuse to judge what it cannot parse -- an agent that has reported no version
+// gets an empty string, and warning about every such node would be noise, not a finding.
+assert.equal(versionBelow("1.1.0", "1.1.1"), true, "1.1.0 低于 1.1.1")
+assert.equal(versionBelow("1.1.1", "1.1.1"), false, "同版本不算低于")
+assert.equal(versionBelow("1.9.0", "1.10.0"), true, "按数值比：1.9.0 低于 1.10.0")
+assert.equal(versionBelow("1.10.0", "1.9.0"), false)
+assert.equal(versionBelow("1.1", "1.1.0"), false, "缺省段补 0")
+assert.equal(versionBelow("1.0", "1.0.1"), true)
+assert.equal(versionBelow("v1.0.0", "1.0.1"), true, "带 v 前缀也认")
+assert.equal(versionBelow("", "1.1.1"), false, "空版本不评判")
+assert.equal(versionBelow("dev", "1.1.1"), false, "畸形不评判")
+assert.equal(versionBelow("1.1.1-rc1", "1.1.1"), false, "预发布后缀不评判")
