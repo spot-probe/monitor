@@ -1540,29 +1540,40 @@ const RELEASES_RETRY: i64 = 600;
 /// list is marked against -- one source for that fact rather than two, even
 /// though it refreshes daily rather than on this request.
 ///
-/// Nothing is fetched until an administrator asks, so a hub whose panel is never
-/// opened makes no outbound request.
+/// The hub's tag is read through [`hub_latest`], the cache the daily update alert
+/// reads through as well, so a request that finds the cache fresh asks GitHub
+/// nothing.
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
-    let cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let hub_latest = if fresh_enough(&cached, Utc::now().timestamp()) {
-        cached.latest
-    } else {
-        let latest = latest_hub_tag(&app).await.unwrap_or_default();
-        *app.hub_release.lock().unwrap_or_else(|e| e.into_inner()) =
-            crate::HubRelease { read_at: Utc::now().timestamp(), latest: latest.clone() };
-        latest
-    };
     Json(json!({
         "hub": env!("CARGO_PKG_VERSION"),
         // Empty where GitHub could not be reached, which the panel renders as no
         // update rather than as an error: a hub on a network that cannot reach
         // github.com is a supported deployment, not a fault to report.
-        "hub_latest": hub_latest,
+        "hub_latest": hub_latest(&app).await.unwrap_or_default(),
         "agent_latest": crate::agent_release::latest_now(&app).await.unwrap_or_default(),
         // Whether the navigation marks an update. It governs the mark alone: the
         // lookup runs either way, so the update page still answers when opened.
         "notice": app.db.get("update_notice").as_deref() != Some("off"),
     }))
+}
+
+/// The tag this hub's repository last published, from the cache while it is still
+/// fresh and from GitHub otherwise.
+///
+/// [`version`] and [`crate::notify::announce_update`] both read the tag through
+/// here: one place owns the cache, the proxy and the freshness rules, so the daily
+/// alert adds at most the one lookup a day the agent check already makes rather
+/// than a schedule of its own. `None` is a tag that could not be read, which both
+/// callers already have a way to render as nothing.
+pub(crate) async fn hub_latest(app: &App) -> Option<String> {
+    let cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if fresh_enough(&cached, Utc::now().timestamp()) {
+        return (!cached.latest.is_empty()).then_some(cached.latest);
+    }
+    let latest = latest_hub_tag(app).await.unwrap_or_default();
+    *app.hub_release.lock().unwrap_or_else(|e| e.into_inner()) =
+        crate::HubRelease { read_at: Utc::now().timestamp(), latest: latest.clone() };
+    (!latest.is_empty()).then_some(latest)
 }
 
 /// Whether the cached lookup still answers. One that returned nothing is held
@@ -4079,6 +4090,7 @@ mod tests {
             "notify_traffic": read["notify_traffic"],
             "notify_expiry": read["notify_expiry"],
             "notify_login": read["notify_login"],
+            "notify_update": read["notify_update"],
             "notify_telegram_chat": read["notify_telegram_chat"],
             "notify_telegram_text": read["notify_telegram_text"],
             "notify_webhook_body": read["notify_webhook_body"],

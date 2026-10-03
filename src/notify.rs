@@ -111,6 +111,11 @@ pub fn settings(app: &App, out: &mut serde_json::Map<String, Value>) {
     }
     let login = if app.db.get("notify_login").as_deref() == Some("off") { "off" } else { "on" };
     out.insert("notify_login".into(), json!(login));
+    // On by default, like the sign-in alert above: it can only fire once a
+    // channel exists, and then once per release, so an upgrade that adds it does
+    // not need a visit to the panel to be useful.
+    let update = if app.db.get("notify_update").as_deref() == Some("off") { "off" } else { "on" };
+    out.insert("notify_update".into(), json!(update));
     out.insert("notify_telegram_chat".into(), json!(app.db.get("notify_telegram_chat").unwrap_or_default()));
     out.insert("notify_telegram_text".into(), json!(template(app, "notify_telegram_text", DEFAULT_TEXT)));
     out.insert("notify_webhook_body".into(), json!(template(app, "notify_webhook_body", DEFAULT_BODY)));
@@ -131,6 +136,7 @@ pub fn setting_error(key: &str, value: &str) -> Option<String> {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let problem = match key {
         "notify_login" => (!matches!(value, "on" | "off")).then_some("notify_login must be on or off"),
+        "notify_update" => (!matches!(value, "on" | "off")).then_some("notify_update must be on or off"),
         "notify_webhook_headers" => return parse_headers(value).err(),
         // Empty clears a channel's field, or restores a template's default.
         "notify_telegram_token"
@@ -473,6 +479,75 @@ fn batch(event: &'static str, mark: &str, what: &str, items: Vec<(&str, String)>
     };
     let node = items.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
     Some(Note { event, node, title, message, ..Default::default() })
+}
+
+/// The two tags the update alert is stamped with, either of which may be unread.
+/// A day that finds the same pair as the last announced one has nothing new to
+/// say, which is what keeps this to one message per newly seen version.
+fn update_stamp(hub: Option<&str>, agent: Option<&str>) -> String {
+    format!("{}|{}", hub.unwrap_or_default(), agent.unwrap_or_default())
+}
+
+/// The alert for a released hub or for agents behind the latest, or `None` when
+/// neither is the case. Both tags are passed in rather than read here, so the
+/// comparison and the wording are testable without the network.
+fn update_note(hub: Option<&str>, agent: Option<&str>, outdated: usize) -> Option<Note> {
+    let running = env!("CARGO_PKG_VERSION");
+    let mut lines = Vec::new();
+    if hub.is_some_and(|latest| crate::theme::newer(latest, running)) {
+        // `is_some_and` just held, so there is a tag to name.
+        lines.push(format!("hub 可升级到 v{}（当前 {running}）", hub.unwrap_or_default()));
+    }
+    if outdated > 0 {
+        if let Some(latest) = agent {
+            lines.push(format!("{outdated} 台节点的 agent 可升级到 v{latest}"));
+        }
+    }
+    (!lines.is_empty()).then(|| Note {
+        event: "update",
+        title: "⬆️ 有新版本".into(),
+        message: lines.join("\n"),
+        ..Default::default()
+    })
+}
+
+/// The one call `agent_release::watch` adds after its daily read: a hub or agent
+/// release the operator has not been told about yet.
+///
+/// The hub's tag comes from the panel's cache through [`crate::api::hub_latest`],
+/// so this adds no lookup of its own to a hub whose panel is opened, and the
+/// agent's comes from the check that just ran -- there is no second schedule.
+/// Nothing is recorded while the alert is switched off or no channel is
+/// configured, the rule `sweep` follows, so a channel configured later the same
+/// day still reports the release.
+pub async fn announce_update(app: &App) {
+    if app.db.get("notify_update").as_deref() == Some("off") || channels(app).is_empty() {
+        return;
+    }
+    let hub = crate::api::hub_latest(app).await;
+    let agent = crate::agent_release::state(app).latest;
+    let stamp = update_stamp(hub.as_deref(), agent.as_deref());
+    if app.db.get("update_announced").as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+    let outdated = match app.db.nodes() {
+        Ok(nodes) => {
+            nodes.iter().filter(|n| crate::agent_release::behind(agent.as_deref(), &n.agent_version)).count()
+        }
+        // The hub line still goes out; a database that cannot be read is a
+        // complaint the sweep already makes, every thirty seconds.
+        Err(e) => {
+            warn!("update alert: could not read the nodes: {e:#}");
+            0
+        }
+    };
+    let Some(note) = update_note(hub.as_deref(), agent.as_deref(), outdated) else { return };
+    // Stored before the send, which only queues: a restart in between would
+    // otherwise repeat the alert.
+    if let Err(e) = app.db.set("update_announced", &stamp) {
+        warn!("update alert: could not record {stamp:?}: {e:#}");
+    }
+    send(app, note);
 }
 
 /// Sweep state that need not outlive the process.
@@ -899,6 +974,97 @@ mod tests {
         used(100 * gb).unwrap();
         assert_eq!(titles(&mut watch), ["⚠️ t 流量提醒 已用 100%"]);
         assert!(titles(&mut watch).is_empty());
+    }
+
+    /// The alert names each side that is actually behind, and says nothing at
+    /// all on a day when neither is.
+    #[test]
+    fn the_update_alert_names_each_side_that_is_behind() {
+        let running = env!("CARGO_PKG_VERSION");
+        let newer = "9999.0.0";
+        let note = update_note(Some(newer), Some("2.0.0"), 3).unwrap();
+        assert_eq!(note.event, "update");
+        assert_eq!(note.title, "⬆️ 有新版本");
+        assert_eq!(
+            note.message,
+            format!("hub 可升级到 v{newer}（当前 {running}）\n3 台节点的 agent 可升级到 v2.0.0")
+        );
+        assert!(note.node.is_empty(), "the alert concerns no one node");
+
+        assert_eq!(
+            update_note(Some(newer), None, 0).unwrap().message,
+            format!("hub 可升级到 v{newer}（当前 {running}）")
+        );
+        assert_eq!(update_note(None, Some("2.0.0"), 2).unwrap().message, "2 台节点的 agent 可升级到 v2.0.0");
+        assert!(update_note(None, None, 0).is_none(), "no release to report");
+        assert!(update_note(Some(running), None, 0).is_none(), "the running hub is not behind itself");
+        assert!(update_note(None, Some("2.0.0"), 0).is_none(), "a latest nobody is behind is not news");
+        assert!(update_note(Some("0.0.1"), Some("2.0.0"), 0).is_none(), "an older tag is not an upgrade");
+    }
+
+    /// The stamp is what makes it once per version pair, and it covers the tags
+    /// that could not be read as well: `None` is one fixed value, not a wildcard
+    /// that would stamp every day.
+    #[test]
+    fn the_update_stamp_is_both_tags_or_neither() {
+        assert_eq!(update_stamp(Some("1.2.0"), Some("1.3.0")), "1.2.0|1.3.0");
+        assert_eq!(update_stamp(None, Some("1.3.0")), "|1.3.0");
+        assert_eq!(update_stamp(Some("1.2.0"), None), "1.2.0|");
+        assert_eq!(update_stamp(None, None), "|");
+    }
+
+    /// The setting is the switch, and an unread or switched-off one records
+    /// nothing -- so configuring a channel later the same day still reports the
+    /// release, exactly as `sweep` reports nodes already down.
+    #[tokio::test]
+    async fn nothing_is_recorded_while_the_update_alert_cannot_be_carried() {
+        let app = app();
+        // A cache that is fresh, so `hub_latest` answers from it and the test
+        // reaches no network.
+        let read = || crate::HubRelease { read_at: Utc::now().timestamp(), latest: "9999.0.0".into() };
+        *app.hub_release.lock().unwrap() = read();
+        announce_update(&app).await;
+        assert_eq!(app.db.get("update_announced"), None, "no channel");
+
+        with_channel(&app);
+        app.db.set("notify_update", "off").unwrap();
+        announce_update(&app).await;
+        assert_eq!(app.db.get("update_announced"), None, "switched off");
+
+        app.db.set("notify_update", "on").unwrap();
+        announce_update(&app).await;
+        assert_eq!(app.db.get("update_announced").as_deref(), Some("9999.0.0|"), "one channel and on");
+
+        // The pair is what deduplicates, so a second run over the same tags
+        // leaves the record as it was -- `App::for_test` drops the queue's
+        // receiver, so a send is not what can be looked at here.
+        *app.hub_release.lock().unwrap() = read();
+        announce_update(&app).await;
+        assert_eq!(app.db.get("update_announced").as_deref(), Some("9999.0.0|"));
+
+        // A tag that moved is a pair that has not been announced yet.
+        *app.hub_release.lock().unwrap() =
+            crate::HubRelease { read_at: Utc::now().timestamp(), latest: "9999.1.0".into() };
+        announce_update(&app).await;
+        assert_eq!(app.db.get("update_announced").as_deref(), Some("9999.1.0|"));
+    }
+
+    /// The panel echoes this switch like every other, on by default, and the
+    /// write refuses anything but `on`/`off`.
+    #[test]
+    fn the_update_alert_is_a_setting_that_defaults_on() {
+        let app = app();
+        let mut out = serde_json::Map::new();
+        settings(&app, &mut out);
+        assert_eq!(out["notify_update"], "on");
+        app.db.set("notify_update", "off").unwrap();
+        let mut out = serde_json::Map::new();
+        settings(&app, &mut out);
+        assert_eq!(out["notify_update"], "off");
+
+        assert_eq!(setting_error("notify_update", "on"), None);
+        assert_eq!(setting_error("notify_update", "off"), None);
+        assert!(setting_error("notify_update", "true").is_some(), "only on and off are stored");
     }
 
     #[test]

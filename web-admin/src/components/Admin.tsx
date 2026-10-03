@@ -2868,6 +2868,10 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           <Switch aria-labelledby="notify-login-label" checked={s.notify_login !== "off"} onCheckedChange={(v) => set("notify_login", v ? "on" : "off")} />
           <span id="notify-login-label">登录后台时提醒</span>
         </div>
+        <div className="flex items-center gap-2 text-sm">
+          <Switch aria-labelledby="notify-update-label" checked={s.notify_update !== "off"} onCheckedChange={(v) => set("notify_update", v ? "on" : "off")} />
+          <span id="notify-update-label">有新版本时提醒</span>
+        </div>
         {/* Bottom-right, with the divider marking where reading ends and acting begins.
             Bottom-left gave the page's only commit action the least weight on it. */}
         <div className="flex justify-end gap-2 border-t pt-4">
@@ -2880,6 +2884,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
                 notify_traffic: text("notify_traffic"),
                 notify_expiry: text("notify_expiry"),
                 notify_login: s.notify_login === "off" ? "off" : "on",
+                notify_update: s.notify_update === "off" ? "off" : "on",
               })
             }
           >
