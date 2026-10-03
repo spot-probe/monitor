@@ -151,7 +151,8 @@ function Field({ label, hint, help, suffix, className = "", row = false, icon, c
   // row：一项压成一行 —— 标签与控件在左，说明在右。竖排时三行说明把卡片撑得很高，
   // 而它们本来就短；横排后一眼能扫完。单位仍是输入框内部的 suffix，与竖排同一套写法。
   // row：一项一行，且三列真的对齐（标签 / 控件 / 说明）——每行各自 flex 时列会参差。
-  // 关联改用 htmlFor + useId：标签不再是控件的父节点，但屏幕阅读器与点击仍然对得上。
+  // 关联仍靠 Label 包住控件（不用 htmlFor + useId）：两者只做兄弟时读屏念不出输入框的名字，
+  // 27 个输入框共用这一条。早前试过 id 关联，已推翻 —— 注释留在原处只会误导后来的人。
   // 外层不套小卡片：背景与圆角叠在一起会让整块发闷，分组交给分割线。
   // row：一项一行。控件仍然**放在 Label 里面**（关联靠这个，不靠 id：两者只做兄弟时
   // 读屏念不出输入框的名字，这一条 27 个输入框共用，不能破）。列之所以能跨行对齐，是因为
@@ -1553,7 +1554,7 @@ function DotStrip({ values, marker, className = "" }: { values: number[]; marker
       {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
       {marker != null && (
         <>
-          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-foreground/50" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-primary/70" strokeWidth="1" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
           <text x={x(marker) + 3} y={12} fontSize="9" className="fill-muted-foreground">{marker} ms</text>
         </>
       )}
@@ -2083,8 +2084,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			<DialogHeader className="shrink-0">
       				<DialogTitle className="flex flex-wrap items-baseline gap-x-2">
       					{openTask.name}
-      					<span className="text-sm font-normal text-muted-foreground">
-      						{openTask.target} · {openTask.kind === "icmp" ? "ICMP" : "TCP"} · {openTask.nodes.length} 台节点
+				<span className="flex flex-wrap items-center gap-2 text-sm font-normal text-muted-foreground">
+      						<span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">{openTask.target}</span>
+      						<span className="rounded border px-1.5 py-0.5 text-xs">{openTask.kind === "icmp" ? "ICMP" : "TCP"}</span>
+      						<span className="text-xs">共 {openTask.nodes.length} 台节点</span>
       					</span>
       					<Help>
       						每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 平均会藏起离群的那台，所以逐节点摊在这里看。
@@ -2107,7 +2110,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
       				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
-      					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : nodeName(top.node)], ["有数据的节点", `共 ${all.length} 台`, null]].map(([k, v, badge]) => (
+      					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
       						<div key={k as string} className="px-4">
       							<div className="text-xs text-muted-foreground">{k as string}</div>
       							<div className="tnum text-lg font-medium leading-tight">{v as string}</div>
@@ -2168,7 +2171,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	      						{all.map((p) => (
 	      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
 	      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
-	      								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
+	      								<span className="relative h-2 min-w-0 flex-1 rounded-sm bg-foreground/10">
 	      									<span className="absolute inset-y-[-3px] left-1/2 w-px bg-foreground/25" />
 	      									{p.avg != null && (
 	      										<span
