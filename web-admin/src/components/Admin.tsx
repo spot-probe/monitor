@@ -1545,6 +1545,10 @@ function BandChart({ points, height = 150 }: {
       <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
       <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
       <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。放右端并用 end 锚点，避免溢出。 */}
+      <text x={w - 2} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
+        P50 {points[points.length - 1].p50} ms
+      </text>
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -1581,7 +1585,7 @@ function Histogram({ values, picked, onPick }: {
   for (const v of s) counts[bucketOf(v, cuts)]++
   const max = Math.max(...counts, 1)
   const w = 640
-  const h = 84
+  const h = 96
   const bw = w / 5
   const label = (i: number) => {
     const lo = i === 0 ? 0 : cuts[i - 1]
@@ -1591,19 +1595,19 @@ function Histogram({ values, picked, onPick }: {
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="w-full" role="img" aria-label="各节点平均延迟的分桶分布">
       {counts.map((c, i) => {
-        const bh = Math.max(2, (c / max) * (h - 26))
+        const bh = Math.max(2, (c / max) * (h - 46))
         const on = picked === i
         return (
           <g key={i} role="button" tabIndex={0} aria-pressed={on} aria-label={`${label(i)}：${c} 台`}
               onClick={() => onPick(on ? null : i)}
               onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(on ? null : i) } }}
               className="cursor-pointer outline-none focus-visible:opacity-80">
-            <rect x={i * bw + 4} y={2} width={bw - 8} height={h - 26} className={on ? "fill-muted" : "fill-transparent"} />
+            <rect x={i * bw + 4} y={2} width={bw - 8} height={h - 28} className={on ? "fill-muted" : "fill-transparent"} />
             <rect x={i * bw + 10} y={h - 16 - bh} width={bw - 20} height={bh} rx="2"
               className={i === 4 ? "fill-warn-fg/60" : i === 3 ? "fill-primary/45" : "fill-primary/30"}
               stroke="currentColor" strokeWidth={on ? 1.5 : 0} vectorEffect="non-scaling-stroke" />
-            <text x={i * bw + bw / 2} y={h - 20 - bh} fontSize="10" textAnchor="middle" className="fill-foreground">{c}</text>
-            <text x={i * bw + bw / 2} y={h - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">{label(i)}</text>
+            <text x={i * bw + bw / 2} y={h - 22 - bh} fontSize="10" textAnchor="middle" className="fill-foreground">{c}</text>
+            <text x={i * bw + bw / 2} y={h - 6} fontSize="9" textAnchor="middle" className="fill-muted-foreground">{label(i)}</text>
           </g>
         )
       })}
