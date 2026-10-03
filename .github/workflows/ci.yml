@@ -65,3 +65,44 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+        # Behaviour and **real layout**, on the running hub. jsdom cannot see either one:
+        # it has no layout engine (every box is 0x0), and "the dialog closed" is a fact
+        # about the rendered DOM. Two bugs shipped this month that only the rendered page
+        # could show, so the suite runs against a real server rather than a fake DOM.
+        #
+        # The panel's dist/ is already built above: the debug hub serves it from disk.
+        - run: npx playwright install --with-deps chromium
+          working-directory: web-admin
+
+        # A throwaway database, so the suite never depends on anyone's data, and the
+        # password is read from the hub's own first-run output -- no secret to keep in
+        # sync with a fixture.
+        - name: start a hub on a throwaway database
+          run: |
+            cargo build
+            mkdir -p "$RUNNER_TEMP/e2e-themes"
+            ./target/debug/monitor-hub --listen 127.0.0.1:28190 \
+              --db "$RUNNER_TEMP/e2e.db" --themes "$RUNNER_TEMP/e2e-themes" \
+              > "$RUNNER_TEMP/hub.log" 2>&1 &
+            for _ in $(seq 1 40); do
+              grep -q 'Emergency password:' "$RUNNER_TEMP/hub.log" && break
+              sleep 0.5
+            done
+            grep -q 'Emergency password:' "$RUNNER_TEMP/hub.log" ||
+              { echo '::error::the hub did not start'; cat "$RUNNER_TEMP/hub.log"; exit 1; }
+            echo "PW_PASSWORD=$(sed -n 's/.*Emergency password: //p' "$RUNNER_TEMP/hub.log" | head -n 1)" >> "$GITHUB_ENV"
+            curl -sf -o /dev/null http://127.0.0.1:28190/admin/ ||
+              { echo '::error::the panel is not answering'; exit 1; }
+
+        - run: npx playwright test
+          working-directory: web-admin
+
+        - uses: actions/upload-artifact@v4
+          if: failure()
+          with:
+            name: playwright-report
+            path: |
+              web-admin/test-results
+              web-admin/playwright-report
+            retention-days: 7
