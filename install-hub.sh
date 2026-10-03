@@ -354,6 +354,7 @@ install_hub() {
 	# Keep the old binary until the new one has proved it starts: a failed upgrade
 	# must leave a running hub rather than a dead service.
 	backup=""
+	db_backup=""
 	if [ -f "$BIN" ]; then
 		backup="$BIN.old"
 		# Never over an existing backup. A run that died between the install below
@@ -364,6 +365,24 @@ install_hub() {
 	fi
 	# Stopped first so the copy does not land beneath a live process.
 	systemctl stop "$SERVICE" 2>/dev/null || true
+	# 新二进制第一次打开数据库时会跑迁移 —— 迁移搞砸之后唯一的路就是升级前的那份拷贝。
+	# 服务已停，所以直接 cp 文件：这台机器上没有 sqlite3（真机上查过，确实没有），而干净
+	# 关闭会把 WAL 落盘，所以整份拷贝就是完整的。第一次安装没有可备份的东西。
+	if [ -z "$first" ]; then
+		install -d -m 0700 -o "$USER_NAME" "$DATA/backups"
+		db_backup="$DATA/backups/monitor-$(date '+%Y%m%d-%H%M%S').db"
+		if cp -f "$DATA/monitor.db" "$db_backup" 2>/dev/null; then
+			if [ -f "$DATA/monitor.db-wal" ]; then cp -f "$DATA/monitor.db-wal" "$db_backup-wal" 2>/dev/null || true; fi
+			# 只留最近三份：备份要能救急，不该把磁盘吃满。
+			ls -1t "$DATA/backups"/monitor-*.db 2>/dev/null | tail -n +4 | while read -r stale; do
+				rm -f "$stale" "$stale-wal"
+			done
+			ok "备份" "$(basename "$db_backup")"
+		else
+			db_backup=""
+			warn "备份" "数据库没能备份；升级照旧，但回滚将没有数据库可恢复"
+		fi
+	fi
 	install -m 0755 "$tmp/$asset" "$BIN"
 	# The download is complete. Cleared here as well as on EXIT because the menu
 	# calls this more than once per run and each call replaces the trap, leaving
@@ -439,7 +458,10 @@ UNIT
 	# is-active answers before a unit that exits immediately has done so, and the
 	# first run also computes an argon2 hash. Wait, then query.
 	sleep 3
-	if ! systemctl is-active --quiet "$SERVICE"; then
+	# is-active 只说明进程活着。再问它一句：端口上有没有应答 —— 起来了但没在服务的 hub
+	# （绑定失败、前面有代理、或者它拒绝了刚迁移的库）从这里看和一切正常没有区别。
+	code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$HOST:$PORT/api/me" 2>/dev/null || echo 000)"
+	if ! systemctl is-active --quiet "$SERVICE" || [ "$code" = "000" ]; then
 		# A first install has nothing to keep serving, and the database it just
 		# created holds a password that was never shown: leaving it would make the
 		# next run an upgrade, which prints none. Removed and disabled, so a rerun
@@ -449,6 +471,13 @@ UNIT
 			rm -f "$DATA/monitor.db" "$DATA/monitor.db-wal" "$DATA/monitor.db-shm"
 			die "服务启动失败。日志：journalctl -u $SERVICE -n 50"
 		fi
+			# 新二进制可能已经动过库。把它放回升级前那一份：迁移是加法式的、旧版本来也能开，
+			# 但恢复拷贝更确定 —— 反正服务刚停，中间没有别人的写入。
+			if [ -n "$db_backup" ] && [ -f "$db_backup" ]; then
+				cp -f "$db_backup" "$DATA/monitor.db"
+				rm -f "$DATA/monitor.db-wal" "$DATA/monitor.db-shm"
+				ok "备份" "已把数据库恢复到升级前那一份"
+			fi
 		if [ -n "$backup" ]; then
 			install -m 0755 "$backup" "$BIN"
 			rm -f "$backup"
@@ -458,7 +487,7 @@ UNIT
 		die "服务启动失败。日志：journalctl -u $SERVICE -n 50"
 	fi
 	rm -f "$BIN.old"
-	ok "服务" "已启动并开机自启"
+	ok "服务" "已启动并开机自启；http://$HOST:$PORT/api/me 应答 $code"
 
 	# A release predating `--reset-password` refuses it and sets the password on
 	# its first start instead, printing it to the journal. Only this run's lines:
