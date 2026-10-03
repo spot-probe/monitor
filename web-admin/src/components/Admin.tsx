@@ -2154,33 +2154,37 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						<h4 className="text-sm font-medium">各节点明细</h4>
       						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
       					</div>
-      					<div className="sticky top-0 z-10 -mx-1 flex items-center gap-3 border-b border-border bg-background px-1 pb-1 text-xs text-muted-foreground">
-			<span className="w-40 shrink-0">节点</span>
-			<span className="min-w-0 flex-1">延迟分布</span>
-			<span className="w-16 shrink-0 text-right">平均</span>
-			<span className="w-12 shrink-0 text-right">丢包</span>
-			<span className="w-14 shrink-0 text-right">探测</span>
-		</div>
-		<div className="mt-1 space-y-1">
-      						{all.map((p) => (
-      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
-      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
-      								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
-      									<span className="absolute inset-y-[-3px] left-1/2 w-px bg-foreground/25" />
-      									{p.avg != null && (
-      										<span
-      											className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
-      											style={dev(p.avg) >= 0
-      												? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
-      												: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
-      										/>
-      									)}
-      								</span>
-      								<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
-      								<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
-      								<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
-      							</div>
-      						))}
+      					{/* 明细自己滚：上面两张图因此始终留在视野里，往下看节点时不用来回翻。这里给一个有边界
+      					    的滚动区，是因为它**确实是**一个滚动区 —— 框线在标这件事，不是为了套卡片。 */}
+      					<div className="mt-2 max-h-[42vh] overflow-y-auto overscroll-contain rounded-lg border">
+	      					<div className="sticky top-0 z-10 -mx-1 flex items-center gap-3 border-b border-border bg-background px-1 pb-1 text-xs text-muted-foreground">
+				<span className="w-40 shrink-0">节点</span>
+				<span className="min-w-0 flex-1">延迟分布</span>
+				<span className="w-16 shrink-0 text-right">平均</span>
+				<span className="w-12 shrink-0 text-right">丢包</span>
+				<span className="w-14 shrink-0 text-right">探测</span>
+			</div>
+			<div className="mt-1 space-y-1">
+	      						{all.map((p) => (
+	      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
+	      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
+	      								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
+	      									<span className="absolute inset-y-[-3px] left-1/2 w-px bg-foreground/25" />
+	      									{p.avg != null && (
+	      										<span
+	      											className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
+	      											style={dev(p.avg) >= 0
+	      												? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
+	      												: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
+	      										/>
+	      									)}
+	      								</span>
+	      								<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
+	      								<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+	      								<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
+	      							</div>
+	      						))}
+	      					</div>
       					</div>
       				</section>
       			</div>
