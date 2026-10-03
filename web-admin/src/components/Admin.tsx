@@ -20,6 +20,7 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingError, type PingTask, type Source } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -146,7 +147,7 @@ function Help({ children, width = "max-w-64" }: { children: React.ReactNode; wid
   )
 }
 
-function Field({ label, hint, help, suffix, className = "", row = false, icon, children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; row?: boolean; icon?: React.ReactNode; children: React.ReactNode }) {
+function Field({ label, hint, help, suffix, className = "", row = false, icon, controlClassName, children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; row?: boolean; icon?: React.ReactNode; controlClassName?: string; children: React.ReactNode }) {
   // row：一项压成一行 —— 标签与控件在左，说明在右。竖排时三行说明把卡片撑得很高，
   // 而它们本来就短；横排后一眼能扫完。单位仍是输入框内部的 suffix，与竖排同一套写法。
   // row：一项一行，且三列真的对齐（标签 / 控件 / 说明）——每行各自 flex 时列会参差。
@@ -192,12 +193,12 @@ function Field({ label, hint, help, suffix, className = "", row = false, icon, c
           made the label do two jobs, and the reader had to parse past the parenthesis to
           find the field's name. */}
       {suffix ? (
-        <div className="relative">
+        <div className={cn("relative w-full", controlClassName)}>
           {children}
           <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">{suffix}</span>
         </div>
       ) : (
-        children
+        <div className={cn("w-full", controlClassName)}>{children}</div>
       )}
       </Label>
       {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
@@ -2569,63 +2570,72 @@ function SettingsTab() {
 
   return (
     <div className="space-y-4">
-      <Card className="gap-4 p-5">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="站点名称">
-            <Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
-          </Field>
-          <Field
-            label="历史数据保留天数"
-            hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
-          >
-            <Input
-              type="number"
-              min={1}
-              max={365}
-              value={String(s.retention_days ?? "")}
-              onChange={(e) => set("retention_days", e.target.value)}
-              placeholder="90"
-            />
-          </Field>
-          <Field
-            label="GitHub 代理"
-            hint="留空直连。仅在 hub 自己拉不到 GitHub Release 时填。这个地址返回的字节会被安装到每一台节点上，只填信得过的镜像"
-          >
-            <Input
-              value={String(s.github_proxy ?? "")}
-              onChange={(e) => set("github_proxy", e.target.value)}
-              placeholder="https://ghfast.top"
-            />
-          </Field>
-        </div>
-        {/* 不是 <label>：点文字不该切换开关，只有开关自己可点。
-            aria-labelledby 保住读屏软件那边的关联。 */}
-        <div className="flex items-center gap-2 text-sm">
-          <Switch
-            aria-labelledby="public-page-label"
-            checked={s.public_page !== "off"}
-            onCheckedChange={(v) => set("public_page", v ? "on" : "off")}
-          />
-          <span id="public-page-label">开放公开状态页，关闭后所有页面需登录</span>
-        </div>
-        <div>
-          <Button
-            size="sm"
-            onClick={() =>
-              save({
-                site_name: String(s.site_name ?? ""),
-                // `||` rather than `??`: the hub returns "" for an unset key
-                // rather than null, and "" is the one value this key's write path
-                // refuses.
-                retention_days: String(s.retention_days || "90"),
-                github_proxy: String(s.github_proxy ?? ""),
-                public_page: s.public_page === "off" ? "off" : "on",
-              })
-            }
-          >
-            保存站点设置
-          </Button>
-        </div>
+      <Card className="gap-6 p-6">
+      	{/* 单列，而不是两列：这几项的说明长短差得多，两列时右边被撑高、左边留一大片空白。
+      	    说明放在输入框下方（这里的最长有两行），输入框本身限宽，免得在宽屏上拉成一条长线。 */}
+      	<div className="space-y-6">
+      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" controlClassName="max-w-xs">
+      			<Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
+      		</Field>
+      		<Field
+      			label="历史数据保留天数"
+      			suffix="天"
+      			controlClassName="max-w-40"
+      			hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
+      		>
+      			<Input
+      				type="number"
+      				min={1}
+      				max={365}
+      				className="pr-9"
+      				value={String(s.retention_days ?? "")}
+      				onChange={(e) => set("retention_days", e.target.value)}
+      				placeholder="90"
+      			/>
+      		</Field>
+      		<Field
+      			label="GitHub 代理"
+      			controlClassName="max-w-2xl"
+      			hint="留空直连。仅在 hub 自己拉不到 GitHub Release 时填。这个地址返回的字节会被安装到每一台节点上，只填信得过的镜像"
+      		>
+      			<Input value={String(s.github_proxy ?? "")} onChange={(e) => set("github_proxy", e.target.value)} placeholder="https://ghfast.top" />
+      		</Field>
+      	</div>
+
+      	{/* 与上面分开：这是「网站对外可见性」，不是站点基本信息。整行可读、右端对齐，
+      	    与通知页的开关行同一套写法。 */}
+      	<div className="flex items-center justify-between gap-4 border-t pt-5">
+      		<span className="min-w-0">
+      			<span id="public-page-label" className="block text-sm font-medium">开放公开状态页</span>
+      			<span className="mt-0.5 block text-xs text-muted-foreground">关闭后所有页面需登录才能访问</span>
+      		</span>
+      		<Switch
+      			className="shrink-0"
+      			aria-labelledby="public-page-label"
+      			checked={s.public_page !== "off"}
+      			onCheckedChange={(v) => set("public_page", v ? "on" : "off")}
+      		/>
+      	</div>
+
+      	{/* 分割线之上是读的部分，之下只剩提交。 */}
+      	<div className="flex justify-end gap-2 border-t pt-4">
+      		<Button
+      			size="sm"
+      			onClick={() =>
+      				save({
+      					site_name: String(s.site_name ?? ""),
+      					// `||` rather than `??`: the hub returns "" for an unset key
+      					// rather than null, and "" is the one value this key's write path
+      					// refuses.
+      					retention_days: String(s.retention_days || "90"),
+      					github_proxy: String(s.github_proxy ?? ""),
+      					public_page: s.public_page === "off" ? "off" : "on",
+      				})
+      			}
+      		>
+      			保存站点设置
+      		</Button>
+      	</div>
       </Card>
     </div>
   )
@@ -2926,7 +2936,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       		<h4 className="flex items-center gap-2 text-sm font-medium">
       			<Bell className="size-4 text-muted-foreground" /> 消息提醒开关
       		</h4>
-      		<div className="divide-y">
+      		{/* 开关之间不画分割线：它们是并列的独立开关，一条线会读成「分组的上下两半」。
+      		    以后新增的开关直接加进这个列表，同样不带线。 */}
+      		<div>
       			<div className="flex items-center justify-between gap-4 rounded-lg py-3.5 transition-colors hover:bg-muted/40">
       				<span className="min-w-0">
       					<span id="notify-login-label" className="block text-sm font-medium">登录后台时提醒</span>
