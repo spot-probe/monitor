@@ -1524,7 +1524,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [probeNeeds, setProbeNeeds] = useState<PingError[]>([])
 	// 逐节点的数字。上面那条线是各节点按时戳**平均**后的结果 —— 一台机器慢，平均线看不出来，
 	// 而合并后的丢包取的是最差的那台、却不说是哪台。这里把每个节点自己的均值/丢包/样本留下来。
-	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number }[]>>({})
+	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; series: number[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
@@ -1570,12 +1570,14 @@ function Ping({ nodes }: { nodes: Node[] }) {
       const buckets = new Map<number, Map<number, number[]>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
 		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
-		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null }>>()
-		const remember = (taskId: number, node: number, patch: Partial<{ sum: number; n: number; loss: number | null }>) => {
+		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; series: number[] }>>()
+		// 逐节点记录：延迟求和/次数（最后再除）、丢包、以及**该节点自己的序列** ——
+		// 序列是用来画每行那条迷你曲线的：一直慢与偶尔尖峰，均值分不出来。
+		const at = (taskId: number, node: number) => {
 			const per = byNode.get(taskId) ?? new Map()
-			const cur = per.get(node) ?? { sum: 0, n: 0, loss: null }
-			per.set(node, { ...cur, ...patch })
+			if (!per.has(node)) per.set(node, { sum: 0, n: 0, loss: null, series: [] })
 			byNode.set(taskId, per)
+			return per.get(node)!
 		}
       const loss = new Map<number, number[]>()
       for (const [nid, d] of answers) {
@@ -1585,13 +1587,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
 				// 同一节点、同一任务的样本累加（延迟求和与次数分开存，最后再除）。
-				const per = byNode.get(p.task_id)?.get(nid) ?? { sum: 0, n: 0, loss: null }
-				remember(p.task_id, nid, { sum: per.sum + p.latency, n: per.n + 1 })
+				const entry = at(p.task_id, nid)
+				entry.sum += p.latency
+				entry.n += 1
+				entry.series.push(p.latency)
           buckets.set(p.task_id, perTask)
         }
         for (const [id, pct] of Object.entries(d.loss ?? {})) {
           loss.set(Number(id), [...(loss.get(Number(id)) ?? []), pct])
-				remember(Number(id), nid, { loss: pct })
+				at(Number(id), nid).loss = pct
         }
       }
       const next: typeof stats = {}
@@ -1612,7 +1616,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 		const per: typeof perNode = {}
 		for (const [taskId, perNodes] of byNode) {
 			per[taskId] = [...perNodes.entries()]
-				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n }))
+				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n, series: v.series }))
 				.sort((a, b) => b.loss - a.loss || (b.avg ?? -1) - (a.avg ?? -1))
 		}
 		setPerNode(per)
@@ -1846,14 +1850,51 @@ function Ping({ nodes }: { nodes: Node[] }) {
             	<TableRow className="bg-muted/30 hover:bg-muted/30">
             		<TableCell colSpan={7} className="py-3">
             			<div className="space-y-1">
-            				{(perNode[t.id] ?? []).slice(0, 12).map((p) => (
-            					<div key={p.node} className="flex items-center gap-3 text-xs">
-            						<span className="min-w-0 flex-1 truncate">{nodeName(p.node)}</span>
-            						<span className="tnum w-20 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
-            						<span className={`tnum w-14 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
-            						<span className="tnum w-16 text-right text-muted-foreground">{p.samples} 次</span>
-            					</div>
-            				))}
+            				{/* 展示方式的选择：这一栏要回答的是「这台是离群，还是整条都慢」。所以不是折线，而是
+            				    同一尺度下的横向对比 —— 条长按**最差的那台**归一，所有条上叠一条竖线标出上面列表里
+            				    那个数。哪几台在它之上，一眼可见。每行再给一条该节点自己的迷你曲线：一直慢与偶尔
+            				    尖峰，均值分不出来。 */}
+            				{(() => {
+            									const all = perNode[t.id] ?? []
+            									const shown = all.slice(0, 12)
+					// 偏差而不是绝对值：这几台的绝对差只有几毫秒，按「0 到最差」归一后条几乎一样长，
+					// 图就等于没有。截断坐标轴（把最小值当前端）能让差异显形，但那是在骗人 ——
+					// 真正想看的量本来就是「比那个数快多少、慢多少」，所以直接画这个量。
+					const line = stats[t.id]?.last ?? null
+					const dev = (v: number) => (line == null ? 0 : v - line)
+					const span = Math.max(1, ...all.map((x) => Math.abs(dev(x.avg ?? 0))))
+            									const top = all[0]
+            									return (
+            										<>
+            											{all.length > 0 && (
+            												<div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            													<span>最差 <span className="tnum font-medium text-foreground">{top.avg} ms</span>（{nodeName(top.node)}）</span>
+            													<span>列出 {shown.length} / {all.length} 台</span>
+            													<span className="ml-auto">以列表里那个数{line == null ? "" : `（${line} ms）`}为中线，向右更慢、向左更快；条长按最大偏差归一</span>
+            												</div>
+            											)}
+            											{shown.map((p) => (
+            												<div key={p.node} className="flex items-center gap-3 text-xs">
+            													<span className="w-36 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
+									<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
+										{/* 中线就是列表里那个数：条从它出发，向右是更慢、向左是更快。 */}
+										<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
+										{p.avg != null && (
+											<span
+												className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
+												style={dev(p.avg) >= 0
+													? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
+													: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
+											/>
+										)}
+									</span>
+            													<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+            													<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
+            												</div>
+            											))}
+            										</>
+            									)
+            								})()}
             				{(perNode[t.id]?.length ?? 0) > 12 && (
             					<p className="text-xs text-muted-foreground">另有 {perNode[t.id].length - 12} 台未列出（按丢包、延迟从差到好）</p>
             				)}
