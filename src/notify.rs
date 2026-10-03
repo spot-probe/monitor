@@ -4,7 +4,8 @@
 //!
 //! Events: a node going offline and returning, a billing period's traffic
 //! crossing the threshold and the full allowance, expiry dates approaching or
-//! rolled forward, and a sign-in to the panel.
+//! rolled forward, a sign-in to the panel, and a new release of the hub or of the
+//! agent.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
