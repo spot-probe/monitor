@@ -2574,13 +2574,13 @@ function SettingsTab() {
       	{/* 单列，而不是两列：这几项的说明长短差得多，两列时右边被撑高、左边留一大片空白。
       	    说明放在输入框下方（这里的最长有两行），输入框本身限宽，免得在宽屏上拉成一条长线。 */}
       	<div className="space-y-6">
-      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" controlClassName="max-w-2xl">
+      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" controlClassName="max-w-xs">
       			<Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
       		</Field>
       		<Field
       			label="历史数据保留天数"
       			suffix="天"
-      			controlClassName="max-w-2xl"
+      			controlClassName="max-w-40"
       			hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
       		>
       			<Input
