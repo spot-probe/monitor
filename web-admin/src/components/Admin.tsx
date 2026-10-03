@@ -1501,6 +1501,68 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
+/// 折线图：把若干条序列画在同一个坐标系里。
+///
+/// 手写 SVG 而不是引图表库：面板的首屏体积是量过的（一个 bundle 471 KB），为了两张图再塞进
+/// 100 KB 与「把它拆小」的方向相反。纵轴从 0 起 —— 不截断轴，代价是差异看起来比实际小，但那才是真的。
+function LineChart({ lines, height = 150 }: {
+  lines: { key: string; points: { ts: number; latency: number }[]; className?: string; width?: number }[]
+  height?: number
+}) {
+  const all = lines.flatMap((l) => l.points)
+  if (all.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
+  const t0 = Math.min(...all.map((p) => p.ts))
+  const t1 = Math.max(...all.map((p) => p.ts))
+  const hi = Math.max(1, ...all.map((p) => p.latency)) * 1.08
+  const w = 640
+  const pad = 14
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
+  const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
+  const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="各节点延迟随时间的变化">
+      <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-border" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-border/60" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+      {lines.map((l) =>
+        l.points.length > 1 ? (
+          <polyline key={l.key} fill="none" stroke="currentColor" className={l.className} strokeWidth={l.width ?? 1.25}
+            vectorEffect="non-scaling-stroke"
+            points={l.points.map((p) => `${x(p.ts).toFixed(1)},${y(p.latency).toFixed(1)}`).join(" ")} />
+        ) : null,
+      )}
+      <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+      <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
+      <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
+      <text x={w} y={height - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{clock(t1)}</text>
+    </svg>
+  )
+}
+
+/// 点带图：每台节点一个圆点落在延迟轴上，回答「这个离群有多离群」——
+/// 是「一两个孤点」还是「整片右移」。纵轴随意错开几像素，只为让重叠的点看得见。
+function DotStrip({ values, marker, className = "" }: { values: number[]; marker?: number | null; className?: string }) {
+  if (values.length === 0) return null
+  const w = 640
+  const h = 56
+  const base = h - 12
+  const hi = Math.max(1, ...values, marker ?? 0) * 1.06
+  const x = (v: number) => (v / hi) * w
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className={className} role="img" aria-label="各节点平均延迟的分布">
+      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-border" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
+      {marker != null && (
+        <>
+          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-foreground/50" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+          <text x={x(marker) + 3} y={12} fontSize="9" className="fill-muted-foreground">{marker} ms</text>
+        </>
+      )}
+      <text x="0" y={h - 2} fontSize="9" className="fill-muted-foreground">0</text>
+      <text x={w} y={h - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+    </svg>
+  )
+}
+
 function Ping({ nodes }: { nodes: Node[] }) {
 	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
 	const nodeName = (id: number) => nodes.find((n) => n.id === id)?.name ?? `节点 ${id}`
@@ -1515,7 +1577,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -1524,7 +1586,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [probeNeeds, setProbeNeeds] = useState<PingError[]>([])
 	// 逐节点的数字。上面那条线是各节点按时戳**平均**后的结果 —— 一台机器慢，平均线看不出来，
 	// 而合并后的丢包取的是最差的那台、却不说是哪台。这里把每个节点自己的均值/丢包/样本留下来。
-	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; series: number[] }[]>>({})
+	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
@@ -1570,12 +1632,12 @@ function Ping({ nodes }: { nodes: Node[] }) {
       const buckets = new Map<number, Map<number, number[]>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
 		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
-		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; series: number[] }>>()
+		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; points: { ts: number; latency: number }[] }>>()
 		// 逐节点记录：延迟求和/次数（最后再除）、丢包、以及**该节点自己的序列** ——
 		// 序列是用来画每行那条迷你曲线的：一直慢与偶尔尖峰，均值分不出来。
 		const at = (taskId: number, node: number) => {
 			const per = byNode.get(taskId) ?? new Map()
-			if (!per.has(node)) per.set(node, { sum: 0, n: 0, loss: null, series: [] })
+			if (!per.has(node)) per.set(node, { sum: 0, n: 0, loss: null, points: [] })
 			byNode.set(taskId, per)
 			return per.get(node)!
 		}
@@ -1590,7 +1652,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				const entry = at(p.task_id, nid)
 				entry.sum += p.latency
 				entry.n += 1
-				entry.series.push(p.latency)
+				entry.points.push({ ts: p.ts, latency: p.latency })
           buckets.set(p.task_id, perTask)
         }
         for (const [id, pct] of Object.entries(d.loss ?? {})) {
@@ -1600,15 +1662,17 @@ function Ping({ nodes }: { nodes: Node[] }) {
       }
       const next: typeof stats = {}
       for (const [taskId, perTs] of buckets) {
-        const series = [...perTs.entries()]
-          .sort((a, b) => a[0] - b[0])
-          .map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
+			const ordered = [...perTs.entries()].sort((a, b) => a[0] - b[0])
+			const series = ordered.map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
+			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
+			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
           // the thing worth seeing in a list.
           loss: Math.round(Math.max(0, ...(loss.get(taskId) ?? [0]))),
-          series,
+					series,
+					points,
         }
       }
 		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
@@ -1616,7 +1680,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 		const per: typeof perNode = {}
 		for (const [taskId, perNodes] of byNode) {
 			per[taskId] = [...perNodes.entries()]
-				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n, series: v.series }))
+				.map(([node, v]) => ({ node, avg: v.n ? Math.round(v.sum / v.n) : null, loss: Math.round(v.loss ?? 0), samples: v.n, points: v.points }))
 				.sort((a, b) => b.loss - a.loss || (b.avg ?? -1) - (a.avg ?? -1))
 		}
 		setPerNode(per)
@@ -1687,6 +1751,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
   if (!loaded) return <PageSkeleton shape="list" rows={3} />
 
   // 一个监控都没有时，空表格只会让人以为坏了。这里说明它是空的、以及去哪儿加。
+  // 弹窗在看哪一条：列表里那一行给的是各节点的平均，逐节点要摊开看。
+  const openTask = ordered.find((t) => t.id === openNodes) ?? null
+
   if (tasks.length === 0) {
     return (
       <EmptyState
@@ -1732,7 +1799,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
           </TableHeader>
           <TableBody>
             {ordered.map((t, index) => (
-              <>
               <TableRow
                 key={t.id}
                 data-dragging={drag.dragging === t.id || undefined}
@@ -1846,67 +1912,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   </Button>
                 </TableCell>
               </TableRow>
-            {openNodes === t.id && (
-            	<TableRow className="bg-muted/30 hover:bg-muted/30">
-            		<TableCell colSpan={7} className="py-3">
-            			<div className="space-y-1">
-            				{/* 展示方式的选择：这一栏要回答的是「这台是离群，还是整条都慢」。所以不是折线，而是
-            				    同一尺度下的横向对比 —— 条长按**最差的那台**归一，所有条上叠一条竖线标出上面列表里
-            				    那个数。哪几台在它之上，一眼可见。每行再给一条该节点自己的迷你曲线：一直慢与偶尔
-            				    尖峰，均值分不出来。 */}
-            				{(() => {
-            									const all = perNode[t.id] ?? []
-            									const shown = all.slice(0, 12)
-					// 偏差而不是绝对值：这几台的绝对差只有几毫秒，按「0 到最差」归一后条几乎一样长，
-					// 图就等于没有。截断坐标轴（把最小值当前端）能让差异显形，但那是在骗人 ——
-					// 真正想看的量本来就是「比那个数快多少、慢多少」，所以直接画这个量。
-					const line = stats[t.id]?.last ?? null
-					const dev = (v: number) => (line == null ? 0 : v - line)
-					const span = Math.max(1, ...all.map((x) => Math.abs(dev(x.avg ?? 0))))
-            									const top = all[0]
-            									return (
-            										<>
-            											{all.length > 0 && (
-            												<div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            													<span>最差 <span className="tnum font-medium text-foreground">{top.avg} ms</span>（{nodeName(top.node)}）</span>
-            													<span>列出 {shown.length} / {all.length} 台</span>
-            													<span className="ml-auto">以列表里那个数{line == null ? "" : `（${line} ms）`}为中线，向右更慢、向左更快；条长按最大偏差归一</span>
-            												</div>
-            											)}
-            											{shown.map((p) => (
-            												<div key={p.node} className="flex items-center gap-3 text-xs">
-            													<span className="w-36 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
-									<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
-										{/* 中线就是列表里那个数：条从它出发，向右是更慢、向左是更快。 */}
-										<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
-										{p.avg != null && (
-											<span
-												className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
-												style={dev(p.avg) >= 0
-													? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
-													: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
-											/>
-										)}
-									</span>
-            													<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
-            													<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
-            												</div>
-            											))}
-            										</>
-            									)
-            								})()}
-            				{(perNode[t.id]?.length ?? 0) > 12 && (
-            					<p className="text-xs text-muted-foreground">另有 {perNode[t.id].length - 12} 台未列出（按丢包、延迟从差到好）</p>
-            				)}
-            				{/* 展开却一片空白最让人困惑：还没收到上报时要说出来。 */}
-            				{(perNode[t.id]?.length ?? 0) === 0 && (
-            					<p className="text-xs text-muted-foreground">还没有收到任何节点的上报。</p>
-            				)}
-            			</div>
-            		</TableCell>
-            	</TableRow>
-            )}
-              </>
             ))}
             {loaded && tasks.length === 0 && (
               <TableRow>
@@ -2062,6 +2067,101 @@ function Ping({ nodes }: { nodes: Node[] }) {
           </DialogContent>
         </Dialog>
       )}
+      {/* 一行装不下的东西放这里：一条探测在列表里是一行（各节点按时间戳平均），
+          而「哪台在拖后腿」必须按节点摊开 —— 平均按定义会藏起离群的那台。 */}
+      {openTask && (
+      	<Dialog open onOpenChange={(open) => !open && setOpenNodes(null)}>
+      		<DialogContent className="sm:max-w-3xl">
+      			<DialogHeader>
+      				<DialogTitle className="flex flex-wrap items-baseline gap-x-2">
+      					{openTask.name}
+      					<span className="text-sm font-normal text-muted-foreground">
+      						{openTask.target} · {openTask.kind === "icmp" ? "ICMP" : "TCP"} · {openTask.nodes.length} 台节点
+      					</span>
+      				</DialogTitle>
+      				<DialogDescription className="leading-relaxed">
+      					每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 一台机器慢，平均线看不出来。
+      				</DialogDescription>
+      			</DialogHeader>
+      	
+      			{(() => {
+      				const all = perNode[openTask.id] ?? []
+      				if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
+      				const top = all[0]
+      				const line = stats[openTask.id]?.last ?? null
+      				// 条以列表值为中线，按最大偏差归一：绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
+      				const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
+      				const dev = (v: number) => v - (line ?? v)
+      				return (
+      					<>
+      						<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+      							<span>列表值 <span className="tnum font-medium">{line ?? "—"} ms</span></span>
+      							<span>最差 <span className="tnum font-medium">{top.avg} ms</span>（{nodeName(top.node)}）</span>
+      							<span className="text-muted-foreground">共 {all.length} 台</span>
+      						</div>
+      						<p className="mt-1 text-xs text-muted-foreground">条以列表值为中线，向右更慢、向左更快；条长按最大偏差归一。</p>
+      				{(() => {
+      					const merged = stats[openTask.id]?.points ?? []
+      					const worst3 = all.slice(0, 3)
+      					const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
+      					return (
+      						<>
+      							{merged.length > 1 && (
+      								<div className="mt-4">
+      									<p className="text-xs text-muted-foreground">延迟随时间 —— 看一台机器是「一直慢」还是「偶尔尖峰」</p>
+      									<LineChart
+      										lines={[
+      											{ key: "merged", points: merged, className: "text-muted-foreground", width: 2 },
+      											...worst3.map((p, i) => ({ key: String(p.node), points: p.points, className: colours[i] })),
+      										]}
+      									/>
+      									<div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+      										<span className="text-muted-foreground">— 列表值 {line ?? "—"} ms</span>
+      										{worst3.map((p, i) => (
+      											<span key={p.node} className={colours[i]}>— {nodeName(p.node)} {p.avg} ms</span>
+      										))}
+      									</div>
+      								</div>
+      							)}
+      							<div className="mt-4">
+      								<p className="text-xs text-muted-foreground">每台节点一个点 —— 是「一两个孤点」还是「整片右移」</p>
+      								<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+      							</div>
+      						</>
+      					)
+      				})()}
+      						<div className="mt-3 max-h-[52vh] space-y-1 overflow-y-auto pr-1">
+      							{all.map((p) => (
+      								<div key={p.node} className="flex items-center gap-3 text-xs">
+      									<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
+      									<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
+      										<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
+      										{p.avg != null && (
+      											<span
+      												className={`absolute inset-y-0 ${dev(p.avg) >= 0 ? "rounded-r-sm bg-warn-fg/70" : "rounded-l-sm bg-primary/60"}`}
+      												style={dev(p.avg) >= 0
+      													? { left: "50%", width: `${(dev(p.avg) / span) * 50}%` }
+      													: { right: "50%", width: `${(-dev(p.avg) / span) * 50}%` }}
+      											/>
+      										)}
+      									</span>
+      									<span className="tnum w-16 shrink-0 text-right">{p.avg == null ? "—" : `${p.avg} ms`}</span>
+      									<span className={`tnum w-12 shrink-0 text-right ${p.loss >= 5 ? "text-danger-fg" : p.loss > 0 ? "text-warn-fg" : "text-muted-foreground"}`}>{p.loss}%</span>
+      									<span className="tnum w-14 shrink-0 text-right text-muted-foreground">{p.samples} 次</span>
+      								</div>
+      							))}
+      						</div>
+      					</>
+      				)
+      			})()}
+      	
+      			<DialogFooter className="border-t pt-4">
+      				<Button variant="ghost" onClick={() => setOpenNodes(null)}>关闭</Button>
+      			</DialogFooter>
+      		</DialogContent>
+      	</Dialog>
+      )}
+
       {deleting && (
         <ConfirmDialog
           title={`删除监控「${deleting.name}」？`}
