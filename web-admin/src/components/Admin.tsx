@@ -2109,7 +2109,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		return (
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
-      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
+      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted py-3">
       					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
       						<div key={k as string} className="px-4">
       							<div className="text-xs text-muted-foreground">{k as string}</div>
@@ -2121,7 +2121,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       				</div>
 
       				{merged.length > 1 && (
-      					<section className="mt-6 border-t border-foreground/20 pt-5">
+      					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       							<h4 className="text-sm font-semibold">延迟随时间</h4>
       							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
@@ -2131,7 +2131,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       								))}
       							</div>
       						</div>
-      						<div className="rounded-lg bg-muted/40 p-3">
+      						<div className="rounded-lg bg-muted p-3">
 				<LineChart
       							lines={[
       								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
@@ -2142,25 +2142,23 @@ function Ping({ nodes }: { nodes: Node[] }) {
       					</section>
       				)}
 
-      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
-      						<h4 className="text-sm font-semibold">各节点平均</h4>
-      						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
+      						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点平均<Help>每台节点一个圆点，落在延迟轴上；竖线是上面那个列表值。纵轴上的错开只是为了不让重叠的点盖住彼此。</Help></h4>
       					</div>
-      					<div className="rounded-lg bg-muted/40 p-3">
+      					<div className="rounded-lg bg-muted p-3">
 				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
 			</div>
       				</section>
 
-      				<section className="mt-6 border-t border-foreground/20 pt-5">
+      				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
-      						<h4 className="text-sm font-semibold">各节点明细</h4>
-      						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
+      						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点明细<Help>条形以列表值为中线：向右更慢、向左更快，条长按这些节点里最大的偏差归一。按最差在前排序。</Help></h4>
       					</div>
       					{/* 明细自己滚：上面两张图因此始终留在视野里，往下看节点时不用来回翻。这里给一个有边界
       					    的滚动区，是因为它**确实是**一个滚动区 —— 框线在标这件事，不是为了套卡片。 */}
       					<div className="mt-2 max-h-[42vh] overflow-y-auto overscroll-contain rounded-lg border">
-	      					<div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background px-2 pb-1 text-xs text-muted-foreground">
+	      					<div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-muted px-2 pb-1 text-xs text-muted-foreground">
 				<span className="w-40 shrink-0">节点</span>
 				<span className="min-w-0 flex-1">延迟分布</span>
 				<span className="w-16 shrink-0 text-right">平均</span>
