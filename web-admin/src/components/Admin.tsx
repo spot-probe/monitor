@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { Gauge, Timer } from "lucide-react"
+import { ExternalLink } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -3733,9 +3734,10 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
           <div className="flex items-center gap-3">
             <VersionPair current={versions.hub} latest={versions.hub_latest} />
             {behind(versions.hub, versions.hub_latest) && (
-              <Button size="sm" variant="ghost" asChild>
+              <Button size="sm" variant="link" asChild>
                 <a href={releaseUrl("monitor", versions.hub_latest)} target="_blank" rel="noreferrer">
-                  发布说明
+                  发布说明<ExternalLink />
+                  <span className="sr-only">（在新标签页打开）</span>
                 </a>
               </Button>
             )}
@@ -3779,9 +3781,10 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
                     <Copy className="size-4" /> 复制命令
                   </Button>
                   {agentLatest && (
-                    <Button size="sm" variant="ghost" asChild>
+                    <Button size="sm" variant="link" asChild>
                       <a href={releaseUrl("agent", agentLatest)} target="_blank" rel="noreferrer">
-                        发布说明
+                        发布说明<ExternalLink />
+                        <span className="sr-only">（在新标签页打开）</span>
                       </a>
                     </Button>
                   )}
