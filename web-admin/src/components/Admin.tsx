@@ -1502,35 +1502,49 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
-/// 折线图：把若干条序列画在同一个坐标系里。
+/// 分位数（输入需已排序）。区间带取 P25–P75，线取 P50 / P90 / P99。
+function pctl(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const i = (sorted.length - 1) * p
+  const lo = Math.floor(i)
+  const hi = Math.ceil(i)
+  return lo === hi ? sorted[lo] : Math.round(sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo))
+}
+
+/// 百分位区间带：一张图同时回答「趋势」与「离散」。
 ///
-/// 手写 SVG 而不是引图表库：面板的首屏体积是量过的（一个 bundle 471 KB），为了两张图再塞进
-/// 100 KB 与「把它拆小」的方向相反。纵轴从 0 起 —— 不截断轴，代价是差异看起来比实际小，但那才是真的。
-function LineChart({ lines, height = 150 }: {
-  lines: { key: string; points: { ts: number; latency: number }[]; className?: string; width?: number }[]
+/// 原来这里是「合并线 + 最差三台」的折线图，旁边另有一张蜂群图看当前分布。区间带把两件事合起来：
+/// 中间那层带子是 P25–P75（一半的节点落在里面），P50 是中位数，P90/P99 是长尾。于是既看得见趋势，
+/// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
+/// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
+function BandChart({ points, height = 150 }: {
+  points: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[]
   height?: number
 }) {
-  const all = lines.flatMap((l) => l.points)
-  if (all.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
-  const t0 = Math.min(...all.map((p) => p.ts))
-  const t1 = Math.max(...all.map((p) => p.ts))
-  const hi = Math.max(1, ...all.map((p) => p.latency)) * 1.08
+  if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
+  const t0 = Math.min(...points.map((p) => p.ts))
+  const t1 = Math.max(...points.map((p) => p.ts))
+  const hi = Math.max(1, ...points.map((p) => p.p99)) * 1.08
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
   const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
+  const line = (f: (q: (typeof points)[number]) => number) =>
+    points.map((q) => `${x(q.ts).toFixed(1)},${y(f(q)).toFixed(1)}`).join(" ")
+  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形。
+  const band = `${points.map((q) => `${x(q.ts).toFixed(1)},${y(q.p75).toFixed(1)}`).join(" ")} ${[...points]
+    .reverse()
+    .map((q) => `${x(q.ts).toFixed(1)},${y(q.p25).toFixed(1)}`)
+    .join(" ")}`
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
-    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="各节点延迟随时间的变化">
+    <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-      {lines.map((l) =>
-        l.points.length > 1 ? (
-          <polyline key={l.key} fill="none" stroke="currentColor" className={l.className} strokeWidth={l.width ?? 1.25}
-            vectorEffect="non-scaling-stroke"
-            points={l.points.map((p) => `${x(p.ts).toFixed(1)},${y(p.latency).toFixed(1)}`).join(" ")} />
-        ) : null,
-      )}
+      <polygon points={band} className="fill-primary/15" />
+      <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -1578,7 +1592,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -1590,8 +1604,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
-	// 图例点中的是哪一台：其余折线淡出，用来在噪声里跟住一条线。null = 都不淡。
-	const [picked, setPicked] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1669,6 +1681,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			const series = ordered.map(([, samples]) => Math.round(samples.reduce((a, b) => a + b, 0) / samples.length))
 			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
 			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
+			// 分位数：把同一时刻所有节点的样本排序后取。前端算得出来 —— 所以这件事不需要新接口。
+			const pct = ordered.map(([ts, samples]) => {
+				const s = [...samples].sort((x, y) => x - y)
+				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99) }
+			})
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
@@ -1676,6 +1693,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
           loss: Math.round(Math.max(0, ...(loss.get(taskId) ?? [0]))),
 					series,
 					points,
+					pct,
         }
       }
 		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
@@ -1901,7 +1919,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   	<Button
                   		variant="ghost"
                   		size="icon"
-                  		onClick={() => { setPicked(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
+                  		onClick={() => setOpenNodes(openNodes === t.id ? null : t.id)}
                   		title="节点明细"
                   		aria-label="节点明细"
                   		aria-expanded={openNodes === t.id}
@@ -2103,9 +2121,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							// 条以列表值为中线，按最大偏差归一：这几台的绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
       		const span = Math.max(1, ...all.map((x) => Math.abs((x.avg ?? 0) - (line ?? 0))))
       		const dev = (v: number) => v - (line ?? v)
-      		const merged = stats[openTask.id]?.points ?? []
-      		const worst3 = all.slice(0, 3)
-      							const colours = ["text-warn-fg", "text-primary", "text-foreground/40"]
+      		const pct = stats[openTask.id]?.pct ?? []
       		return (
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
@@ -2120,24 +2136,19 @@ function Ping({ nodes }: { nodes: Node[] }) {
       					))}
       				</div>
 
-      				{merged.length > 1 && (
+      				{pct.length > 1 && (
       					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       							<h4 className="text-sm font-semibold">延迟随时间</h4>
       							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
-      								<span className="text-muted-foreground">— 列表值</span>
-      								{worst3.map((p, i) => (
-      									<button key={p.node} type="button" aria-pressed={picked === p.node} title="点击只看这一条" onClick={() => setPicked(picked === p.node ? null : p.node)} className={`rounded px-1 transition-opacity hover:bg-muted ${colours[i]} ${picked == null || picked === p.node ? "" : "opacity-30"}`}>— {nodeName(p.node)} · {p.avg} ms</button>
-      								))}
+      								<span className="text-primary">— P50 中位数</span>
+      								<span className="text-warn-fg/70">— P90</span>
+      								<span className="text-warn-fg">— P99（最慢的那批）</span>
+      								<span className="text-primary/60">▉ 中间一半的节点（P25–P75）</span>
       							</div>
       						</div>
       						<div className="rounded-lg bg-muted p-3">
-				<LineChart
-      							lines={[
-      								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
-      								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, width: picked === p.node ? 2.5 : 1.25, className: `${colours[i]}${picked == null || picked === p.node ? "" : " opacity-15"}` })),
-      							]}
-      						/>
+				<BandChart points={pct} />
 			</div>
       					</section>
       				)}
