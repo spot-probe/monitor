@@ -2104,9 +2104,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		return (
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
-      				<div className="grid grid-cols-3 gap-3 rounded-lg bg-muted/40 px-4 py-3">
+      				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted/40 py-3">
       					{[["列表值", line == null ? "—" : `${line} ms`], ["最差", top.avg == null ? "—" : `${top.avg} ms`], ["有数据的节点", `共 ${all.length} 台`]].map(([k, v]) => (
-      						<div key={k}>
+      						<div key={k} className="px-4">
       							<div className="text-xs text-muted-foreground">{k}</div>
       							<div className="tnum text-lg font-medium leading-tight">{v}</div>
       						</div>
@@ -2125,12 +2125,14 @@ function Ping({ nodes }: { nodes: Node[] }) {
       								))}
       							</div>
       						</div>
-      						<LineChart
+      						<div className="rounded-md bg-muted/20 p-2">
+				<LineChart
       							lines={[
       								{ key: "merged", points: merged, className: "text-muted-foreground", width: 2 },
       								...worst3.map((p, i) => ({ key: String(p.node), points: p.points, className: colours[i] })),
       							]}
       						/>
+			</div>
       					</section>
       				)}
 
@@ -2139,7 +2141,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						<h4 className="text-sm font-medium">各节点平均</h4>
       						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
       					</div>
-      					<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+      					<div className="rounded-md bg-muted/20 p-2">
+				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+			</div>
       				</section>
 
       				<section className="mt-5 border-t pt-4">
@@ -2147,9 +2151,16 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						<h4 className="text-sm font-medium">各节点明细</h4>
       						<span className="text-xs text-muted-foreground">以列表值为中线，向右更慢、向左更快</span>
       					</div>
-      					<div className="mt-2 space-y-1">
+      					<div className="sticky top-0 z-10 -mx-1 flex items-center gap-3 border-b border-border bg-background px-1 pb-1 text-xs text-muted-foreground">
+			<span className="w-40 shrink-0">节点</span>
+			<span className="min-w-0 flex-1">延迟分布</span>
+			<span className="w-16 shrink-0 text-right">平均</span>
+			<span className="w-12 shrink-0 text-right">丢包</span>
+			<span className="w-14 shrink-0 text-right">探测</span>
+		</div>
+		<div className="mt-1 space-y-1">
       						{all.map((p) => (
-      							<div key={p.node} className="flex items-center gap-3 text-xs">
+      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
       								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
       								<span className="relative h-2.5 min-w-0 flex-1 rounded-sm bg-foreground/10">
       									<span className="absolute inset-y-[-2px] left-1/2 w-px bg-foreground/40" />
