@@ -1553,30 +1553,64 @@ function BandChart({ points, height = 150 }: {
   )
 }
 
-/// 点带图：每台节点一个圆点落在延迟轴上，回答「这个离群有多离群」——
-/// 是「一两个孤点」还是「整片右移」。纵轴随意错开几像素，只为让重叠的点看得见。
-function DotStrip({ values, marker, className = "" }: { values: number[]; marker?: number | null; className?: string }) {
-  if (values.length === 0) return null
+/// 按分位数切成 n 桶的切点（延迟的「正常」取决于目标，所以不写死毫秒阈值）。
+function bucketCuts(sorted: number[], n: number): number[] {
+  const cuts: number[] = []
+  for (let i = 1; i < n; i++) cuts.push(pctl(sorted, i / n))
+  return cuts
+}
+
+/// 某个值落在第几桶（0 起）。
+function bucketOf(v: number, cuts: number[]): number {
+  let i = 0
+  while (i < cuts.length && v > cuts[i]) i++
+  return i
+}
+
+/// 分桶直方图。替换原来的蜂群图 —— 散点看不出「一个簇里到底是 12 台还是 15 台」，直方图直接给数。
+/// 桶按分位数切，并把每桶真实的毫秒区间标出来；点某一桶会把下面的明细筛成那几台。
+function Histogram({ values, picked, onPick }: {
+  values: number[]
+  picked: number | null
+  onPick: (i: number | null) => void
+}) {
+  const s = [...values].sort((x, y) => x - y)
+  if (s.length < 4) return <p className="px-1 py-2 text-xs text-muted-foreground">节点太少，分不出分布。</p>
+  const cuts = bucketCuts(s, 5)
+  const counts = new Array(5).fill(0)
+  for (const v of s) counts[bucketOf(v, cuts)]++
+  const max = Math.max(...counts, 1)
   const w = 640
-  const h = 56
-  const base = h - 12
-  const hi = Math.max(1, ...values, marker ?? 0) * 1.06
-  const x = (v: number) => (v / hi) * w
+  const h = 84
+  const bw = w / 5
+  const label = (i: number) => {
+    const lo = i === 0 ? 0 : cuts[i - 1]
+    const hi = i === 4 ? null : cuts[i]
+    return hi == null ? `> ${lo} ms` : i === 0 ? `≤ ${hi} ms` : `${lo}–${hi} ms`
+  }
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className={className} role="img" aria-label="各节点平均延迟的分布">
-      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-      {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
-      {marker != null && (
-        <>
-          <line x1={x(marker)} y1={6} x2={x(marker)} y2={base} stroke="currentColor" className="text-primary/70" strokeWidth="1" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
-          <text x={x(marker) + 3} y={12} fontSize="9" className="fill-muted-foreground">{marker} ms</text>
-        </>
-      )}
-      <text x="0" y={h - 2} fontSize="9" className="fill-muted-foreground">0</text>
-      <text x={w} y={h - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{Math.round(hi)} ms</text>
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" role="img" aria-label="各节点平均延迟的分桶分布">
+      {counts.map((c, i) => {
+        const bh = Math.max(2, (c / max) * (h - 26))
+        const on = picked === i
+        return (
+          <g key={i} role="button" tabIndex={0} aria-pressed={on} aria-label={`${label(i)}：${c} 台`}
+              onClick={() => onPick(on ? null : i)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(on ? null : i) } }}
+              className="cursor-pointer outline-none focus-visible:opacity-80">
+            <rect x={i * bw + 4} y={2} width={bw - 8} height={h - 26} className={on ? "fill-muted" : "fill-transparent"} />
+            <rect x={i * bw + 10} y={h - 16 - bh} width={bw - 20} height={bh} rx="2"
+              className={i === 4 ? "fill-warn-fg/60" : i === 3 ? "fill-primary/45" : "fill-primary/30"}
+              stroke="currentColor" strokeWidth={on ? 1.5 : 0} vectorEffect="non-scaling-stroke" />
+            <text x={i * bw + bw / 2} y={h - 20 - bh} fontSize="10" textAnchor="middle" className="fill-foreground">{c}</text>
+            <text x={i * bw + bw / 2} y={h - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">{label(i)}</text>
+          </g>
+        )
+      })}
     </svg>
   )
 }
+
 
 function Ping({ nodes }: { nodes: Node[] }) {
 	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
@@ -1604,6 +1638,8 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
+	// 直方图点中的桶：null = 不过滤。切点按当前这批节点均值的分位数算，不写死毫秒。
+	const [bucket, setBucket] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
   const [deleting, setDeleting] = useState<PingTask | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1919,7 +1955,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   	<Button
                   		variant="ghost"
                   		size="icon"
-                  		onClick={() => setOpenNodes(openNodes === t.id ? null : t.id)}
+                  		onClick={() => { setBucket(null); setOpenNodes(openNodes === t.id ? null : t.id) }}
                   		title="节点明细"
                   		aria-label="节点明细"
                   		aria-expanded={openNodes === t.id}
@@ -2116,6 +2152,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			{(() => {
       		const all = perNode[openTask.id] ?? []
       		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
+      		// 分位数切点只算一次：直方图与明细筛选共用同一套桶，点柱子才会得到相符的行。
+      		const avgSorted = all.map((p) => p.avg ?? 0).sort((x, y) => x - y)
+      		const cuts = bucketCuts(avgSorted, 5)
+      		const rows = bucket == null ? all : all.filter((p) => bucketOf(p.avg ?? 0, cuts) === bucket)
       		const top = all[0]
       		const line = stats[openTask.id]?.last ?? null
       							// 条以列表值为中线，按最大偏差归一：这几台的绝对差常只有几毫秒，按 0 到最差归一会让条几乎一样长。
@@ -2139,7 +2179,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       				{pct.length > 1 && (
       					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-      							<h4 className="text-sm font-semibold">延迟随时间</h4>
+      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
       							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
       								<span className="text-primary">— P50 中位数</span>
       								<span className="text-warn-fg/70">— P90</span>
@@ -2158,7 +2198,13 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点平均<Help>每台节点一个圆点，落在延迟轴上；竖线是上面那个列表值。纵轴上的错开只是为了不让重叠的点盖住彼此。</Help></h4>
       					</div>
       					<div className="rounded-lg bg-muted p-3">
-				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
+				<Histogram values={all.map((p) => p.avg ?? 0)} picked={bucket} onPick={setBucket} />
+				{bucket != null && (
+					<p className="mt-1 flex flex-wrap items-baseline gap-x-2 text-xs">
+						<span>只看第 {bucket + 1} 桶（{rows.length} 台）</span>
+						<button type="button" onClick={() => setBucket(null)} className="text-primary underline underline-offset-2">显示全部</button>
+					</p>
+				)}
 			</div>
       				</section>
 
@@ -2177,7 +2223,8 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				<span className="w-14 shrink-0 text-right">探测</span>
 			</div>
 			<div className="mt-1 space-y-1">
-	      						{all.map((p) => (
+{rows.length === 0 && <p className="px-1 py-2 text-xs text-muted-foreground">这一桶里没有节点。</p>}
+	      						{rows.map((p) => (
 	      							<div key={p.node} className="flex items-center gap-3 rounded-sm px-1 py-0.5 text-xs transition-colors hover:bg-muted/50">
 	      								<span className="w-40 shrink-0 truncate" title={nodeName(p.node)}>{nodeName(p.node)}</span>
 	      								<span className="relative h-2 min-w-0 flex-1 rounded-sm bg-foreground/10">
