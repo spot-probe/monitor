@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
+import { Gauge, Timer } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -145,7 +146,36 @@ function Help({ children, width = "max-w-64" }: { children: React.ReactNode; wid
   )
 }
 
-function Field({ label, hint, help, suffix, className = "", children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; children: React.ReactNode }) {
+function Field({ label, hint, help, suffix, className = "", row = false, icon, children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; row?: boolean; icon?: React.ReactNode; children: React.ReactNode }) {
+  // row：一项压成一行 —— 标签与控件在左，说明在右。竖排时三行说明把卡片撑得很高，
+  // 而它们本来就短；横排后一眼能扫完。单位仍是输入框内部的 suffix，与竖排同一套写法。
+  // row：一项一行，且三列真的对齐（标签 / 控件 / 说明）——每行各自 flex 时列会参差。
+  // 关联改用 htmlFor + useId：标签不再是控件的父节点，但屏幕阅读器与点击仍然对得上。
+  // 外层不套小卡片：背景与圆角叠在一起会让整块发闷，分组交给分割线。
+  // row：一项一行。控件仍然**放在 Label 里面**（关联靠这个，不靠 id：两者只做兄弟时
+  // 读屏念不出输入框的名字，这一条 27 个输入框共用，不能破）。列之所以能跨行对齐，是因为
+  // 每行用的是同一个固定模板 grid，不是各自撑开的 flex。外层也不套小卡片。
+  if (row) {
+  	return (
+  		<Label className="grid items-center gap-x-4 gap-y-1 md:grid-cols-[11rem_7rem_minmax(0,1fr)]">
+  			<span className="flex items-center gap-2 text-sm font-medium">
+  				{icon}
+  				{label}
+  				{help ? <Help>{help}</Help> : null}
+  			</span>
+  			{suffix ? (
+  				<span className="relative">
+  					{children}
+  					<span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">{suffix}</span>
+  				</span>
+  			) : (
+  				children
+  			)}
+  			{hint ? <span className="text-xs text-muted-foreground">{hint}</span> : null}
+  		</Label>
+  	)
+  }
+
   return (
     <div className={`space-y-2 ${className}`}>
       {/* The control goes inside the label, which is what associates the two. As
@@ -2850,47 +2880,74 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
       <Section title="触发规则" hint="离线通知在下面按节点打开；流量和到期提醒对填了额度、到期日的节点生效。">
         <OfflineNodes nodes={nodes} refresh={refresh} />
+      </Section>
 
-      <Card className="gap-4 p-5">
-        <h3 className="text-sm font-medium">事件</h3>
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="离线宽限期" suffix="分钟" hint="断开超过这么久才算离线，1–30">
-            <Input type="number" min={1} max={30} className="pr-14" value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
-          </Field>
-          <Field label="流量提醒" suffix="%" hint="本期用量达到该比例和 100% 时各提醒一次，0 关闭">
-            <Input type="number" min={0} max={100} className="pr-9" value={text("notify_traffic")} onChange={(e) => set("notify_traffic", e.target.value)} />
-          </Field>
-          <Field label="到期提醒" suffix="天" hint="每天 9 点汇总这么多天内到期的节点，自动续期时也提醒，0 关闭">
-            <Input type="number" min={0} max={365} className="pr-9" value={text("notify_expiry")} onChange={(e) => set("notify_expiry", e.target.value)} />
-          </Field>
-        </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Switch aria-labelledby="notify-login-label" checked={s.notify_login !== "off"} onCheckedChange={(v) => set("notify_login", v ? "on" : "off")} />
-          <span id="notify-login-label">登录后台时提醒</span>
-        </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Switch aria-labelledby="notify-update-label" checked={s.notify_update !== "off"} onCheckedChange={(v) => set("notify_update", v ? "on" : "off")} />
-          <span id="notify-update-label">有新版本时提醒</span>
-        </div>
-        {/* Bottom-right, with the divider marking where reading ends and acting begins.
-            Bottom-left gave the page's only commit action the least weight on it. */}
-        <div className="flex justify-end gap-2 border-t pt-4">
-          <Button size="sm" variant="ghost" onClick={reload} title="放弃未保存的修改">重置</Button>
-          <Button
-            size="sm"
-            onClick={() =>
-              save({
-                notify_grace: text("notify_grace"),
-                notify_traffic: text("notify_traffic"),
-                notify_expiry: text("notify_expiry"),
-                notify_login: s.notify_login === "off" ? "off" : "on",
-                notify_update: s.notify_update === "off" ? "off" : "on",
-              })
-            }
-          >
-            保存事件设置
-          </Button>
-        </div>
+      <Section
+      	title="事件设置"
+      	hint="离线、流量、到期三种规则的阈值，以及两类提醒开关；改完点右下角保存。"
+      >
+
+      <Card className="gap-6 p-6">
+
+      	{/* 数值类规则单独成组，且**一项一行**：三列平铺时说明长短不一，左侧与下方都是参差的空白；
+      	    压成一行、说明移到右侧后高度立刻降下来，单位仍留在输入框内部（Field 的 suffix）。 */}
+      	<section className="space-y-3">
+      		<h4 className="flex items-center gap-2 text-sm font-medium">
+      			<SlidersHorizontal className="size-4 text-muted-foreground" /> 基础规则配置
+      		</h4>
+      		<Field row icon={<Timer className="size-4 text-muted-foreground" />} label="离线宽限期" suffix="分钟" hint="断开超过这么久才算离线，1–30">
+      			<Input type="number" min={1} max={30} className="pr-14" value={text("notify_grace")} onChange={(e) => set("notify_grace", e.target.value)} />
+      		</Field>
+      		<Field row icon={<Gauge className="size-4 text-muted-foreground" />} label="流量提醒" suffix="%" hint="本期用量达到该比例和 100% 时各提醒一次，0 关闭">
+      			<Input type="number" min={0} max={100} className="pr-9" value={text("notify_traffic")} onChange={(e) => set("notify_traffic", e.target.value)} />
+      		</Field>
+      		<Field row icon={<CalendarClock className="size-4 text-muted-foreground" />} label="到期提醒" suffix="天" hint="每天 9 点汇总这么多天内到期的节点，自动续期时也提醒，0 关闭">
+      			<Input type="number" min={0} max={365} className="pr-9" value={text("notify_expiry")} onChange={(e) => set("notify_expiry", e.target.value)} />
+      		</Field>
+      	</section>
+
+      	{/* 开关与上面的数值不是一回事：那些是「什么时候发」，这些是「要不要发」。分成两块，
+      	    每一行整行可点、右端对齐，而不是两个飘在卡片里的控件。 */}
+<section className="border-t pt-5">
+      		<h4 className="flex items-center gap-2 text-sm font-medium">
+      			<Bell className="size-4 text-muted-foreground" /> 消息提醒开关
+      		</h4>
+      		<div className="divide-y">
+      			<div className="flex items-center justify-between gap-4 rounded-lg py-3.5 transition-colors hover:bg-muted/40">
+      				<span className="min-w-0">
+      					<span id="notify-login-label" className="block text-sm font-medium">登录后台时提醒</span>
+      					<span className="mt-0.5 block text-xs text-muted-foreground">有人用应急密码或 GitHub 登录后台时发一条</span>
+      				</span>
+      				<Switch className="shrink-0" aria-labelledby="notify-login-label" checked={s.notify_login !== "off"} onCheckedChange={(v) => set("notify_login", v ? "on" : "off")} />
+      			</div>
+      			<div className="flex items-center justify-between gap-4 rounded-lg py-3.5 transition-colors hover:bg-muted/40">
+      				<span className="min-w-0">
+      					<span id="notify-update-label" className="block text-sm font-medium">有新版本时提醒</span>
+      					<span className="mt-0.5 block text-xs text-muted-foreground">hub 或 agent 有新版本时发一条，每个新版本只说一次</span>
+      				</span>
+      				<Switch className="shrink-0" aria-labelledby="notify-update-label" checked={s.notify_update !== "off"} onCheckedChange={(v) => set("notify_update", v ? "on" : "off")} />
+      			</div>
+      		</div>
+      	</section>
+
+      	{/* 分割线之上是读的部分，之下是唯一会提交的动作。 */}
+      	<div className="flex justify-end gap-2 border-t pt-4">
+      		<Button size="sm" variant="ghost" onClick={reload} title="放弃未保存的修改">重置</Button>
+      		<Button
+      			size="sm"
+      			onClick={() =>
+      				save({
+      					notify_grace: text("notify_grace"),
+      					notify_traffic: text("notify_traffic"),
+      					notify_expiry: text("notify_expiry"),
+      					notify_login: s.notify_login === "off" ? "off" : "on",
+      					notify_update: s.notify_update === "off" ? "off" : "on",
+      				})
+      			}
+      		>
+      			保存事件设置
+      		</Button>
+      	</div>
       </Card>
       </Section>
     </div>
