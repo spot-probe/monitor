@@ -1521,8 +1521,8 @@ function LineChart({ lines, height = 150 }: {
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="各节点延迟随时间的变化">
-      <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-border" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-      <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-border/60" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+      <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
       {lines.map((l) =>
         l.points.length > 1 ? (
           <polyline key={l.key} fill="none" stroke="currentColor" className={l.className} strokeWidth={l.width ?? 1.25}
@@ -1549,7 +1549,7 @@ function DotStrip({ values, marker, className = "" }: { values: number[]; marker
   const x = (v: number) => (v / hi) * w
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className={className} role="img" aria-label="各节点平均延迟的分布">
-      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-border" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+      <line x1="0" y1={base} x2={w} y2={base} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       {values.map((v, i) => <circle key={i} cx={x(v)} cy={base - 6 - (i % 4) * 6} r="2.4" className="fill-primary/70" />)}
       {marker != null && (
         <>
@@ -2128,7 +2128,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       								))}
       							</div>
       						</div>
-      						<div className="rounded-md bg-muted/20 p-2">
+      						<div className="rounded-lg bg-muted/40 p-3">
 				<LineChart
       							lines={[
       								{ key: "merged", points: merged, className: `text-muted-foreground ${picked == null ? "" : "opacity-20"}`, width: picked == null ? 2 : 1.25 },
@@ -2144,7 +2144,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						<h4 className="text-sm font-medium">各节点平均</h4>
       						<span className="text-xs text-muted-foreground">一个点是一台节点，竖线是列表值</span>
       					</div>
-      					<div className="rounded-md bg-muted/20 p-2">
+      					<div className="rounded-lg bg-muted/40 p-3">
 				<DotStrip values={all.map((p) => p.avg ?? 0)} marker={line} className="w-full" />
 			</div>
       				</section>
