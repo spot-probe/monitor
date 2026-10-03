@@ -20,6 +20,7 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingError, type PingTask, type Source } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
 // Counters the panel can correct after migration or an accounting error.
@@ -146,7 +147,7 @@ function Help({ children, width = "max-w-64" }: { children: React.ReactNode; wid
   )
 }
 
-function Field({ label, hint, help, suffix, className = "", row = false, icon, children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; row?: boolean; icon?: React.ReactNode; children: React.ReactNode }) {
+function Field({ label, hint, help, suffix, className = "", row = false, icon, controlClassName, children }: { label: string; hint?: string; help?: React.ReactNode; suffix?: string; className?: string; row?: boolean; icon?: React.ReactNode; controlClassName?: string; children: React.ReactNode }) {
   // row：一项压成一行 —— 标签与控件在左，说明在右。竖排时三行说明把卡片撑得很高，
   // 而它们本来就短；横排后一眼能扫完。单位仍是输入框内部的 suffix，与竖排同一套写法。
   // row：一项一行，且三列真的对齐（标签 / 控件 / 说明）——每行各自 flex 时列会参差。
@@ -171,7 +172,7 @@ function Field({ label, hint, help, suffix, className = "", row = false, icon, c
   			) : (
   				children
   			)}
-  			{hint ? <span className="max-w-[600px] text-xs text-muted-foreground">{hint}</span> : null}
+  			{hint ? <span className="text-xs text-muted-foreground">{hint}</span> : null}
   		</Label>
   	)
   }
@@ -192,12 +193,12 @@ function Field({ label, hint, help, suffix, className = "", row = false, icon, c
           made the label do two jobs, and the reader had to parse past the parenthesis to
           find the field's name. */}
       {suffix ? (
-        <div className="relative">
+        <div className={cn("relative", controlClassName)}>
           {children}
           <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">{suffix}</span>
         </div>
       ) : (
-        children
+        <div className={controlClassName}>{children}</div>
       )}
       </Label>
       {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
@@ -2573,13 +2574,13 @@ function SettingsTab() {
       	{/* 单列，而不是两列：这几项的说明长短差得多，两列时右边被撑高、左边留一大片空白。
       	    说明放在输入框下方（这里的最长有两行），输入框本身限宽，免得在宽屏上拉成一条长线。 */}
       	<div className="space-y-6">
-      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" className="max-w-md">
+      		<Field label="站点名称" hint="显示在面板与公开页左上角的站点名。" controlClassName="max-w-xl">
       			<Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
       		</Field>
       		<Field
       			label="历史数据保留天数"
       			suffix="天"
-      			className="max-w-40"
+      			controlClassName="max-w-xl"
       			hint="超过明细窗口（7 天）的历史会先汇总成小时存着，再按这个天数清理，所以天数越大占用的空间增长很慢；累计流量不受影响。最长 365 天，调小会让更早的历史被清掉。"
       		>
       			<Input
@@ -2594,7 +2595,7 @@ function SettingsTab() {
       		</Field>
       		<Field
       			label="GitHub 代理"
-      			className="max-w-md"
+      			controlClassName="max-w-xl"
       			hint="留空直连。仅在 hub 自己拉不到 GitHub Release 时填。这个地址返回的字节会被安装到每一台节点上，只填信得过的镜像"
       		>
       			<Input value={String(s.github_proxy ?? "")} onChange={(e) => set("github_proxy", e.target.value)} placeholder="https://ghfast.top" />
