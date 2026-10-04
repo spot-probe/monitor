@@ -8,7 +8,7 @@ import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -1620,21 +1620,20 @@ function Histogram({ values, picked, onPick }: {
 }
 
 
-/// 总览：一个页面的 KPI + 续费日历。
+/// 总览：一个页面的 KPI + 近期事项 + Agent 版本 + 续费日历。
 ///
-/// 它只读 `/api/nodes` 已有的字段（在线、到期日、价格、agent 版本），所以**不加接口、不加请求**，
+/// 只读 `nodes` 已有的字段（在线、到期日、价格、agent 版本），**不加接口、不加请求**，
 /// 也不碰任何既有页面。图表与日历都是手写 —— 面板不引图表库（首屏体积是量过的）。
+///
+/// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
+/// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
+/// 颜色），所以暗色主题自动成立。
 function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string | null }) {
   const [month, setMonth] = useState(() => {
     const d = new Date()
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
-
-  // 版本 → 台数。空字符串是「从没上报过」，不是 0.0.0，所以排在最后并原样显示。
-  const versionCount = new Map<string, number>()
-  for (const n of nodes) versionCount.set(n.agent_version ?? "", (versionCount.get(n.agent_version ?? "") ?? 0) + 1)
-  const agentVersions = [...versionCount.entries()].sort((a, b) => (a[0] === "" ? 1 : b[0] === "" ? -1 : b[1] - a[1]))
 
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
@@ -1647,6 +1646,11 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
     return d !== null && d < 0
   }).length
 
+  // 版本 → 台数。空字符串是「从没上报过」，不是 0.0.0，所以排在最后并原样显示。
+  const versionCount = new Map<string, number>()
+  for (const n of nodes) versionCount.set(n.agent_version ?? "", (versionCount.get(n.agent_version ?? "") ?? 0) + 1)
+  const agentVersions = [...versionCount.entries()].sort((a, b) => a[0] === "" ? 1 : b[0] === "" ? -1 : b[1] - a[1])
+
   // 到期日按「本地日历天」归组：`expires_at` 是日期字符串，不要经 Date 解析后再取 UTC 天，
   // 那样在东八区会把日子整体挪错一天。
   const byDay = new Map<string, Node[]>()
@@ -1656,7 +1660,6 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
     byDay.set(day, [...(byDay.get(day) ?? []), n])
   }
   const peak = Math.max(0, ...[...byDay.values()].map((v) => v.length))
-
 
   const first = new Date(month.y, month.m, 1)
   const days = new Date(month.y, month.m + 1, 0).getDate()
@@ -1672,169 +1675,177 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
   const today = new Date()
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
 
-  // 把「未来 30 天到期」说成人话，并指出有没有集中的那一天。
+  // 「近期事项」：日历要自己看，这里直接说成一句话。全部来自 nodes。
+  // 注意：这一段必须在 `todayKey` **之后** —— 之前版本把它插在前面，TDZ 崩溃、整页白屏。
   const soon = [...byDay.entries()].filter(([d]) => {
-  	const days = (Date.parse(d + "T00:00:00") - Date.parse(todayKey + "T00:00:00")) / 86_400_000
-  	return days >= 0 && days <= 30
+    const n = (Date.parse(d + "T00:00:00") - Date.parse(todayKey + "T00:00:00")) / 86_400_000
+    return n >= 0 && n <= 30
   }).sort((a, b) => a[0].localeCompare(b[0]))
   const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
-  const notices: { text: string; hint: string; tone: string }[] = []
+  const notices: { text: string; hint: string; tone: string; icon: React.ReactNode }[] = []
   if (soon.length > 0) {
-  	const total = soon.reduce((n, [, list]) => n + list.length, 0)
-  	notices.push({
-  		text: `未来 30 天有 ${total} 台到期`,
-  		hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
-  		tone: "text-warn-fg",
-  	})
+    const total = soon.reduce((n, [, list]) => n + list.length, 0)
+    notices.push({
+      text: `未来 30 天有 ${total} 台到期`,
+      hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
+      tone: "text-warn-fg",
+      icon: <CalendarClock className="size-4" />,
+    })
   }
-  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg" })
-  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg" })
+  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg", icon: <CircleAlert className="size-4" /> })
+  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg", icon: <ArrowUpCircle className="size-4" /> })
+
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
     setMonth({ y: d.getFullYear(), m: d.getMonth() })
     setPickedDay(null)
   }
 
-  const kpi = [
-    { label: "在线", value: online, tone: "text-ok-fg" },
-    { label: "离线", value: nodes.length - online, tone: nodes.length - online > 0 ? "text-danger-fg" : "" },
-    { label: "节点总数", value: nodes.length, tone: "" },
-    { label: "待升级", value: outdated, tone: outdated > 0 ? "text-warn-fg" : "" },
-    { label: "30 天内到期", value: expiring, tone: expiring > 0 ? "text-warn-fg" : "" },
-    { label: "已过期", value: expired, tone: expired > 0 ? "text-danger-fg" : "" },
+  // 每一项都配一个语义图标：一眼扫过去就知道是「好的」「坏的」还是「中性的」。
+  const kpi: { label: string; value: number; tone: string; icon: React.ReactNode }[] = [
+    { label: "在线", value: online, tone: "text-ok-fg", icon: <CircleCheck className="size-4" /> },
+    { label: "离线", value: nodes.length - online, tone: nodes.length - online > 0 ? "text-danger-fg" : "text-muted-foreground", icon: <CircleAlert className="size-4" /> },
+    { label: "节点总数", value: nodes.length, tone: "text-foreground", icon: <Server className="size-4" /> },
+    { label: "待升级", value: outdated, tone: outdated > 0 ? "text-warn-fg" : "text-muted-foreground", icon: <ArrowUpCircle className="size-4" /> },
+    { label: "30 天内到期", value: expiring, tone: expiring > 0 ? "text-warn-fg" : "text-muted-foreground", icon: <CalendarClock className="size-4" /> },
+    { label: "已过期", value: expired, tone: expired > 0 ? "text-danger-fg" : "text-muted-foreground", icon: <CircleAlert className="size-4" /> },
   ]
 
   return (
     <div className="space-y-4">
-      {/* KPI：一眼看清家底。每一项都可能为 0，所以不做「隐藏空项」那种小聪明。 */}
-      <Card className="grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-6">
-        {kpi.map((k) => (
-          <div key={k.label}>
-            <div className="text-xs text-muted-foreground">{k.label}</div>
-            <div className={`tnum text-2xl font-medium leading-tight ${k.tone}`}>{k.value}</div>
-          </div>
-        ))}
+      {/* 家底：一眼看清。每一项都可能为 0，所以不做「隐藏空项」那种小聪明。 */}
+      <Card>
+        <CardContent className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-3 lg:grid-cols-6">
+          {kpi.map((k) => (
+            <div key={k.label} className="flex items-start gap-2.5">
+              <span className={`mt-0.5 shrink-0 ${k.tone}`}>{k.icon}</span>
+              <div className="min-w-0">
+                <div className="truncate text-xs text-muted-foreground">{k.label}</div>
+                <div className={`tnum text-2xl leading-tight font-medium ${k.tone}`}>{k.value}</div>
+              </div>
+            </div>
+          ))}
+        </CardContent>
       </Card>
 
-      {/* 近期事项：日历要自己看，这里直接说成一句话。全部来自 nodes，不额外请求。 */}
       {notices.length > 0 && (
-      	<Card className="gap-2 p-5">
-      		<h3 className="text-sm font-semibold">近期事项</h3>
-      		<ul className="space-y-1 text-sm">
-      			{notices.map((n, i) => (
-      				<li key={i} className="flex flex-wrap items-baseline gap-x-2">
-      					<span className={n.tone}>{n.text}</span>
-      					<span className="text-xs text-muted-foreground">{n.hint}</span>
-      				</li>
-      			))}
-      		</ul>
-      	</Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">近期事项</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {notices.map((n) => (
+              <div key={n.text} className="flex items-center gap-2.5 text-sm">
+                <span className={`shrink-0 ${n.tone}`}>{n.icon}</span>
+                <span className={n.tone}>{n.text}</span>
+                <span className="text-xs text-muted-foreground">{n.hint}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
       )}
 
-      {/* Agent 版本分布：`agent_version` 为空表示从没上报过，单独列出而不是当成 0.0.0。 */}
-      {agentVersions.length > 0 && (
-      	<Card className="gap-2 p-5">
-      		<h3 className="text-sm font-semibold">Agent 版本</h3>
-      		<div className="space-y-1.5">
-      			{agentVersions.map(([v, n]) => (
-      				<div key={v} className="flex items-center gap-3 text-xs">
-      					<span className="w-24 shrink-0 truncate font-mono">{v === "" ? "未上报" : v}</span>
-      					<span className="h-2 rounded-sm bg-primary/40" style={{ width: `${(n / Math.max(...agentVersions.map((x) => x[1]))) * 60}%` }} />
-      					<span className="tnum text-muted-foreground">{n} 台</span>
-      				</div>
-      			))}
-      		</div>
-      	</Card>
-      )}
-
-      {agentLatest && (
-        <p className="text-xs text-muted-foreground">
-          最新 agent 版本 <span className="font-mono">{agentLatest}</span>
-          {outdated > 0 && <span className="text-warn-fg"> · 有 {outdated} 台落后</span>}
-        </p>
-      )}
-
-      <Card className="gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold">
-            {month.y} 年 {month.m + 1} 月 · 续费日历
-          </h3>
-          <div className="flex items-center gap-1">
-            <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                const d = new Date()
-                setMonth({ y: d.getFullYear(), m: d.getMonth() })
-                setPickedDay(null)
-              }}
-            >
-              本月
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
-          {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-            <div key={w} className="bg-muted py-1.5 font-medium text-muted-foreground">{w}</div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Agent 版本</CardTitle>
+          <CardAction>
+            <Badge variant="outline">最新 {agentLatest ?? "—"}</Badge>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {agentVersions.map(([v, n]) => (
+            <div key={v} className="flex items-center gap-3 text-xs">
+              <span className="w-24 shrink-0 truncate font-mono">{v === "" ? "未上报" : v}</span>
+              <span className="h-2 rounded-sm bg-primary/40" style={{ width: `${(n / Math.max(...agentVersions.map((x) => x[1]))) * 60}%` }} />
+              <Badge variant="secondary" className="tnum">{n} 台</Badge>
+            </div>
           ))}
-          {cells.map((day, i) => {
-            if (!day) return <div key={`lead-${i}`} className="bg-background" />
-            const list = byDay.get(day) ?? []
-            const isPeak = peak > 1 && list.length === peak
-            const on = pickedDay === day
-            return (
-              <button
-                key={day}
-                type="button"
-                onClick={() => setPickedDay(on ? null : day)}
-                aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                className={`flex min-h-[52px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 text-left transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">
+            {month.y} 年 {month.m + 1} 月 · 续费日历
+          </CardTitle>
+          <CardAction>
+            <div className="flex items-center gap-1">
+              <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const d = new Date()
+                  setMonth({ y: d.getFullYear(), m: d.getMonth() })
+                  setPickedDay(null)
+                }}
               >
-                <span className={`tnum text-xs ${day === todayKey ? "rounded bg-primary px-1 font-medium text-primary-foreground" : "text-muted-foreground"}`}>
-                  {Number(day.slice(8))}
-                </span>
-                {list.length > 0 && (
-                  <span className={`rounded px-1 text-[10px] leading-tight ${isPeak ? "bg-warn-fg/15 text-warn-fg" : "bg-muted text-muted-foreground"}`}>
-                    {list.length} 台
-                  </span>
-                )}
-              </button>
-            )
-          })}
-        </div>
-
-        {pickedDay && (
-          <div className="rounded-lg bg-muted p-3">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h4 className="text-sm font-medium">{pickedDay} 到期</h4>
-              <button type="button" onClick={() => setPickedDay(null)} className="text-xs text-primary underline underline-offset-2">
-                收起
-              </button>
+                本月
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
             </div>
-            <div className="mt-2 space-y-1">
-              {(byDay.get(pickedDay) ?? []).map((n) => (
-                <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 text-sm">
-                  <span className="font-medium">{n.name}</span>
-                  <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                  <span className="ml-auto tnum text-xs text-muted-foreground">
-                    {n.price > 0 ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}` : "未记价格"}
+          </CardAction>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
+            {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
+              <div key={w} className="bg-muted py-1.5 font-medium text-muted-foreground">{w}</div>
+            ))}
+            {cells.map((day, i) => {
+              if (!day) return <div key={`lead-${i}`} className="bg-background" />
+              const list = byDay.get(day) ?? []
+              const isPeak = peak > 1 && list.length === peak
+              const on = pickedDay === day
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => setPickedDay(on ? null : day)}
+                  aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
+                  className={`flex min-h-[52px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
+                >
+                  <span className={`tnum text-xs ${day === todayKey ? "rounded bg-primary px-1 font-medium text-primary-foreground" : "text-muted-foreground"}`}>
+                    {Number(day.slice(8))}
                   </span>
-                  <Expiry date={n.expires_at} />
-                </div>
-              ))}
-            </div>
+                  {list.length > 0 && (
+                    <span className={`rounded px-1 text-[10px] leading-tight ${isPeak ? "bg-warn-fg/15 text-warn-fg" : "bg-muted text-muted-foreground"}`}>
+                      {list.length} 台
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </div>
-        )}
 
-        {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
+          {pickedDay && (
+            <div className="rounded-lg bg-muted p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h4 className="text-sm font-medium">{pickedDay} 到期</h4>
+                <button type="button" onClick={() => setPickedDay(null)} className="text-xs text-primary underline underline-offset-2">
+                  收起
+                </button>
+              </div>
+              <div className="mt-2 space-y-1">
+                {(byDay.get(pickedDay) ?? []).map((n) => (
+                  <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 text-sm">
+                    <span className="font-medium">{n.name}</span>
+                    <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                    <span className="tnum ml-auto text-xs text-muted-foreground">
+                      {n.price > 0 ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}` : "未记价格"}
+                    </span>
+                    <Expiry date={n.expires_at} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
+        </CardContent>
       </Card>
     </div>
   )
 }
-
 
 function Ping({ nodes }: { nodes: Node[] }) {
 	// 逐节点那一栏要显示节点的名字，而不是 id —— 运维看的是机器名。
