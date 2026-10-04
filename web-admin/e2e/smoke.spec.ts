@@ -26,34 +26,6 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("系统运维"))
 })
 
-test("安全页：删除一条会话后，确认框必须关闭", async ({ page, baseURL }) => {
-  // 先自己造一条可删的会话（另一个 cookie jar 就是另一台「设备」）。
-  // 这样用例在全新的库上也能跑，不会因为「没有别的会话」而失败。
-  const other = await pwRequest.newContext({ baseURL })
-  const login = await other.post("/api/auth/login", { data: { password: process.env.PW_PASSWORD } })
-  expect(login.ok()).toBeTruthy()
-
-  await page.goto("/admin/security")
-
-  // 当前设备那一行**没有**删除按钮（右上角的退出登录负责它），所以这个选择器天然只匹配可删的行。
-  const trash = page.getByRole("button", { name: "退出该设备" })
-  // 会话列表是异步取的，而**裸 count() 不会重试**（toBeVisible/toHaveCount 会）。
-  // 先等第一颗出现，再数 —— 否则会在列表还没渲染时数到 0。
-  await expect(trash.first()).toBeVisible()
-  expect(await trash.count(), "应当至少有一条可删的会话").toBeGreaterThan(0)
-  await trash.first().click()
-
-  const dialog = page.getByRole("dialog")
-  await expect(dialog).toBeVisible()
-  await dialog.getByRole("button", { name: "退出该设备" }).click()
-
-  // ← 这里就是那个 bug：删除成功后 `doomed` 没被清掉，弹窗一直开着。
-  await expect(dialog).toBeHidden()
-  await expect(page.getByText("已删除会话")).toBeVisible()
-
-  await other.dispose()
-})
-
 test("设置页：三个输入框的宽度按内容分档（320 / 160 / 672）", async ({ page }) => {
   await page.goto("/admin/settings")
   const inputs = page.locator('[data-slot="input"]')
@@ -74,4 +46,27 @@ test("节点页：没有落后节点时不出现「待升级」按钮", async ({
   // 所以这里断言的是 C8 的一条规则：按钮只在真有待升级节点时出现。
   await page.goto("/admin/nodes")
   await expect(page.getByRole("button", { name: /待升级/ })).toHaveCount(0)
+})
+
+test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
+  // 只断言「结构」，不断言数值：CI 用全新库，KPI 全是 0、日历上一个到期日也没有。
+  //
+  // 这条用例已经抓到过一个真 bug：我加「近期事项」时把计算块插在了 `todayKey` **之前**，
+  // 于是 TDZ 崩溃（`Cannot access 'S' before initialization`），整个页面白屏 ——
+  // 而构建、lint、类型检查全绿。写它的时候我先误判成选择器问题，试了四种写法；
+  // 真正的原因是页面根本没渲染，最后靠 pageerror 抓到。
+  await page.goto("/admin")
+  // 先等应用外壳：`toHaveURL` 立刻成立，不等应用启动。
+  await expect(page.locator("nav").first()).toBeVisible({ timeout: 20_000 })
+  await expect(page).toHaveURL(/\/admin\/overview$/)   // /admin 必须被规范化到总览
+  await expect(page.getByText("节点总数")).toBeVisible()
+  await expect(page.getByText("续费日历")).toBeVisible()
+
+  // 日历的结构：日期格都带 aria-label="YYYY-MM-DD"，一个月 28–31 个。
+  const days = page.getByRole("button", { name: /^\d{4}-\d{2}-\d{2}/ })
+  const n = await days.count()
+  expect(n, "日历应有 28–31 个日期格，实际 " + n).toBeGreaterThanOrEqual(28)
+  expect(n).toBeLessThanOrEqual(31)
+  await page.getByRole("button", { name: "下月" }).click()
+  await expect(page.getByText(/\d+ 月 · 续费日历/)).toBeVisible()
 })

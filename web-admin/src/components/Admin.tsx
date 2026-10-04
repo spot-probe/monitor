@@ -3,7 +3,9 @@ import { flushSync } from "react-dom"
 import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { Gauge, Timer } from "lucide-react"
 import { ExternalLink } from "lucide-react"
+import { LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
+import { Suspense, lazy } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -121,7 +123,7 @@ function Addresses({ node }: { node: Node }) {
  * trigger's own handlers and the label's would close it again -- the button sits
  * inside a `<label>` that focuses the control it wraps -- so both are prevented.
  */
-function Help({ children, width = "max-w-64" }: { children: React.ReactNode; width?: string }) {
+export function Help({ children, width = "max-w-64" }: { children: React.ReactNode; width?: string }) {
   const [open, setOpen] = useState(false)
   return (
     <Tooltip open={open} onOpenChange={setOpen}>
@@ -1024,7 +1026,7 @@ function InstallDialog({ node, site, onClose, onRotated }: {
 /// Whole days until a date, counted the way a person counts them: the day itself is 0,
 /// yesterday is -1. Parsed as local midnight, matching how the panel's own date input
 /// writes the value.
-function daysUntil(date: string | null): number | null {
+export function daysUntil(date: string | null): number | null {
   if (!date) return null
   const at = new Date(`${date}T00:00:00`)
   return Number.isNaN(at.getTime()) ? null : Math.floor((at.getTime() - Date.now()) / 86_400_000)
@@ -1034,7 +1036,7 @@ function daysUntil(date: string | null): number | null {
 /// ordinary date is secondary text, under a month turns amber, past it turns red. The
 /// colours are the theme's darker twins -- warn-fg is 5.02:1 and danger-fg 4.83:1 --
 /// because the amber and red fills do not carry as words on white.
-function Expiry({ date }: { date: string | null }) {
+export function Expiry({ date }: { date: string | null }) {
   const days = daysUntil(date)
   if (days === null) return <span className="text-muted-foreground">{FOREVER}</span>
   if (days < 0) {
@@ -3917,6 +3919,7 @@ export const ADMIN_SECTIONS = [
   {
     group: "资源管理",
     items: [
+      { path: "/admin/overview", label: "总览", icon: LayoutDashboard },
       { path: "/admin/nodes", label: "节点", icon: Server },
       { path: "/admin/ping", label: "延迟", icon: Radio },
       { path: "/admin/data", label: "数据", icon: Database },
@@ -3947,6 +3950,10 @@ export const ADMIN_ITEMS = ADMIN_SECTIONS.flatMap((section) => section.items)
 
 const WARN = 'text-destructive'
 
+// 总览页单独成块：它是面板里最重的一页（三张图 + 日历），其它页面用不到。
+// 懒加载后首屏不必下载它 —— 这就是我早前清单里那条「按分区懒加载」。
+const Overview = lazy(() => import("./Overview").then((m) => ({ default: m.Overview })))
+
 export function Admin({
   path,
   nodes,
@@ -3974,7 +3981,11 @@ export function Admin({
 }) {
   return (
     <div className="min-w-0">
-        {path === "/admin/ping" ? (
+        {path === "/admin/overview" ? (
+          <Suspense fallback={<PageSkeleton shape="list" rows={4} />}>
+            <Overview nodes={nodes} agentLatest={agentLatest} />
+          </Suspense>
+        ) : path === "/admin/ping" ? (
           <Ping nodes={nodes} />
         ) : path === "/admin/notify" ? (
           <Notify nodes={nodes} refresh={refresh} />

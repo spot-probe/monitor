@@ -1331,6 +1331,62 @@ impl Db {
     /// restart lazily in `accumulate`, on the node's next report, so a node
     /// offline since before a boundary still holds the previous period's bytes on
     /// disk. This is the only reader, so the rule lives in one place.
+    /// 全队按天的聚合，给「总览」页的趋势图用。返回
+    /// `[day_ts, rx_bytes, tx_bytes, rx_peak, tx_peak, cpu_pct, mem_pct, disk_pct]`。
+    ///
+    /// **每种指标的算法不同，这是这里唯一需要小心的地方：**
+    /// - `cpu` 是**按节点加权平均**（权重是该小时有数据的分钟数 `minutes`）；
+    /// - 内存与硬盘是 `Σ已用 / Σ总量` —— 真正的全队占用率，而不是各节点百分比的算术平均
+    ///   （一台 2G 和一台 64G 的机器，按百分比平均会给出一个没有意义的数）；
+    /// - 带宽是**按节点求和**（全队吞吐量 = 各节点速率之和），峰值取当天各小时的**全队**速率最大值。
+    ///
+    /// `metric_hour.net_rx` 是**字节/秒**（见 `agent_ws` 里 `(total_rx - rx0) / elapsed`），所以一天的
+    /// 字节数 = `Σ(速率 × 60 × minutes)`。这是积分近似：假设采样间隔内速率不变，也是这类图表的通行做法。
+    /// 分组用的是 **UTC 日**；面板负责按本地时区显示日期（跨日边界会有小时级的偏移，这一点在那边的注释里写）。
+    pub fn overview_daily(&self, days: i64) -> Vec<[f64; 8]> {
+        let since = Utc::now().timestamp() - days * 86_400;
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                // 窗口函数一次算出「每个小时的全队速率」，替换掉原先的逐行相关子查询：
+                // metric_hour 有两百多万行，逐行子查询是 O(行数) 次索引查找，这是页面加载慢的正因。
+                "WITH hourly AS (
+                     SELECT m.ts, m.minutes, m.cpu, m.mem_used, m.disk_used,
+                            m.net_rx, m.net_tx,
+                            n.mem_total, n.disk_total,
+                            SUM(m.net_rx) OVER (PARTITION BY m.ts) AS fleet_rx,
+                            SUM(m.net_tx) OVER (PARTITION BY m.ts) AS fleet_tx
+                       FROM metric_hour m JOIN node n ON n.id = m.node_id
+                      WHERE m.ts >= ?1
+                 )
+                 SELECT (ts / 86400) * 86400 AS day,
+                        CAST(SUM(net_rx * 60 * minutes) AS INTEGER),
+                        CAST(SUM(net_tx * 60 * minutes) AS INTEGER),
+                        CAST(MAX(fleet_rx) AS INTEGER), CAST(MAX(fleet_tx) AS INTEGER),
+                        SUM(cpu * minutes) * 1.0 / NULLIF(SUM(minutes), 0),
+                        SUM(mem_used * minutes) * 100.0 / NULLIF(SUM(mem_total * minutes), 0),
+                        SUM(disk_used * minutes) * 100.0 / NULLIF(SUM(disk_total * minutes), 0)
+                   FROM hourly
+                  GROUP BY day ORDER BY day",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([since], |r| {
+                Ok([
+                    r.get::<_, i64>(0)? as f64,
+                    r.get::<_, i64>(1)? as f64,
+                    r.get::<_, i64>(2)? as f64,
+                    r.get::<_, i64>(3)? as f64,
+                    r.get::<_, i64>(4)? as f64,
+                    r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                    r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                    r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                ])
+            })
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
         let conn = self.conn();
         let Ok(mut stmt) = conn.prepare_cached(
@@ -4698,5 +4754,53 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// 全队聚合的三条规则：cpu 按节点加权平均、内存按 Σ已用/Σ总量、带宽按节点求和。
+    /// 三台机器刻意给不同的 mem_total —— 若把内存写成「各节点百分比的算术平均」，这个用例就会红。
+    #[test]
+    fn overview_daily_averages_resources_but_sums_bandwidth() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = (Utc::now().timestamp() / 3600) * 3600;
+        let mut ids = Vec::new();
+        for (name, mem_total, mem_used, rx) in
+            [("a", 2_000i64, 1_000i64, 100i64), ("b", 8_000, 2_000, 200), ("c", 30_000, 3_000, 300)]
+        {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total, disk_total: 100_000, ..Default::default() },
+                    &format!("tok-{name}"),
+                )
+                .unwrap();
+            // `create_node` 只写节点自身的字段，容量来自 agent 上报，所以这里直接落库。
+            db.conn()
+                .execute(
+                    "UPDATE node SET mem_total = ?1, disk_total = ?2 WHERE id = ?3",
+                    rusqlite::params![mem_total, 100_000i64, n],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                              net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                     VALUES (?1, ?2, 60, 10.0, ?3, 0, 50_000, ?4, ?4, NULL, ?4, ?4)",
+                    rusqlite::params![n, ts, mem_used, rx],
+                )
+                .unwrap();
+            ids.push(n);
+        }
+        let rows = db.overview_daily(1);
+        assert_eq!(rows.len(), 1, "只插了一个小时，应当只有一天");
+        let r = rows[0];
+        // 带宽：求和（100+200+300），再乘 60 分钟 × 60 秒
+        assert_eq!(r[1], (100 + 200 + 300) as f64 * 3600.0);
+        // 峰值：同一时刻三台之和
+        assert_eq!(r[3], 600.0);
+        // cpu：三台都是 10%，加权平均仍是 10
+        assert!((r[5] - 10.0).abs() < 0.01, "cpu 加权平均 = {}", r[5]);
+        // 内存：Σ已用 / Σ总量 = 6000 / 40000 = 15%（按百分比平均则是 (50+25+10)/3 = 28.3%）
+        assert!((r[6] - 15.0).abs() < 0.01, "内存应为 Σ已用/Σ总量 = 15%，实际 {}", r[6]);
+        assert!((r[7] - 50.0).abs() < 0.01, "硬盘 = Σ已用/Σ总量 = 50%，实际 {}", r[7]);
+        let _ = ids;
     }
 }
