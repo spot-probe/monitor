@@ -65,7 +65,7 @@ function dayLabel(ts: number) {
 const CHART_W = 640
 /// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
 /// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
-const CHART_BAR_MAX = 24
+const CHART_BAR_MAX = 16
 const CHART_H = 150
 const CHART_PAD = 18
 
@@ -149,6 +149,21 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
       })}
       <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
         points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      {/* 高峰标记：当天总量最大的那根柱子上方标出来 —— 运维第一眼想看的就是它。 */}
+      {(() => {
+        let peak = 0
+        rows.forEach((r, i) => {
+          if (r.rx + r.tx > rows[peak].rx + rows[peak].tx) peak = i
+        })
+        const x = peak * bw + bw / 2
+        const yy = yOf(rows[peak].rx + rows[peak].tx, top) - 6
+        return (
+          <g>
+            <rect x={x - 15} y={yy - 11} width={30} height={13} rx={6} className="fill-primary" />
+            <text x={x} y={yy - 1} fontSize="9" textAnchor="middle" className="fill-primary-foreground">高峰</text>
+          </g>
+        )
+      })()}
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
           <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
@@ -577,34 +592,36 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">
-            {month.m + 1} 月 · 续费日历
-          </CardTitle>
+          <CardTitle className="text-sm">续费日历</CardTitle>
           <CardAction>
-            <div className="flex items-center gap-1">
+            {/* 标题与月份分层：月份是**导航的当前位置**，所以要居中、加粗，而不是塞进标题里。 */}
+            <div className="flex items-center gap-2">
               <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
-              <Button
-                size="sm"
-                variant="ghost"
+              <button
+                type="button"
                 onClick={() => {
                   const d = new Date()
                   setMonth({ y: d.getFullYear(), m: d.getMonth() })
                   setPickedDay(null)
                 }}
+                className="tnum min-w-24 text-center text-sm font-semibold hover:text-primary"
+                title="回到本月"
               >
-                本月
-              </Button>
+                {month.y} 年 {month.m + 1} 月
+              </button>
               <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
             </div>
           </CardAction>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
+          {/* 去掉单元格之间的分隔线：原来用 `gap-px + bg-border` 拼出一张办公表格，
+              现在靠间距呼吸 —— 现代看板的做法。 */}
+          <div className="grid grid-cols-7 gap-1 text-center text-xs">
             {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-              <div key={w} className="bg-muted py-1.5 font-medium text-muted-foreground">{w}</div>
+              <div key={w} className="py-1.5 font-medium text-muted-foreground">{w}</div>
             ))}
             {cells.map((day, i) => {
-              if (!day) return <div key={`lead-${i}`} className="bg-background" />
+              if (!day) return <div key={`lead-${i}`} />
               const list = byDay.get(day) ?? []
               const isPeak = peak > 1 && list.length === peak
               const on = pickedDay === day
@@ -614,9 +631,14 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
                   type="button"
                   onClick={() => setPickedDay(on ? null : day)}
                   aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                  className={`flex min-h-[52px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
+                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 rounded-lg p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-primary" : ""}`}
                 >
-                  <span className={`tnum text-xs ${day === todayKey ? "rounded bg-primary px-1 font-medium text-primary-foreground" : "text-muted-foreground"}`}>
+                  {/* 今天用**浅底圆角**而不是实心方块：后者像打卡签到，且会把日期压得很小。 */}
+                  <span
+                    className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
+                      day === todayKey ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40" : "text-muted-foreground"
+                    }`}
+                  >
                     {Number(day.slice(8))}
                   </span>
                   {list.length > 0 && (
