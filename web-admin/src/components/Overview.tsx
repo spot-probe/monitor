@@ -405,19 +405,18 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
     return n >= 0 && n <= 30
   }).sort((a, b) => a[0].localeCompare(b[0]))
   const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
-  const notices: { text: string; hint: string; tone: string; icon: ReactNode; href?: string }[] = []
+  const notices: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
   if (soon.length > 0) {
     const total = soon.reduce((n, [, list]) => n + list.length, 0)
     notices.push({
       text: `未来 30 天有 ${total} 台到期`,
       hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
-      tone: "text-warn-fg",
       icon: <CalendarClock className="size-4" />,
       href: "/admin/nodes",
     })
   }
-  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
-  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg", icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
+  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -513,9 +512,9 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
               <div className="divide-y divide-border">
                 {notices.map((n) => (
                   <div key={n.text} className="flex items-start gap-2.5 py-3 first:pt-0 last:pb-0">
-                    {/* **图标保留警示色，正文用中性色**：整行刷橙色会有「便利贴」感（维护者的原话），
-                        但若把图标也一并洗成灰，这一行就再没有任何信号了 —— 颜色留在最该留的那一处。 */}
-                    <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
+                    {/* 维护者要求：这一整块**不留任何颜色**（图标也洗掉）。所以严重度只由**文字**表达
+                        —— 「6 台到期」「3 台集中在 10-12」本身就说清楚了要做什么。 */}
+                    <span className="mt-0.5 shrink-0 text-muted-foreground">{n.icon}</span>
                     <div className="min-w-0 flex-1">
                       <div className="text-sm">{n.text}</div>
                       <div className="text-xs text-muted-foreground">{n.hint}</div>
