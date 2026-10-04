@@ -512,18 +512,20 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
             ) : (
               <div className="divide-y divide-border">
                 {notices.map((n) => (
-                  <div key={n.text} className="flex items-start gap-2.5 py-2.5 first:pt-0 last:pb-0">
+                  <div key={n.text} className="flex items-start gap-2.5 py-3 first:pt-0 last:pb-0">
+                    {/* **图标保留警示色，正文用中性色**：整行刷橙色会有「便利贴」感（维护者的原话），
+                        但若把图标也一并洗成灰，这一行就再没有任何信号了 —— 颜色留在最该留的那一处。 */}
                     <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
                     <div className="min-w-0 flex-1">
-                      <div className={`text-sm ${n.tone}`}>{n.text}</div>
+                      <div className="text-sm">{n.text}</div>
                       <div className="text-xs text-muted-foreground">{n.hint}</div>
                     </div>
                     {/* 行尾给**真的能去**的地方：到期去节点页，落后去更新页。
                         证书那条没地方可去 —— 这也是它做不成的原因之一（面板没有那份数据）。 */}
                     {n.href && (
-                      <a href={n.href} className="shrink-0 self-center text-xs text-primary underline-offset-2 hover:underline">
-                        查看
-                      </a>
+                      <Button size="sm" variant="ghost" asChild className="shrink-0 self-center">
+                        <a href={n.href}>查看</a>
+                      </Button>
                     )}
                   </div>
                 ))}
