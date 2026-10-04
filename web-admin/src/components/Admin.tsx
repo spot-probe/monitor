@@ -1671,6 +1671,9 @@ function dayLabel(ts: number) {
 }
 
 const CHART_W = 640
+/// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
+/// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
+const CHART_BAR_MAX = 24
 const CHART_H = 150
 const CHART_PAD = 18
 
@@ -1679,8 +1682,11 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
   return (
     <>
       <line x1={0} y1={CHART_H - CHART_PAD} x2={CHART_W} y2={CHART_H - CHART_PAD} className="stroke-border" strokeWidth="1" />
-      <text x={0} y={CHART_H - 4} fontSize="9" className="fill-muted-foreground">{dayLabel(rows[0].day_ts)}</text>
-      <text x={CHART_W} y={CHART_H - 4} fontSize="9" textAnchor="end" className="fill-muted-foreground">
+      {/* 标签落在**首尾桶的中心**上：折线/柱子的落点就是桶中心，画在两端会看起来对不齐。 */}
+      <text x={CHART_W / rows.length / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+        {dayLabel(rows[0].day_ts)}
+      </text>
+      <text x={CHART_W - CHART_W / rows.length / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
         {dayLabel(rows[rows.length - 1].day_ts)}
       </text>
     </>
@@ -1697,7 +1703,7 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   const cumTop = Math.max(1, ...cum)
   const bw = CHART_W / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
-  const bar = Math.min(bw * 0.7, 24)
+  const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const bottom = CHART_H - CHART_PAD
   const yOf = (v: number, m: number) => bottom - (v / m) * (CHART_H - CHART_PAD * 2)
   // 30/90 天时每格都标会糊在一起，按数量抽稀。
@@ -1741,6 +1747,7 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
 function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
   const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, r.tx_peak)))
   const bw = CHART_W / Math.max(1, rows.length)
+  const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日带宽峰值与出站速率">
@@ -1749,9 +1756,9 @@ function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
       {rows.map((r, i) => (
         <rect
           key={r.day_ts}
-          x={i * bw + bw * 0.15}
+          x={i * bw + (bw - bar) / 2}
           y={yOf(r.tx)}
-          width={bw * 0.7}
+          width={bar}
           height={Math.max(0, CHART_H - CHART_PAD - yOf(r.tx))}
           className="fill-primary/45"
         />
