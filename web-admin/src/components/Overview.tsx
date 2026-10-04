@@ -81,6 +81,38 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
 }
 
+/// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
+///
+/// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
+/// viewBox 裁掉（`left` 夹在 12%–88% 之间，卡片永远完整）。
+function HoverOverlay({ rows, index, series }: {
+  rows: SeriesPoint[]
+  index: number
+  series: { c: string; t: string; v: string }[]
+}) {
+  const pct = ((index + 0.5) / rows.length) * 100
+  return (
+    <div className="pointer-events-none absolute inset-0">
+      <span className="absolute top-0 bottom-5 w-px bg-foreground/25" style={{ left: `${pct}%` }} />
+      <div
+        className="absolute top-1 z-10 min-w-32 rounded-lg border bg-background p-2.5 shadow-lg"
+        style={{ left: `${Math.min(Math.max(pct, 12), 88)}%`, transform: "translateX(-50%)" }}
+      >
+        <div className="tnum mb-1.5 text-xs font-medium">{dayLabel(rows[index].day_ts)}</div>
+        <div className="space-y-1">
+          {series.map((s) => (
+            <div key={s.t} className="flex items-center gap-2 whitespace-nowrap text-xs">
+              <span className={`size-2 shrink-0 rounded-full ${s.c}`} />
+              <span className="text-muted-foreground">{s.t}</span>
+              <span className="tnum ml-auto font-medium">{s.v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /// 三档刻度（0 / 一半 / 满）与左右轴数值。**三张图共用**：
 /// 上一轮我只在流量图里画了刻度，带宽图与资源图就漏了 —— 根因是每张图各写了一遍。
 function ChartTicks({ left, right, format }: { left: number; right?: number; format: (v: number) => string }) {
@@ -278,6 +310,36 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             { label: "硬盘峰值", value: `${pick("disk").max.toFixed(1)}%`, hint: pick("disk").day },
           ]
 
+  // 悬停索引。放在趋势卡这一层，三张图共用同一套交互 —— 三张图本身不用改。
+  const [hover, setHover] = useState<number | null>(null)
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!rows || rows.length === 0) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const x = ((e.clientX - r.left) / r.width) * CHART_W
+    setHover(Math.max(0, Math.min(rows.length - 1, Math.floor(x / (CHART_W / rows.length)))))
+  }
+  // 浮层里要显示的序列：按 tab 取，和图上画的是同一批数（累计在这里现算）。
+  const cumAt = (i: number) => (rows ?? []).slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0)
+  const hoverSeries = (i: number) =>
+    !rows
+      ? []
+      : tab === "traffic"
+        ? [
+            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx) },
+            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx) },
+            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)) },
+          ]
+        : tab === "bandwidth"
+          ? [
+              { c: "bg-primary/45", t: "出站速率", v: `${bytes(rows[i].tx)}/s` },
+              { c: "bg-warn-fg", t: "入站峰值", v: `${bytes(rows[i].rx_peak)}/s` },
+            ]
+          : [
+              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}%` },
+              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}%` },
+              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}%` },
+            ]
+
   const pill = (on: boolean) =>
     `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
 
@@ -337,12 +399,17 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
           <p className="py-10 text-center text-xs text-muted-foreground">
             {rows ? "这段时间还没有指标数据。" : "正在读取…"}
           </p>
-        ) : tab === "traffic" ? (
-          <TrafficChart rows={rows} />
-        ) : tab === "bandwidth" ? (
-          <BandwidthChart rows={rows} />
         ) : (
-          <ResourceChart rows={rows} />
+          <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+            {tab === "traffic" ? (
+              <TrafficChart rows={rows} />
+            ) : tab === "bandwidth" ? (
+              <BandwidthChart rows={rows} />
+            ) : (
+              <ResourceChart rows={rows} />
+            )}
+            {hover !== null && <HoverOverlay rows={rows} index={hover} series={hoverSeries(hover)} />}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -594,8 +661,10 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
         <CardHeader>
           <CardTitle className="text-sm">续费日历</CardTitle>
           <CardAction>
-            {/* 标题与月份分层：月份是**导航的当前位置**，所以要居中、加粗，而不是塞进标题里。 */}
+            {/* 标题与月份分层：月份是**导航的当前位置**。加一条竖分隔线，让「这一页是什么」与
+                「现在在哪个月」一眼分得开 —— 这是面板面包屑自己的做法（`.w-px.bg-border`），保持一致。 */}
             <div className="flex items-center gap-2">
+              <span aria-hidden className="h-5 w-px bg-border" />
               <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
               <button
                 type="button"
@@ -614,14 +683,14 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardAction>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* 去掉单元格之间的分隔线：原来用 `gap-px + bg-border` 拼出一张办公表格，
-              现在靠间距呼吸 —— 现代看板的做法。 */}
-          <div className="grid grid-cols-7 gap-1 text-center text-xs">
+          {/* 保留框线（维护者要求）。同事那一轮建议去掉，但这是维护者的取舍 —— 日历的框线帮助
+              逐格定位，尤其在有到期副标的日子里。 */}
+          <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
             {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-              <div key={w} className="py-1.5 font-medium text-muted-foreground">{w}</div>
+              <div key={w} className="bg-background py-1.5 font-medium text-muted-foreground">{w}</div>
             ))}
             {cells.map((day, i) => {
-              if (!day) return <div key={`lead-${i}`} />
+              if (!day) return <div key={`lead-${i}`} className="bg-background" />
               const list = byDay.get(day) ?? []
               const isPeak = peak > 1 && list.length === peak
               const on = pickedDay === day
@@ -631,7 +700,7 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
                   type="button"
                   onClick={() => setPickedDay(on ? null : day)}
                   aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 rounded-lg p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-primary" : ""}`}
+                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
                 >
                   {/* 今天用**浅底圆角**而不是实心方块：后者像打卡签到，且会把日期压得很小。 */}
                   <span
