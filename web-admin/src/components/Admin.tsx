@@ -1631,6 +1631,11 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
 
+  // 版本 → 台数。空字符串是「从没上报过」，不是 0.0.0，所以排在最后并原样显示。
+  const versionCount = new Map<string, number>()
+  for (const n of nodes) versionCount.set(n.agent_version ?? "", (versionCount.get(n.agent_version ?? "") ?? 0) + 1)
+  const agentVersions = [...versionCount.entries()].sort((a, b) => (a[0] === "" ? 1 : b[0] === "" ? -1 : b[1] - a[1]))
+
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
   const expiring = nodes.filter((n) => {
@@ -1652,6 +1657,7 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
   }
   const peak = Math.max(0, ...[...byDay.values()].map((v) => v.length))
 
+
   const first = new Date(month.y, month.m, 1)
   const days = new Date(month.y, month.m + 1, 0).getDate()
   // 周一起始（中文日历的习惯，也是竞品那张图的样子）。
@@ -1665,6 +1671,24 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
   ]
   const today = new Date()
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
+
+  // 把「未来 30 天到期」说成人话，并指出有没有集中的那一天。
+  const soon = [...byDay.entries()].filter(([d]) => {
+  	const days = (Date.parse(d + "T00:00:00") - Date.parse(todayKey + "T00:00:00")) / 86_400_000
+  	return days >= 0 && days <= 30
+  }).sort((a, b) => a[0].localeCompare(b[0]))
+  const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
+  const notices: { text: string; hint: string; tone: string }[] = []
+  if (soon.length > 0) {
+  	const total = soon.reduce((n, [, list]) => n + list.length, 0)
+  	notices.push({
+  		text: `未来 30 天有 ${total} 台到期`,
+  		hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
+  		tone: "text-warn-fg",
+  	})
+  }
+  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg" })
+  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg" })
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
     setMonth({ y: d.getFullYear(), m: d.getMonth() })
@@ -1691,6 +1715,37 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
           </div>
         ))}
       </Card>
+
+      {/* 近期事项：日历要自己看，这里直接说成一句话。全部来自 nodes，不额外请求。 */}
+      {notices.length > 0 && (
+      	<Card className="gap-2 p-5">
+      		<h3 className="text-sm font-semibold">近期事项</h3>
+      		<ul className="space-y-1 text-sm">
+      			{notices.map((n, i) => (
+      				<li key={i} className="flex flex-wrap items-baseline gap-x-2">
+      					<span className={n.tone}>{n.text}</span>
+      					<span className="text-xs text-muted-foreground">{n.hint}</span>
+      				</li>
+      			))}
+      		</ul>
+      	</Card>
+      )}
+
+      {/* Agent 版本分布：`agent_version` 为空表示从没上报过，单独列出而不是当成 0.0.0。 */}
+      {agentVersions.length > 0 && (
+      	<Card className="gap-2 p-5">
+      		<h3 className="text-sm font-semibold">Agent 版本</h3>
+      		<div className="space-y-1.5">
+      			{agentVersions.map(([v, n]) => (
+      				<div key={v} className="flex items-center gap-3 text-xs">
+      					<span className="w-24 shrink-0 truncate font-mono">{v === "" ? "未上报" : v}</span>
+      					<span className="h-2 rounded-sm bg-primary/40" style={{ width: `${(n / Math.max(...agentVersions.map((x) => x[1]))) * 60}%` }} />
+      					<span className="tnum text-muted-foreground">{n} 台</span>
+      				</div>
+      			))}
+      		</div>
+      	</Card>
+      )}
 
       {agentLatest && (
         <p className="text-xs text-muted-foreground">
