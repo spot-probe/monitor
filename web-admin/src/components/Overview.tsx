@@ -22,6 +22,8 @@ type SeriesPoint = {
   cpu: number
   mem: number
   disk: number
+  /** 当天**有数据覆盖的秒数**：平均速率要除以它，不能除以 86400。 */
+  covered: number
 }
 
 /// 按档位缓存已取到的趋势。
@@ -207,9 +209,13 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 带宽：当天平均速率（柱）与峰值（线）。同一个量纲，所以共用一根轴 —— 不需要双轴。
+/// 带宽：当天**日均速率**（柱）与**峰值速率**（线）。**两者都是字节/秒** —— 这是关键：
+/// 之前柱子画的是「当天的总字节」（把速率乘了时长积出来的），折线画的是「瞬时峰值」，
+/// 两个不同量纲的画在同一根轴上，看上去就毫无道理（截图里那根线一直贴在顶上）。
+/// 平均值除以的是**有数据覆盖的秒数**，不是 86400 —— 否则没有样本的小时会以 0 参与平均。
 function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
-  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, r.tx_peak)))
+  const avgTx = (r: SeriesPoint) => (r.covered > 0 ? r.tx / r.covered : 0)
+  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, avgTx(r))))
   const bw = CHART_W / Math.max(1, rows.length)
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
@@ -221,9 +227,9 @@ function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
         <rect
           key={r.day_ts}
           x={i * bw + (bw - bar) / 2}
-          y={yOf(r.tx)}
+          y={yOf(avgTx(r))}
           width={bar}
-          height={Math.max(0, CHART_H - CHART_PAD - yOf(r.tx))}
+          height={Math.max(0, CHART_H - CHART_PAD - yOf(avgTx(r)))}
           className="fill-primary/45"
         />
       ))}
@@ -290,7 +296,10 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   const totalOf = (key: "rx" | "tx" | "rx_peak" | "tx_peak") => list.map((r) => r[key])
   const trafficTotal = totals
   const busiest = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
-  const txAvg = list.length > 0 ? totalOf("tx").reduce((n, v) => n + v, 0) / list.length : 0
+  // 日均出站 = 区间总字节 ÷ 区间覆盖秒数。**不是**逐日平均后再相加，也不是除以天数 —— 那是错的。
+  const txSum = totalOf("tx").reduce((n, v) => n + v, 0)
+  const coveredSum = list.reduce((n, r) => n + r.covered, 0)
+  const txAvg = coveredSum > 0 ? txSum / coveredSum : 0
   const stats =
     tab === "traffic"
       ? [
@@ -301,7 +310,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
       : tab === "bandwidth"
         ? [
             { label: "区间峰值", value: `${bytes(pick("rx_peak").max)}/s`, hint: "入站最高速率" },
-            { label: "日均出站", value: `${bytes(txAvg)}/s`, hint: "按有数据的逻辑日" },
+            { label: "日均出站", value: `${bytes(txAvg)}/s`, hint: "按有数据的时间摊算" },
             { label: "出站峰值日", value: `${bytes(pick("tx_peak").max)}/s`, hint: pick("tx_peak").day },
           ]
         : [

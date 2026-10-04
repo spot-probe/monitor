@@ -1570,6 +1570,8 @@ pub async fn overview_series(
                     "cpu": r[5],
                     "mem": r[6],
                     "disk": r[7],
+                    // 有数据覆盖的秒数：面板用它算**精确**的平均速率（不是除以 86400）。
+                    "covered": r[8],
                 })
             })
             .collect::<Vec<_>>()
