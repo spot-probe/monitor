@@ -69,6 +69,18 @@ const CHART_BAR_MAX = 24
 const CHART_H = 150
 const CHART_PAD = 18
 
+/// 右上角的状态徽章。卡片外框保持统一，状态只在这里和主数字上出现。
+/// 颜色一律走 token（`ok-fg` / `warn-fg` / `danger-fg`），不写死调色板 —— 暗色主题才成立。
+function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; text: string }) {
+  const cls = {
+    ok: "bg-ok-fg/12 text-ok-fg",
+    warn: "bg-warn-fg/15 text-warn-fg",
+    bad: "bg-danger-fg/12 text-danger-fg",
+    muted: "bg-muted text-muted-foreground",
+  }[tone]
+  return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
+}
+
 /// 三档刻度（0 / 一半 / 满）与左右轴数值。**三张图共用**：
 /// 上一轮我只在流量图里画了刻度，带宽图与资源图就漏了 —— 根因是每张图各写了一遍。
 function ChartTicks({ left, right, format }: { left: number; right?: number; format: (v: number) => string }) {
@@ -393,7 +405,7 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
     return n >= 0 && n <= 30
   }).sort((a, b) => a[0].localeCompare(b[0]))
   const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
-  const notices: { text: string; hint: string; tone: string; icon: ReactNode }[] = []
+  const notices: { text: string; hint: string; tone: string; icon: ReactNode; href?: string }[] = []
   if (soon.length > 0) {
     const total = soon.reduce((n, [, list]) => n + list.length, 0)
     notices.push({
@@ -401,10 +413,11 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
       tone: "text-warn-fg",
       icon: <CalendarClock className="size-4" />,
+      href: "/admin/nodes",
     })
   }
-  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg", icon: <CircleAlert className="size-4" /> })
-  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg", icon: <ArrowUpCircle className="size-4" /> })
+  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", tone: "text-danger-fg", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, tone: "text-warn-fg", icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -418,15 +431,16 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       {/* 三张复合卡，而不是六个平铺数字：在线 + 离线 = 总数，并列三项本身就是数学冗余；
           而且平铺会把卡片横向拉长、大面积留白。这里按「存活 / 生命周期 / 维护」三件事各归一卡。 */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {/* 严重度用**顶部指示条**表达，而不是整卡底色：底色一次只能强调一张卡，指示条可以按严重度
-            同时用在多张上（离线红、临期琥珀），一排卡片不会被刷成调色盘。 */}
-        <Card className={nodes.length - online > 0 ? "border-t-2 border-t-destructive" : "border-t-2 border-t-transparent"}>
+        {/* 卡片外框一律统一，状态只出现在两处：右上角的状态徽章 + 主数字的颜色。
+            三轮下来方向一直是「更克制」，这一版最克制的一处就是**不再给外框上色**。 */}
+        <Card>
           <CardContent>
             <div className="flex items-start justify-between gap-2">
               <div className="text-xs text-muted-foreground">节点总数</div>
-              <Badge variant="secondary" className="tnum shrink-0">
-                在线率 {nodes.length ? Math.round((online / nodes.length) * 100) : 0}%
-              </Badge>
+              <StatusPill
+                tone={online === nodes.length && nodes.length > 0 ? "ok" : online === 0 && nodes.length > 0 ? "bad" : "muted"}
+                text={nodes.length === 0 ? "无节点" : online === 0 ? "全部离线" : online === nodes.length ? "全部在线" : "部分离线"}
+              />
             </div>
             <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">
               {nodes.length}
@@ -445,9 +459,12 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardContent>
         </Card>
 
-        <Card className={expiring > 0 || expired > 0 ? "border-t-2 border-t-warn-fg" : "border-t-2 border-t-transparent"}>
+        <Card>
           <CardContent>
-            <div className="text-xs text-muted-foreground">30 天内到期</div>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">30 天内到期</div>
+              <StatusPill tone={expired > 0 ? "bad" : expiring > 0 ? "warn" : "ok"} text={expired > 0 ? "已有过期" : expiring > 0 ? "需续费" : "无临期"} />
+            </div>
             <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${expiring > 0 ? "text-warn-fg" : ""}`}>
               {expiring}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
@@ -461,9 +478,12 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardContent>
         </Card>
 
-        <Card className={outdated > 0 ? "border-t-2 border-t-warn-fg" : "border-t-2 border-t-transparent"}>
+        <Card>
           <CardContent>
-            <div className="text-xs text-muted-foreground">待升级 agent</div>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">待升级 agent</div>
+              <StatusPill tone={outdated > 0 ? "warn" : "ok"} text={outdated > 0 ? "有落后" : "正常"} />
+            </div>
             <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${outdated > 0 ? "text-warn-fg" : ""}`}>
               {outdated}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
@@ -486,18 +506,28 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardHeader>
           <CardContent className="space-y-2">
             {notices.length === 0 ? (
-              // 只说我们**知道**的事。「告警通道运行正常」这类话写不出来 —— 面板没有投递健康数据。
+              // 只说我们**知道**的事。「告警通道运行正常」「SSL 证书充足」这类话写不出来 —— 面板没有
+              // 那两份数据，印出来就是编造。
               <p className="text-sm text-muted-foreground">暂无其它待处理项。</p>
             ) : (
-              notices.map((n) => (
-                <div key={n.text} className="flex items-start gap-2.5 rounded-lg bg-warn-fg/10 p-3">
-                  <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
-                  <div className="min-w-0">
-                    <div className={`text-sm ${n.tone}`}>{n.text}</div>
-                    <div className="text-xs text-muted-foreground">{n.hint}</div>
+              <div className="divide-y divide-border">
+                {notices.map((n) => (
+                  <div key={n.text} className="flex items-start gap-2.5 py-2.5 first:pt-0 last:pb-0">
+                    <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className={`text-sm ${n.tone}`}>{n.text}</div>
+                      <div className="text-xs text-muted-foreground">{n.hint}</div>
+                    </div>
+                    {/* 行尾给**真的能去**的地方：到期去节点页，落后去更新页。
+                        证书那条没地方可去 —— 这也是它做不成的原因之一（面板没有那份数据）。 */}
+                    {n.href && (
+                      <a href={n.href} className="shrink-0 self-center text-xs text-primary underline-offset-2 hover:underline">
+                        查看
+                      </a>
+                    )}
                   </div>
-                </div>
-              ))
+                ))}
+              </div>
             )}
           </CardContent>
         </Card>
