@@ -1687,36 +1687,52 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 流量：堆叠柱（入在下、出在上）+ **右轴**累积折线。
-/// 两根轴的量纲差一个数量级（当天 vs 累计），所以必须分开标 —— 否则那条折线看着像没长起来。
+/// 流量：堆叠柱（入在下、出在上）+ **右轴**累积折线，**两侧各有刻度**。
+///
+/// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
+/// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
 function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const cumTop = Math.max(1, ...cum)
   const bw = CHART_W / Math.max(1, rows.length)
-  const yOf = (v: number, m: number) => CHART_H - CHART_PAD - (v / m) * (CHART_H - CHART_PAD * 2)
+  // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
+  const bar = Math.min(bw * 0.7, 24)
+  const bottom = CHART_H - CHART_PAD
+  const yOf = (v: number, m: number) => bottom - (v / m) * (CHART_H - CHART_PAD * 2)
+  // 30/90 天时每格都标会糊在一起，按数量抽稀。
+  const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
-      <ChartAxis rows={rows} />
-      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">{bytes(top)}</text>
-      <text x={CHART_W} y={10} fontSize="9" textAnchor="end" className="fill-warn-fg">累计 {bytes(cumTop)}</text>
+      {[0, 0.5, 1].map((t) => (
+        <g key={t}>
+          <line x1={0} y1={yOf(t, 1)} x2={CHART_W} y2={yOf(t, 1)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
+          <text x={0} y={yOf(t, 1) - 2} fontSize="9" className="fill-muted-foreground">{bytes(top * t)}</text>
+          <text x={CHART_W} y={yOf(t, 1) - 2} fontSize="9" textAnchor="end" className="fill-warn-fg">{bytes(cumTop * t)}</text>
+        </g>
+      ))}
       {rows.map((r, i) => {
-        const x = i * bw + bw * 0.15
+        const x = i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
         const hi = yOf(r.rx + r.tx, top)
         return (
           <g key={r.day_ts}>
-            <rect x={x} y={mid} width={bw * 0.7} height={Math.max(0, CHART_H - CHART_PAD - mid)} className="fill-primary/60" />
-            <rect x={x} y={hi} width={bw * 0.7} height={Math.max(0, mid - hi)} className="fill-primary/25" />
+            <rect x={x} y={mid} width={bar} height={Math.max(0, bottom - mid)} className="fill-primary" />
+            <rect x={x} y={hi} width={bar} height={Math.max(0, mid - hi)} className="fill-primary/45" />
+            {/* 两段是同色系的不同明度，深色主题下交界会糊 —— 用一条 1px 分界线靠结构说清楚，而不是靠色差。 */}
+            <line x1={x} y1={mid} x2={x + bar} y2={mid} className="stroke-background" strokeWidth="1" />
           </g>
         )
       })}
-      <polyline
-        fill="none"
-        className="stroke-warn-fg"
-        strokeWidth="1.5"
-        points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")}
-      />
+      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
+        points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      {rows.map((r, i) =>
+        i % step === 0 || i === rows.length - 1 ? (
+          <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+            {dayLabel(r.day_ts)}
+          </text>
+        ) : null,
+      )}
     </svg>
   )
 }
@@ -1766,7 +1782,7 @@ function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 趋势卡：三个 tab + 三档时间范围。图例是必要的 —— 三张图都用了颜色区分序列。
+/// 趋势卡：三张摘要卡（只对流量有意义）+ 三个 tab + 三档范围（同一套胶囊样式）。
 function TrendCard({ rows, tab, setTab, range, setRange }: {
   rows: SeriesPoint[] | null
   tab: "traffic" | "bandwidth" | "resource"
@@ -1781,44 +1797,72 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   ] as const
   const legend =
     tab === "traffic"
-      ? [{ c: "bg-primary/60", t: "入站" }, { c: "bg-primary/25", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
+      ? [{ c: "bg-primary", t: "入站" }, { c: "bg-primary/45", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
       : tab === "bandwidth"
         ? [{ c: "bg-primary/45", t: "出站速率" }, { c: "bg-warn-fg", t: "入站峰值" }]
         : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
+
+  // 摘要卡：不用盯着柱子心算总量。三个数都由已取到的序列直接得出，不额外请求。
+  const totals = (rows ?? []).map((r) => r.rx + r.tx)
+  const sum = totals.reduce((n, v) => n + v, 0)
+  const peakIdx = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
+  const stats = [
+    { label: "区间累计", value: bytes(sum), hint: `近 ${range} 天` },
+    { label: "日均流量", value: bytes(totals.length > 0 ? sum / totals.length : 0), hint: "按有数据的逻辑日" },
+    { label: "最高流量日", value: peakIdx >= 0 ? bytes(totals[peakIdx]) : "—", hint: peakIdx >= 0 ? dayLabel(rows![peakIdx].day_ts) : "" },
+  ]
+
+  const pill = (on: boolean) =>
+    `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-sm">趋势</CardTitle>
+        <CardTitle className="text-sm">
+          趋势
+          <Help>
+            日流量由每小时的平均速率乘以时长累加得到（积分近似），不是精确的字节计数。
+            「累计」是所选周期内的累加&#8203;，<b>不是各节点的计费周期</b> —— 每台机器有自己的
+            traffic_reset_day，两个口径不能混。日期按本地时区显示（服务端按 UTC 日分组），跨日边界会有
+            小时级的偏移。
+          </Help>
+        </CardTitle>
         <CardAction>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center rounded-md bg-muted p-0.5">
+            {/* 两个控件都是「选一个」，所以共用同一种胶囊样式：长得不一样只会让人犹豫。 */}
+            <div className="flex items-center rounded-full bg-muted p-0.5">
               {tabs.map((t) => (
-                <button
-                  key={t.key}
-                  type="button"
-                  onClick={() => setTab(t.key)}
-                  aria-pressed={tab === t.key}
-                  className={`rounded px-2.5 py-1 text-xs transition-colors ${tab === t.key ? "bg-background font-medium text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
-                >
+                <button key={t.key} type="button" onClick={() => setTab(t.key)} aria-pressed={tab === t.key} className={pill(tab === t.key)}>
                   {t.label}
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center rounded-full bg-muted p-0.5">
               {[7, 30, 90].map((d) => (
-                <Button key={d} size="sm" variant={range === d ? "secondary" : "ghost"} onClick={() => setRange(d)}>
+                <button key={d} type="button" onClick={() => setRange(d)} aria-pressed={range === d} className={pill(range === d)}>
                   {d} 天
-                </Button>
+                </button>
               ))}
             </div>
           </div>
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        {tab === "traffic" && rows && rows.length > 0 && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {stats.map((st) => (
+              <div key={st.label} className="rounded-lg bg-muted px-3 py-2">
+                <div className="text-xs text-muted-foreground">{st.label}</div>
+                <div className="tnum mt-0.5 text-lg leading-tight font-medium">{st.value}</div>
+                <div className="text-[11px] text-muted-foreground">{st.hint}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted-foreground">
           {legend.map((l) => (
             <span key={l.t} className="flex items-center gap-1.5">
-              <span className={`size-2 rounded-sm ${l.c}`} />
+              <span className={`size-2 rounded-full ${l.c}`} />
               {l.t}
             </span>
           ))}
@@ -1834,10 +1878,6 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ) : (
           <ResourceChart rows={rows} />
         )}
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          日流量由每小时的平均速率乘以时长累加得到（积分近似）；「累计」是所选周期内的累加，不是各节点的
-          计费周期。日期按本地时区显示。
-        </p>
       </CardContent>
     </Card>
   )
