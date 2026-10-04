@@ -68,5 +68,5 @@ test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
   expect(n, "日历应有 28–31 个日期格，实际 " + n).toBeGreaterThanOrEqual(28)
   expect(n).toBeLessThanOrEqual(31)
   await page.getByRole("button", { name: "下月" }).click()
-  await expect(page.getByText(/年 \d+ 月 · 续费日历/)).toBeVisible()
+  await expect(page.getByText(/\d+ 月 · 续费日历/)).toBeVisible()
 })

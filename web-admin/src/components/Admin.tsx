@@ -1620,6 +1620,217 @@ function Histogram({ values, picked, onPick }: {
 }
 
 
+/// 全队按天的趋势（对应 hub 的 `Db::overview_daily`）。
+type SeriesPoint = {
+  day_ts: number
+  rx: number
+  tx: number
+  rx_peak: number
+  tx_peak: number
+  cpu: number
+  mem: number
+  disk: number
+}
+
+/// 取全队趋势；`days` 变了就重取（7/30/90 三档）。
+function useOverviewSeries(days: number) {
+  const [rows, setRows] = useState<SeriesPoint[] | null>(null)
+  useEffect(() => {
+    let stop = false
+    api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}`)
+      .then((d) => {
+        if (!stop) setRows(d.days)
+      })
+      .catch(() => {
+        if (!stop) setRows([])
+      })
+    return () => {
+      stop = true
+    }
+  }, [days])
+  return rows
+}
+
+/// 日期短标签。hub 给的是 **UTC 日**的时间戳，这里按**本地**时区显示 —— 服务端若转成日期字符串，
+/// 东八区会把「日」整体挪错一天（日历那里已经踩过一次）。
+function dayLabel(ts: number) {
+  const d = new Date(ts * 1000)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+const CHART_W = 640
+const CHART_H = 150
+const CHART_PAD = 18
+
+/// 面板里三种图共用的横轴：一条基线 + 首尾日期。
+function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
+  return (
+    <>
+      <line x1={0} y1={CHART_H - CHART_PAD} x2={CHART_W} y2={CHART_H - CHART_PAD} className="stroke-border" strokeWidth="1" />
+      <text x={0} y={CHART_H - 4} fontSize="9" className="fill-muted-foreground">{dayLabel(rows[0].day_ts)}</text>
+      <text x={CHART_W} y={CHART_H - 4} fontSize="9" textAnchor="end" className="fill-muted-foreground">
+        {dayLabel(rows[rows.length - 1].day_ts)}
+      </text>
+    </>
+  )
+}
+
+/// 流量：堆叠柱（入在下、出在上）+ **右轴**累积折线。
+/// 两根轴的量纲差一个数量级（当天 vs 累计），所以必须分开标 —— 否则那条折线看着像没长起来。
+function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
+  const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
+  const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
+  const cumTop = Math.max(1, ...cum)
+  const bw = CHART_W / Math.max(1, rows.length)
+  const yOf = (v: number, m: number) => CHART_H - CHART_PAD - (v / m) * (CHART_H - CHART_PAD * 2)
+  return (
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
+      <ChartAxis rows={rows} />
+      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">{bytes(top)}</text>
+      <text x={CHART_W} y={10} fontSize="9" textAnchor="end" className="fill-warn-fg">累计 {bytes(cumTop)}</text>
+      {rows.map((r, i) => {
+        const x = i * bw + bw * 0.15
+        const mid = yOf(r.rx, top)
+        const hi = yOf(r.rx + r.tx, top)
+        return (
+          <g key={r.day_ts}>
+            <rect x={x} y={mid} width={bw * 0.7} height={Math.max(0, CHART_H - CHART_PAD - mid)} className="fill-primary/60" />
+            <rect x={x} y={hi} width={bw * 0.7} height={Math.max(0, mid - hi)} className="fill-primary/25" />
+          </g>
+        )
+      })}
+      <polyline
+        fill="none"
+        className="stroke-warn-fg"
+        strokeWidth="1.5"
+        points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")}
+      />
+    </svg>
+  )
+}
+
+/// 带宽：当天平均速率（柱）与峰值（线）。同一个量纲，所以共用一根轴 —— 不需要双轴。
+function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
+  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, r.tx_peak)))
+  const bw = CHART_W / Math.max(1, rows.length)
+  const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  return (
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日带宽峰值与出站速率">
+      <ChartAxis rows={rows} />
+      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">{bytes(top)}/s</text>
+      {rows.map((r, i) => (
+        <rect
+          key={r.day_ts}
+          x={i * bw + bw * 0.15}
+          y={yOf(r.tx)}
+          width={bw * 0.7}
+          height={Math.max(0, CHART_H - CHART_PAD - yOf(r.tx))}
+          className="fill-primary/45"
+        />
+      ))}
+      <polyline
+        fill="none"
+        className="stroke-warn-fg"
+        strokeWidth="1.5"
+        points={rows.map((r, i) => `${i * bw + bw / 2},${yOf(r.rx_peak)}`).join(" ")}
+      />
+    </svg>
+  )
+}
+
+/// 资源：cpu / 内存 / 硬盘 三条线，都是百分比，共用 0–100 的轴。
+function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
+  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(100, Math.max(0, v)) / 100) * (CHART_H - CHART_PAD * 2)
+  const line = (key: "cpu" | "mem" | "disk") =>
+    rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
+  return (
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
+      <ChartAxis rows={rows} />
+      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">100%</text>
+      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
+      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
+      <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
+    </svg>
+  )
+}
+
+/// 趋势卡：三个 tab + 三档时间范围。图例是必要的 —— 三张图都用了颜色区分序列。
+function TrendCard({ rows, tab, setTab, range, setRange }: {
+  rows: SeriesPoint[] | null
+  tab: "traffic" | "bandwidth" | "resource"
+  setTab: (t: "traffic" | "bandwidth" | "resource") => void
+  range: number
+  setRange: (r: number) => void
+}) {
+  const tabs = [
+    { key: "traffic", label: "流量" },
+    { key: "bandwidth", label: "带宽" },
+    { key: "resource", label: "资源" },
+  ] as const
+  const legend =
+    tab === "traffic"
+      ? [{ c: "bg-primary/60", t: "入站" }, { c: "bg-primary/25", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
+      : tab === "bandwidth"
+        ? [{ c: "bg-primary/45", t: "出站速率" }, { c: "bg-warn-fg", t: "入站峰值" }]
+        : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">趋势</CardTitle>
+        <CardAction>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center rounded-md bg-muted p-0.5">
+              {tabs.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setTab(t.key)}
+                  aria-pressed={tab === t.key}
+                  className={`rounded px-2.5 py-1 text-xs transition-colors ${tab === t.key ? "bg-background font-medium text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              {[7, 30, 90].map((d) => (
+                <Button key={d} size="sm" variant={range === d ? "secondary" : "ghost"} onClick={() => setRange(d)}>
+                  {d} 天
+                </Button>
+              ))}
+            </div>
+          </div>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+          {legend.map((l) => (
+            <span key={l.t} className="flex items-center gap-1.5">
+              <span className={`size-2 rounded-sm ${l.c}`} />
+              {l.t}
+            </span>
+          ))}
+        </div>
+        {!rows || rows.length === 0 ? (
+          <p className="py-10 text-center text-xs text-muted-foreground">
+            {rows ? "这段时间还没有指标数据。" : "正在读取…"}
+          </p>
+        ) : tab === "traffic" ? (
+          <TrafficChart rows={rows} />
+        ) : tab === "bandwidth" ? (
+          <BandwidthChart rows={rows} />
+        ) : (
+          <ResourceChart rows={rows} />
+        )}
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          日流量由每小时的平均速率乘以时长累加得到（积分近似）；「累计」是所选周期内的累加，不是各节点的
+          计费周期。日期按本地时区显示。
+        </p>
+      </CardContent>
+    </Card>
+  )
+}
+
 /// 总览：一个页面的 KPI + 近期事项 + Agent 版本 + 续费日历。
 ///
 /// 只读 `nodes` 已有的字段（在线、到期日、价格、agent 版本），**不加接口、不加请求**，
@@ -1634,6 +1845,9 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
+  const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
+  const [range, setRange] = useState(30)
+  const series = useOverviewSeries(range)
 
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
@@ -1763,10 +1977,13 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
         </CardContent>
       </Card>
 
+      {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
       <Card>
         <CardHeader>
           <CardTitle className="text-sm">
-            {month.y} 年 {month.m + 1} 月 · 续费日历
+            {month.m + 1} 月 · 续费日历
           </CardTitle>
           <CardAction>
             <div className="flex items-center gap-1">
@@ -1843,6 +2060,7 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
           {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
         </CardContent>
       </Card>
+      </div>
     </div>
   )
 }
