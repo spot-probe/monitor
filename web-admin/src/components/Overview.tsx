@@ -418,14 +418,21 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       {/* 三张复合卡，而不是六个平铺数字：在线 + 离线 = 总数，并列三项本身就是数学冗余；
           而且平铺会把卡片横向拉长、大面积留白。这里按「存活 / 生命周期 / 维护」三件事各归一卡。 */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Card className={nodes.length - online > 0 ? "border-destructive/30 bg-destructive/5" : ""}>
+        {/* 严重度用**顶部指示条**表达，而不是整卡底色：底色一次只能强调一张卡，指示条可以按严重度
+            同时用在多张上（离线红、临期琥珀），一排卡片不会被刷成调色盘。 */}
+        <Card className={nodes.length - online > 0 ? "border-t-2 border-t-destructive" : "border-t-2 border-t-transparent"}>
           <CardContent>
-            <div className="text-xs text-muted-foreground">节点总数</div>
-            <div className="tnum mt-1 text-3xl font-medium leading-none tracking-tight">
-              {nodes.length}
-              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">节点总数</div>
+              <Badge variant="secondary" className="tnum shrink-0">
+                在线率 {nodes.length ? Math.round((online / nodes.length) * 100) : 0}%
+              </Badge>
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">
+              {nodes.length}
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
+            </div>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
               <span className={online > 0 ? "flex items-center gap-1.5 text-ok-fg" : "flex items-center gap-1.5 text-muted-foreground"}>
                 <span className="size-1.5 rounded-full bg-current" />
                 <span className="tnum">{online}</span> 在线
@@ -438,14 +445,14 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className={expiring > 0 || expired > 0 ? "border-t-2 border-t-warn-fg" : "border-t-2 border-t-transparent"}>
           <CardContent>
             <div className="text-xs text-muted-foreground">30 天内到期</div>
-            <div className={`tnum mt-1 text-3xl font-medium leading-none tracking-tight ${expiring > 0 ? "text-warn-fg" : ""}`}>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${expiring > 0 ? "text-warn-fg" : ""}`}>
               {expiring}
-              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
-            <div className="mt-3 flex items-center gap-1.5 text-xs">
+            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
               <CalendarClock className="size-3.5 shrink-0 text-muted-foreground" />
               <span className={expired > 0 ? "font-semibold text-danger-fg" : "text-muted-foreground"}>
                 已过期 <span className="tnum">{expired}</span> 台
@@ -454,14 +461,14 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className={outdated > 0 ? "border-t-2 border-t-warn-fg" : "border-t-2 border-t-transparent"}>
           <CardContent>
             <div className="text-xs text-muted-foreground">待升级 agent</div>
-            <div className={`tnum mt-1 text-3xl font-medium leading-none tracking-tight ${outdated > 0 ? "text-warn-fg" : "text-foreground"}`}>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${outdated > 0 ? "text-warn-fg" : ""}`}>
               {outdated}
-              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
-            <div className="mt-3 flex items-center gap-1.5 text-xs">
+            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
               <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="text-muted-foreground">
                 最新 <span className="font-mono">{agentLatest ?? "—"}</span>
@@ -479,10 +486,11 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           </CardHeader>
           <CardContent className="space-y-2">
             {notices.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无告警或待处理项。</p>
+              // 只说我们**知道**的事。「告警通道运行正常」这类话写不出来 —— 面板没有投递健康数据。
+              <p className="text-sm text-muted-foreground">暂无其它待处理项。</p>
             ) : (
               notices.map((n) => (
-                <div key={n.text} className="flex items-start gap-2.5 rounded-lg bg-muted p-3">
+                <div key={n.text} className="flex items-start gap-2.5 rounded-lg bg-warn-fg/10 p-3">
                   <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
                   <div className="min-w-0">
                     <div className={`text-sm ${n.tone}`}>{n.text}</div>
@@ -504,7 +512,7 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
           <CardContent className="space-y-3">
             {/* 分段堆叠条：绿 = 最新、琥珀 = 落后（hub 的 agent_old）、灰 = 未上报。
                 三者互斥且覆盖全部节点，「未上报」不并进落后 —— 没连过的机器不该被说成旧版本。 */}
-            <div className="flex h-3 overflow-hidden rounded-full bg-muted">
+            <div className="flex h-2.5 overflow-hidden rounded-full bg-muted">
               {agentBuckets.map((b) => (
                 <span
                   key={b.key}
@@ -522,8 +530,9 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
                     {b.label}
                     <span className="font-mono">{b.version || "—"}</span>
                   </span>
-                  <span className="tnum shrink-0 text-muted-foreground">
-                    {b.count} 台 · {nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%
+                  <span className="shrink-0">
+                    <span className="tnum font-medium">{b.count} 台</span>
+                    <span className="tnum ml-1.5 text-muted-foreground">{nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%</span>
                   </span>
                 </div>
               ))}
