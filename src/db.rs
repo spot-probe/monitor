@@ -1348,27 +1348,25 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn
             .prepare(
-                "SELECT day,
-                        CAST(SUM(rx) AS INTEGER), CAST(SUM(tx) AS INTEGER),
-                        CAST(MAX(hour_rx) AS INTEGER), CAST(MAX(hour_tx) AS INTEGER),
-                        SUM(cpu_min) * 1.0 / NULLIF(SUM(minutes), 0),
-                        SUM(mem_used_min) * 100.0 / NULLIF(SUM(mem_total_min), 0),
-                        SUM(disk_used_min) * 100.0 / NULLIF(SUM(disk_total_min), 0)
-                   FROM (
-                     SELECT (m.ts / 86400) * 86400 AS day,
-                            m.net_rx * 60 * m.minutes AS rx,
-                            m.net_tx * 60 * m.minutes AS tx,
-                            m.cpu * m.minutes AS cpu_min,
-                            m.mem_used * m.minutes AS mem_used_min,
-                            n.mem_total * m.minutes AS mem_total_min,
-                            m.disk_used * m.minutes AS disk_used_min,
-                            n.disk_total * m.minutes AS disk_total_min,
-                            (SELECT SUM(x.net_rx) FROM metric_hour x WHERE x.ts = m.ts) AS hour_rx,
-                            (SELECT SUM(x.net_tx) FROM metric_hour x WHERE x.ts = m.ts) AS hour_tx,
-                            m.minutes
+                // 窗口函数一次算出「每个小时的全队速率」，替换掉原先的逐行相关子查询：
+                // metric_hour 有两百多万行，逐行子查询是 O(行数) 次索引查找，这是页面加载慢的正因。
+                "WITH hourly AS (
+                     SELECT m.ts, m.minutes, m.cpu, m.mem_used, m.disk_used,
+                            m.net_rx, m.net_tx,
+                            n.mem_total, n.disk_total,
+                            SUM(m.net_rx) OVER (PARTITION BY m.ts) AS fleet_rx,
+                            SUM(m.net_tx) OVER (PARTITION BY m.ts) AS fleet_tx
                        FROM metric_hour m JOIN node n ON n.id = m.node_id
                       WHERE m.ts >= ?1
-                   )
+                 )
+                 SELECT (ts / 86400) * 86400 AS day,
+                        CAST(SUM(net_rx * 60 * minutes) AS INTEGER),
+                        CAST(SUM(net_tx * 60 * minutes) AS INTEGER),
+                        CAST(MAX(fleet_rx) AS INTEGER), CAST(MAX(fleet_tx) AS INTEGER),
+                        SUM(cpu * minutes) * 1.0 / NULLIF(SUM(minutes), 0),
+                        SUM(mem_used * minutes) * 100.0 / NULLIF(SUM(mem_total * minutes), 0),
+                        SUM(disk_used * minutes) * 100.0 / NULLIF(SUM(disk_total * minutes), 0)
+                   FROM hourly
                   GROUP BY day ORDER BY day",
             )
             .unwrap();

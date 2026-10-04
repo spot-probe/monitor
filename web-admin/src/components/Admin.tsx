@@ -1632,13 +1632,25 @@ type SeriesPoint = {
   disk: number
 }
 
-/// 取全队趋势；`days` 变了就重取（7/30/90 三档）。
+/// 按档位缓存已取到的趋势。
+///
+/// **放在模块作用域是必要的**：总览页切走会卸载组件，state 随之丢失，于是每次切回来都重新请求 ——
+/// 这正是维护者报的「反复加载」。缓存按档位存，切回来立刻有数，只有没取过的档位才发请求。
+const seriesCache = new Map<number, SeriesPoint[]>()
+
+/// 取全队趋势；`days` 变了就取那一档（已取过的档位直接给缓存）。
 function useOverviewSeries(days: number) {
-  const [rows, setRows] = useState<SeriesPoint[] | null>(null)
+  const [rows, setRows] = useState<SeriesPoint[] | null>(() => seriesCache.get(days) ?? null)
   useEffect(() => {
+    const hit = seriesCache.get(days)
+    if (hit) {
+      setRows(hit)
+      return
+    }
     let stop = false
     api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}`)
       .then((d) => {
+        seriesCache.set(days, d.days)
         if (!stop) setRows(d.days)
       })
       .catch(() => {
@@ -1863,7 +1875,13 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
   // 版本 → 台数。空字符串是「从没上报过」，不是 0.0.0，所以排在最后并原样显示。
   const versionCount = new Map<string, number>()
   for (const n of nodes) versionCount.set(n.agent_version ?? "", (versionCount.get(n.agent_version ?? "") ?? 0) + 1)
-  const agentVersions = [...versionCount.entries()].sort((a, b) => a[0] === "" ? 1 : b[0] === "" ? -1 : b[1] - a[1])
+  // 三段互斥且覆盖全部节点。`agent_old` 是 hub 按每台机器判的，**对没连过的节点不设** ——
+  // 所以「未上报」必须单独一段，不能并进「落后」。
+  const agentBuckets = [
+    { key: "latest", label: "最新版", version: agentLatest ?? "", count: nodes.filter((n) => !n.agent_old && (n.agent_version ?? "") !== "").length, color: "bg-ok-fg" },
+    { key: "old", label: "落后", version: "", count: nodes.filter((n) => n.agent_old).length, color: "bg-warn-fg" },
+    { key: "none", label: "未上报", version: "", count: nodes.filter((n) => (n.agent_version ?? "") === "").length, color: "bg-muted-foreground/40" },
+  ]
 
   // 到期日按「本地日历天」归组：`expires_at` 是日期字符串，不要经 Date 解析后再取 UTC 天，
   // 那样在东八区会把日子整体挪错一天。
@@ -1915,70 +1933,128 @@ function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string |
     setPickedDay(null)
   }
 
-  // 每一项都配一个语义图标：一眼扫过去就知道是「好的」「坏的」还是「中性的」。
-  const kpi: { label: string; value: number; tone: string; icon: React.ReactNode }[] = [
-    { label: "在线", value: online, tone: "text-ok-fg", icon: <CircleCheck className="size-4" /> },
-    { label: "离线", value: nodes.length - online, tone: nodes.length - online > 0 ? "text-danger-fg" : "text-muted-foreground", icon: <CircleAlert className="size-4" /> },
-    { label: "节点总数", value: nodes.length, tone: "text-foreground", icon: <Server className="size-4" /> },
-    { label: "待升级", value: outdated, tone: outdated > 0 ? "text-warn-fg" : "text-muted-foreground", icon: <ArrowUpCircle className="size-4" /> },
-    { label: "30 天内到期", value: expiring, tone: expiring > 0 ? "text-warn-fg" : "text-muted-foreground", icon: <CalendarClock className="size-4" /> },
-    { label: "已过期", value: expired, tone: expired > 0 ? "text-danger-fg" : "text-muted-foreground", icon: <CircleAlert className="size-4" /> },
-  ]
 
   return (
     <div className="space-y-4">
-      {/* 家底：一眼看清。每一项都可能为 0，所以不做「隐藏空项」那种小聪明。 */}
-      <Card>
-        <CardContent className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-3 lg:grid-cols-6">
-          {kpi.map((k) => (
-            <div key={k.label} className="flex items-start gap-2.5">
-              <span className={`mt-0.5 shrink-0 ${k.tone}`}>{k.icon}</span>
-              <div className="min-w-0">
-                <div className="truncate text-xs text-muted-foreground">{k.label}</div>
-                <div className={`tnum text-2xl leading-tight font-medium ${k.tone}`}>{k.value}</div>
-              </div>
+      {/* 三张复合卡，而不是六个平铺数字：在线 + 离线 = 总数，并列三项本身就是数学冗余；
+          而且平铺会把卡片横向拉长、大面积留白。这里按「存活 / 生命周期 / 维护」三件事各归一卡。 */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Card className={nodes.length - online > 0 ? "border-destructive/30 bg-destructive/5" : ""}>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">节点总数</div>
+            <div className="tnum mt-1 text-3xl font-medium leading-none tracking-tight">
+              {nodes.length}
+              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
             </div>
-          ))}
-        </CardContent>
-      </Card>
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className={online > 0 ? "flex items-center gap-1.5 text-ok-fg" : "flex items-center gap-1.5 text-muted-foreground"}>
+                <span className="size-1.5 rounded-full bg-current" />
+                <span className="tnum">{online}</span> 在线
+              </span>
+              <span className={nodes.length - online > 0 ? "flex items-center gap-1.5 font-semibold text-danger-fg" : "flex items-center gap-1.5 text-muted-foreground"}>
+                <span className="size-1.5 rounded-full bg-current" />
+                <span className="tnum">{nodes.length - online}</span> 离线
+              </span>
+            </div>
+          </CardContent>
+        </Card>
 
-      {notices.length > 0 && (
+        <Card>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">30 天内到期</div>
+            <div className={`tnum mt-1 text-3xl font-medium leading-none tracking-tight ${expiring > 0 ? "text-warn-fg" : ""}`}>
+              {expiring}
+              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
+            </div>
+            <div className="mt-3 flex items-center gap-1.5 text-xs">
+              <CalendarClock className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className={expired > 0 ? "font-semibold text-danger-fg" : "text-muted-foreground"}>
+                已过期 <span className="tnum">{expired}</span> 台
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent>
+            <div className="text-xs text-muted-foreground">待升级 agent</div>
+            <div className={`tnum mt-1 text-3xl font-medium leading-none tracking-tight ${outdated > 0 ? "text-warn-fg" : "text-foreground"}`}>
+              {outdated}
+              <span className="ml-1 text-sm font-normal text-muted-foreground">台</span>
+            </div>
+            <div className="mt-3 flex items-center gap-1.5 text-xs">
+              <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="text-muted-foreground">
+                最新 <span className="font-mono">{agentLatest ?? "—"}</span>
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">近期事项</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {notices.map((n) => (
-              <div key={n.text} className="flex items-center gap-2.5 text-sm">
-                <span className={`shrink-0 ${n.tone}`}>{n.icon}</span>
-                <span className={n.tone}>{n.text}</span>
-                <span className="text-xs text-muted-foreground">{n.hint}</span>
-              </div>
-            ))}
+            {notices.length === 0 ? (
+              <p className="text-sm text-muted-foreground">暂无告警或待处理项。</p>
+            ) : (
+              notices.map((n) => (
+                <div key={n.text} className="flex items-start gap-2.5 rounded-lg bg-muted p-3">
+                  <span className={`mt-0.5 shrink-0 ${n.tone}`}>{n.icon}</span>
+                  <div className="min-w-0">
+                    <div className={`text-sm ${n.tone}`}>{n.text}</div>
+                    <div className="text-xs text-muted-foreground">{n.hint}</div>
+                  </div>
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
-      )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Agent 版本</CardTitle>
-          <CardAction>
-            <Badge variant="outline">最新 {agentLatest ?? "—"}</Badge>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {agentVersions.map(([v, n]) => (
-            <div key={v} className="flex items-center gap-3 text-xs">
-              <span className="w-24 shrink-0 truncate font-mono">{v === "" ? "未上报" : v}</span>
-              <span className="h-2 rounded-sm bg-primary/40" style={{ width: `${(n / Math.max(...agentVersions.map((x) => x[1]))) * 60}%` }} />
-              <Badge variant="secondary" className="tnum">{n} 台</Badge>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Agent 版本分布</CardTitle>
+            <CardAction>
+              <Badge variant="outline" className="font-mono">最新 {agentLatest ?? "—"}</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* 分段堆叠条：绿 = 最新、琥珀 = 落后（hub 的 agent_old）、灰 = 未上报。
+                三者互斥且覆盖全部节点，「未上报」不并进落后 —— 没连过的机器不该被说成旧版本。 */}
+            <div className="flex h-3 overflow-hidden rounded-full bg-muted">
+              {agentBuckets.map((b) => (
+                <span
+                  key={b.key}
+                  className={b.color}
+                  style={{ width: `${nodes.length ? (b.count / nodes.length) * 100 : 0}%` }}
+                  title={`${b.label} ${b.count} 台`}
+                />
+              ))}
             </div>
-          ))}
-        </CardContent>
-      </Card>
+            <div className="space-y-1.5">
+              {agentBuckets.map((b) => (
+                <div key={b.key} className="flex items-baseline justify-between gap-3 text-xs">
+                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                    <span className={`size-2 rounded-sm ${b.color}`} />
+                    {b.label}
+                    <span className="font-mono">{b.version || "—"}</span>
+                  </span>
+                  <span className="tnum shrink-0 text-muted-foreground">
+                    {b.count} 台 · {nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
       <Card>
         <CardHeader>
