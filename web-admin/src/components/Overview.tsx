@@ -69,6 +69,25 @@ const CHART_BAR_MAX = 24
 const CHART_H = 150
 const CHART_PAD = 18
 
+/// 三档刻度（0 / 一半 / 满）与左右轴数值。**三张图共用**：
+/// 上一轮我只在流量图里画了刻度，带宽图与资源图就漏了 —— 根因是每张图各写了一遍。
+function ChartTicks({ left, right, format }: { left: number; right?: number; format: (v: number) => string }) {
+  const y = (t: number) => CHART_H - CHART_PAD - t * (CHART_H - CHART_PAD * 2)
+  return (
+    <>
+      {[0, 0.5, 1].map((t) => (
+        <g key={t}>
+          <line x1={0} y1={y(t)} x2={CHART_W} y2={y(t)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
+          <text x={0} y={y(t) - 2} fontSize="9" className="fill-muted-foreground">{format(left * t)}</text>
+          {right !== undefined && (
+            <text x={CHART_W} y={y(t) - 2} fontSize="9" textAnchor="end" className="fill-warn-fg">{format(right * t)}</text>
+          )}
+        </g>
+      ))}
+    </>
+  )
+}
+
 /// 面板里三种图共用的横轴：一条基线 + 首尾日期。
 function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
   return (
@@ -102,13 +121,7 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
-      {[0, 0.5, 1].map((t) => (
-        <g key={t}>
-          <line x1={0} y1={yOf(t, 1)} x2={CHART_W} y2={yOf(t, 1)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
-          <text x={0} y={yOf(t, 1) - 2} fontSize="9" className="fill-muted-foreground">{bytes(top * t)}</text>
-          <text x={CHART_W} y={yOf(t, 1) - 2} fontSize="9" textAnchor="end" className="fill-warn-fg">{bytes(cumTop * t)}</text>
-        </g>
-      ))}
+      <ChartTicks left={top} right={cumTop} format={bytes} />
       {rows.map((r, i) => {
         const x = i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
@@ -143,8 +156,8 @@ function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
   const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日带宽峰值与出站速率">
+      <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
       <ChartAxis rows={rows} />
-      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">{bytes(top)}/s</text>
       {rows.map((r, i) => (
         <rect
           key={r.day_ts}
@@ -172,8 +185,8 @@ function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
+      <ChartTicks left={100} format={(v) => `${Math.round(v)}%`} />
       <ChartAxis rows={rows} />
-      <text x={0} y={10} fontSize="9" className="fill-muted-foreground">100%</text>
       <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
       <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
       <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
@@ -201,15 +214,42 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ? [{ c: "bg-primary/45", t: "出站速率" }, { c: "bg-warn-fg", t: "入站峰值" }]
         : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
 
-  // 摘要卡：不用盯着柱子心算总量。三个数都由已取到的序列直接得出，不额外请求。
-  const totals = (rows ?? []).map((r) => r.rx + r.tx)
-  const sum = totals.reduce((n, v) => n + v, 0)
-  const peakIdx = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
-  const stats = [
-    { label: "区间累计", value: bytes(sum), hint: `近 ${range} 天` },
-    { label: "日均流量", value: bytes(totals.length > 0 ? sum / totals.length : 0), hint: "按有数据的逻辑日" },
-    { label: "最高流量日", value: peakIdx >= 0 ? bytes(totals[peakIdx]) : "—", hint: peakIdx >= 0 ? dayLabel(rows![peakIdx].day_ts) : "" },
-  ]
+  // 摘要卡：**每个 tab 都有三项**，各是按那个 tab 真正要看的数。都由已取到的序列算出，不额外请求。
+  // 三个 tab 都给三项的另一个理由：卡片高度不会因为切 tab 而跳（截图里「脚很轻」的真因就是这个跳）。
+  const list = rows ?? []
+  // 「最高流量日」要的是**当天总量最大**的那一天，而不是「rx 最大的那天 + tx 最大的那天」——
+  // 后者的两个最大值可能不在同一天，加出来的数从未发生过。
+  const totals = list.map((r) => r.rx + r.tx)
+  const pick = (key: "rx" | "tx" | "rx_peak" | "tx_peak" | "cpu" | "mem" | "disk") => {
+    if (list.length === 0) return { max: 0, day: "" }
+    let idx = 0
+    list.forEach((r, i) => {
+      if (r[key] > list[idx][key]) idx = i
+    })
+    return { max: list[idx][key], day: dayLabel(list[idx].day_ts) }
+  }
+  const totalOf = (key: "rx" | "tx" | "rx_peak" | "tx_peak") => list.map((r) => r[key])
+  const trafficTotal = totals
+  const busiest = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
+  const txAvg = list.length > 0 ? totalOf("tx").reduce((n, v) => n + v, 0) / list.length : 0
+  const stats =
+    tab === "traffic"
+      ? [
+          { label: "区间累计", value: bytes(trafficTotal.reduce((n, v) => n + v, 0)), hint: `近 ${range} 天` },
+          { label: "日均流量", value: bytes(list.length > 0 ? trafficTotal.reduce((n, v) => n + v, 0) / list.length : 0), hint: "按有数据的逻辑日" },
+          { label: "最高流量日", value: busiest >= 0 ? bytes(totals[busiest]) : "—", hint: busiest >= 0 ? dayLabel(list[busiest].day_ts) : "" },
+        ]
+      : tab === "bandwidth"
+        ? [
+            { label: "区间峰值", value: `${bytes(pick("rx_peak").max)}/s`, hint: "入站最高速率" },
+            { label: "日均出站", value: `${bytes(txAvg)}/s`, hint: "按有数据的逻辑日" },
+            { label: "出站峰值日", value: `${bytes(pick("tx_peak").max)}/s`, hint: pick("tx_peak").day },
+          ]
+        : [
+            { label: "CPU 峰值", value: `${pick("cpu").max.toFixed(1)}%`, hint: pick("cpu").day },
+            { label: "内存峰值", value: `${pick("mem").max.toFixed(1)}%`, hint: pick("mem").day },
+            { label: "硬盘峰值", value: `${pick("disk").max.toFixed(1)}%`, hint: pick("disk").day },
+          ]
 
   const pill = (on: boolean) =>
     `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
@@ -247,7 +287,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-3">
-        {tab === "traffic" && rows && rows.length > 0 && (
+        {rows && rows.length > 0 && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {stats.map((st) => (
               <div key={st.label} className="rounded-lg bg-muted px-3 py-2">
