@@ -209,36 +209,36 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 带宽：当天**日均速率**（柱）与**峰值速率**（线）。**两者都是字节/秒** —— 这是关键：
-/// 之前柱子画的是「当天的总字节」（把速率乘了时长积出来的），折线画的是「瞬时峰值」，
-/// 两个不同量纲的画在同一根轴上，看上去就毫无道理（截图里那根线一直贴在顶上）。
-/// 平均值除以的是**有数据覆盖的秒数**，不是 86400 —— 否则没有样本的小时会以 0 参与平均。
+/// 带宽：**日均速率（线）+ 峰值区间（带）** —— 方案 B。
+///
+/// 关键是「均值与峰值必须是同一个指标」：改前柱是**出站**、线是**入站**，本身就是两个东西；
+/// 而摘要卡的「区间峰值」说的是**入站**，所以这里画入站。两者同为**字节/秒**，量纲自洽。
+/// 均值 = 当天总字节 ÷ **有数据覆盖的秒数**（不是 86400，也不是各节点分钟数之和）。
 function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
-  const avgTx = (r: SeriesPoint) => (r.covered > 0 ? r.tx / r.covered : 0)
-  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, avgTx(r))))
+  const avgRx = (r: SeriesPoint) => (r.covered > 0 ? r.rx / r.covered : 0)
+  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, avgRx(r))))
   const bw = CHART_W / Math.max(1, rows.length)
-  const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
-  const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  const bottom = CHART_H - CHART_PAD
+  const yOf = (v: number) => bottom - (v / top) * (CHART_H - CHART_PAD * 2)
+  const x = (i: number) => i * bw + bw / 2
+  const band = rows.map((r, i) => `${x(i)},${yOf(r.rx_peak)}`).join(" ")
+  const mean = rows.map((r, i) => `${x(i)},${yOf(avgRx(r))}`).join(" ")
+  const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日带宽峰值与出站速率">
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站带宽：日均速率与峰值区间">
       <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
+      {/* 峰值带：从均值一直铺到当天的峰值 —— 「均值多少、能冲到多高」一眼看完。 */}
+      <polygon className="fill-warn-fg/20" points={`${band} ${rows.map((_, i) => `${x(rows.length - 1 - i)},${yOf(avgRx(rows[rows.length - 1 - i]))}`).join(" ")}`} />
+      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1" strokeDasharray="3 2" points={band} />
+      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={mean} />
       <ChartAxis rows={rows} />
-      {rows.map((r, i) => (
-        <rect
-          key={r.day_ts}
-          x={i * bw + (bw - bar) / 2}
-          y={yOf(avgTx(r))}
-          width={bar}
-          height={Math.max(0, CHART_H - CHART_PAD - yOf(avgTx(r)))}
-          className="fill-primary/45"
-        />
-      ))}
-      <polyline
-        fill="none"
-        className="stroke-warn-fg"
-        strokeWidth="1.5"
-        points={rows.map((r, i) => `${i * bw + bw / 2},${yOf(r.rx_peak)}`).join(" ")}
-      />
+      {rows.map((r, i) =>
+        i % step === 0 || i === rows.length - 1 ? (
+          <text key={r.day_ts} x={x(i)} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+            {dayLabel(r.day_ts)}
+          </text>
+        ) : null,
+      )}
     </svg>
   )
 }
@@ -276,7 +276,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
     tab === "traffic"
       ? [{ c: "bg-primary", t: "入站" }, { c: "bg-primary/45", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
       : tab === "bandwidth"
-        ? [{ c: "bg-primary/45", t: "出站速率" }, { c: "bg-warn-fg", t: "入站峰值" }]
+        ? [{ c: "bg-primary", t: "日均入站" }, { c: "bg-warn-fg/40", t: "入站峰值区间" }]
         : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
 
   // 摘要卡：**每个 tab 都有三项**，各是按那个 tab 真正要看的数。都由已取到的序列算出，不额外请求。
@@ -340,8 +340,8 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
           ]
         : tab === "bandwidth"
           ? [
-              { c: "bg-primary/45", t: "出站速率", v: `${bytes(rows[i].tx)}/s` },
-              { c: "bg-warn-fg", t: "入站峰值", v: `${bytes(rows[i].rx_peak)}/s` },
+              { c: "bg-primary", t: "日均入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
+              { c: "bg-warn-fg/40", t: "入站峰值", v: `${bytes(rows[i].rx_peak)}/s` },
             ]
           : [
               { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}%` },
