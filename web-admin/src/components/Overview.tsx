@@ -658,29 +658,31 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
       <Card>
-        <CardHeader>
+        {/* 标题与导航放在**同一个 flex 行**里。
+            不用 `CardAction` 了：dump 出来才看清 —— `CardHeader` 是 grid，标题占第一行（20px），
+            而 `CardAction` 是 `row-span-2` + `self-center`，它的中心落在「两行加起来」的区域上，
+            于是两者中心天然差 6px。我先后改过 `CardHeader` 的 `items-center` 与 `CardAction` 的
+            `self-center`，**都压不过它**（计算结果仍是 align-items: flex-start）。
+            一行 flex + items-center 是确定的解法，不再跟原语较劲。 */}
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
           <CardTitle className="text-sm">续费日历</CardTitle>
-          <CardAction>
-            {/* 标题与月份分层：月份是**导航的当前位置**。加一条竖分隔线，让「这一页是什么」与
-                「现在在哪个月」一眼分得开 —— 这是面板面包屑自己的做法（`.w-px.bg-border`），保持一致。 */}
-            <div className="flex items-center gap-2">
-              <span aria-hidden className="h-5 w-px bg-border" />
-              <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
-              <button
-                type="button"
-                onClick={() => {
-                  const d = new Date()
-                  setMonth({ y: d.getFullYear(), m: d.getMonth() })
-                  setPickedDay(null)
-                }}
-                className="tnum min-w-24 text-center text-sm font-semibold hover:text-primary"
-                title="回到本月"
-              >
-                {month.y} 年 {month.m + 1} 月
-              </button>
-              <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
-            </div>
-          </CardAction>
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="h-5 w-px bg-border" />
+            <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
+            <button
+              type="button"
+              onClick={() => {
+                const d = new Date()
+                setMonth({ y: d.getFullYear(), m: d.getMonth() })
+                setPickedDay(null)
+              }}
+              className="tnum min-w-24 text-center text-base font-semibold hover:text-primary"
+              title="回到本月"
+            >
+              {month.y} 年 {month.m + 1} 月
+            </button>
+            <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* 保留框线（维护者要求）。同事那一轮建议去掉，但这是维护者的取舍 —— 日历的框线帮助
