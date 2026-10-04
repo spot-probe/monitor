@@ -1543,6 +1543,44 @@ const RELEASES_RETRY: i64 = 600;
 /// The hub's tag is read through [`hub_latest`], the cache the daily update alert
 /// reads through as well, so a request that finds the cache fresh asks GitHub
 /// nothing.
+/// 全队按天的聚合，给「总览」页的趋势图用。算法与「为什么每种指标不一样」写在
+/// `Db::overview_daily` 上；这里只做参数钳制与 JSON 成型。
+///
+/// 分组用的是 **UTC 日**（SQL 里就是），所以返回时间戳、由面板按本地时区显示：
+/// 跨日边界会有小时级偏移，这是这类接口的常规取舍，面板注释里也写着。
+pub async fn overview_series(
+    _: Admin,
+    State(app): State<Shared>,
+    Query(q): Query<SeriesQuery>,
+) -> Json<Value> {
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    let rows = app.db.overview_daily(days);
+    Json(json!({
+        "days": rows
+            .iter()
+            .map(|r| {
+                json!({
+                    // 只给时间戳，日期由面板按**本地**时区格式化 —— 在服务端转成 UTC 日期字符串
+                    // 会在东八区把「日」整体挪错一天（正是我在日历那里踩过的同一个坑）。
+                    "day_ts": r[0] as i64,
+                    "rx": r[1],
+                    "tx": r[2],
+                    "rx_peak": r[3],
+                    "tx_peak": r[4],
+                    "cpu": r[5],
+                    "mem": r[6],
+                    "disk": r[7],
+                })
+            })
+            .collect::<Vec<_>>()
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SeriesQuery {
+    days: Option<i64>,
+}
+
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
     Json(json!({
         "hub": env!("CARGO_PKG_VERSION"),
