@@ -24,7 +24,7 @@ const BLOCK_NOTES: Record<string, string> = {
 // `/admin` alone is not a page; it is normalised to the first section so that a
 // bookmark and the OAuth redirect both resolve to a real route.
 function normalise(p: string) {
-  return p === "/admin" || p === "/admin/" ? "/admin/nodes" : p.replace(/\/$/, "") || "/admin/nodes"
+  return p === "/admin" || p === "/admin/" ? "/admin/overview" : p.replace(/\/$/, "") || "/admin/overview"
 }
 
 function usePath() {
@@ -155,7 +155,7 @@ export default function App() {
   if (!me.authed) {
     return (
       <>
-        <Login github={me.github} onDone={() => { loadMe(); refresh(); go("/admin/nodes") }} />
+        <Login github={me.github} onDone={() => { loadMe(); refresh(); go("/admin/overview") }} />
         <Toaster position="top-center" theme={dark ? "dark" : "light"} />
       </>
     )
@@ -342,7 +342,7 @@ export default function App() {
                   at the other end is already the way to the public page. */}
               <button
                 type="button"
-                onClick={() => go("/admin/nodes")}
+                onClick={() => go("/admin/overview")}
                 className="transition-colors hover:text-foreground"
               >
                 后台

@@ -3,6 +3,7 @@ import { flushSync } from "react-dom"
 import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
 import { Gauge, Timer } from "lucide-react"
 import { ExternalLink } from "lucide-react"
+import { LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -1615,6 +1616,167 @@ function Histogram({ values, picked, onPick }: {
         )
       })}
     </svg>
+  )
+}
+
+
+/// 总览：一个页面的 KPI + 续费日历。
+///
+/// 它只读 `/api/nodes` 已有的字段（在线、到期日、价格、agent 版本），所以**不加接口、不加请求**，
+/// 也不碰任何既有页面。图表与日历都是手写 —— 面板不引图表库（首屏体积是量过的）。
+function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string | null }) {
+  const [month, setMonth] = useState(() => {
+    const d = new Date()
+    return { y: d.getFullYear(), m: d.getMonth() }
+  })
+  const [pickedDay, setPickedDay] = useState<string | null>(null)
+
+  const online = nodes.filter((n) => n.online).length
+  const outdated = nodes.filter((n) => n.agent_old).length
+  const expiring = nodes.filter((n) => {
+    const d = daysUntil(n.expires_at)
+    return d !== null && d >= 0 && d <= 30
+  }).length
+  const expired = nodes.filter((n) => {
+    const d = daysUntil(n.expires_at)
+    return d !== null && d < 0
+  }).length
+
+  // 到期日按「本地日历天」归组：`expires_at` 是日期字符串，不要经 Date 解析后再取 UTC 天，
+  // 那样在东八区会把日子整体挪错一天。
+  const byDay = new Map<string, Node[]>()
+  for (const n of nodes) {
+    if (!n.expires_at) continue
+    const day = n.expires_at.slice(0, 10)
+    byDay.set(day, [...(byDay.get(day) ?? []), n])
+  }
+  const peak = Math.max(0, ...[...byDay.values()].map((v) => v.length))
+
+  const first = new Date(month.y, month.m, 1)
+  const days = new Date(month.y, month.m + 1, 0).getDate()
+  // 周一起始（中文日历的习惯，也是竞品那张图的样子）。
+  const lead = (first.getDay() + 6) % 7
+  const cells: (string | null)[] = [
+    ...Array(lead).fill(null),
+    ...Array.from({ length: days }, (_, i) => {
+      const d = new Date(month.y, month.m, i + 1)
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+    }),
+  ]
+  const today = new Date()
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
+  const shift = (delta: number) => {
+    const d = new Date(month.y, month.m + delta, 1)
+    setMonth({ y: d.getFullYear(), m: d.getMonth() })
+    setPickedDay(null)
+  }
+
+  const kpi = [
+    { label: "在线", value: online, tone: "text-ok-fg" },
+    { label: "离线", value: nodes.length - online, tone: nodes.length - online > 0 ? "text-danger-fg" : "" },
+    { label: "节点总数", value: nodes.length, tone: "" },
+    { label: "待升级", value: outdated, tone: outdated > 0 ? "text-warn-fg" : "" },
+    { label: "30 天内到期", value: expiring, tone: expiring > 0 ? "text-warn-fg" : "" },
+    { label: "已过期", value: expired, tone: expired > 0 ? "text-danger-fg" : "" },
+  ]
+
+  return (
+    <div className="space-y-4">
+      {/* KPI：一眼看清家底。每一项都可能为 0，所以不做「隐藏空项」那种小聪明。 */}
+      <Card className="grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-6">
+        {kpi.map((k) => (
+          <div key={k.label}>
+            <div className="text-xs text-muted-foreground">{k.label}</div>
+            <div className={`tnum text-2xl font-medium leading-tight ${k.tone}`}>{k.value}</div>
+          </div>
+        ))}
+      </Card>
+
+      {agentLatest && (
+        <p className="text-xs text-muted-foreground">
+          最新 agent 版本 <span className="font-mono">{agentLatest}</span>
+          {outdated > 0 && <span className="text-warn-fg"> · 有 {outdated} 台落后</span>}
+        </p>
+      )}
+
+      <Card className="gap-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">
+            {month.y} 年 {month.m + 1} 月 · 续费日历
+          </h3>
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                const d = new Date()
+                setMonth({ y: d.getFullYear(), m: d.getMonth() })
+                setPickedDay(null)
+              }}
+            >
+              本月
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
+          {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
+            <div key={w} className="bg-muted py-1.5 font-medium text-muted-foreground">{w}</div>
+          ))}
+          {cells.map((day, i) => {
+            if (!day) return <div key={`lead-${i}`} className="bg-background" />
+            const list = byDay.get(day) ?? []
+            const isPeak = peak > 1 && list.length === peak
+            const on = pickedDay === day
+            return (
+              <button
+                key={day}
+                type="button"
+                onClick={() => setPickedDay(on ? null : day)}
+                aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
+                className={`flex min-h-[52px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 text-left transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
+              >
+                <span className={`tnum text-xs ${day === todayKey ? "rounded bg-primary px-1 font-medium text-primary-foreground" : "text-muted-foreground"}`}>
+                  {Number(day.slice(8))}
+                </span>
+                {list.length > 0 && (
+                  <span className={`rounded px-1 text-[10px] leading-tight ${isPeak ? "bg-warn-fg/15 text-warn-fg" : "bg-muted text-muted-foreground"}`}>
+                    {list.length} 台
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+
+        {pickedDay && (
+          <div className="rounded-lg bg-muted p-3">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h4 className="text-sm font-medium">{pickedDay} 到期</h4>
+              <button type="button" onClick={() => setPickedDay(null)} className="text-xs text-primary underline underline-offset-2">
+                收起
+              </button>
+            </div>
+            <div className="mt-2 space-y-1">
+              {(byDay.get(pickedDay) ?? []).map((n) => (
+                <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 text-sm">
+                  <span className="font-medium">{n.name}</span>
+                  <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                  <span className="ml-auto tnum text-xs text-muted-foreground">
+                    {n.price > 0 ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}` : "未记价格"}
+                  </span>
+                  <Expiry date={n.expires_at} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
+      </Card>
+    </div>
   )
 }
 
@@ -3917,6 +4079,7 @@ export const ADMIN_SECTIONS = [
   {
     group: "资源管理",
     items: [
+      { path: "/admin/overview", label: "总览", icon: LayoutDashboard },
       { path: "/admin/nodes", label: "节点", icon: Server },
       { path: "/admin/ping", label: "延迟", icon: Radio },
       { path: "/admin/data", label: "数据", icon: Database },
@@ -3974,7 +4137,9 @@ export function Admin({
 }) {
   return (
     <div className="min-w-0">
-        {path === "/admin/ping" ? (
+        {path === "/admin/overview" ? (
+          <Overview nodes={nodes} agentLatest={agentLatest} />
+        ) : path === "/admin/ping" ? (
           <Ping nodes={nodes} />
         ) : path === "/admin/notify" ? (
           <Notify nodes={nodes} refresh={refresh} />
