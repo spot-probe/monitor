@@ -658,7 +658,6 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
   const shown = [...urgent, ...routine]
   const NOTICE_LIMIT = 2
   notices.push(...shown.slice(0, NOTICE_LIMIT))
-  const hiddenNotices = shown.slice(NOTICE_LIMIT)
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -767,7 +766,7 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
             <CardTitle className="text-sm">近期事项</CardTitle>
             {shown.length > NOTICE_LIMIT && (
               <Button size="sm" variant="ghost" onClick={() => setNoticesOpen(true)}>
-                查看详情
+                查看详情（{shown.length}）
               </Button>
             )}
           </CardHeader>
@@ -796,9 +795,6 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
                     )}
                   </div>
                 ))}
-                {hiddenNotices.length > 0 && (
-                  <div className="pt-2.5 text-xs text-muted-foreground">还有 {hiddenNotices.length} 条待处理事项</div>
-                )}
               </div>
             )}
           </CardContent>
