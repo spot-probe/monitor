@@ -62,9 +62,11 @@ test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
   await expect(page.getByText("节点总数")).toBeVisible()
   await expect(page.getByText("续费日历")).toBeVisible()
 
-  // 日历的结构：日期格都带 aria-label="YYYY-MM-DD"，一个月 28–31 个。
-  const days = page.getByRole("button", { name: /^\d{4}-\d{2}-\d{2}/ })
-  const n = await days.count()
+  // 日历的结构：数**日期格里显示的数字**（span.tnum），一个月 28–31 个。
+  // **不要数按钮** —— 只有「当天有到期节点」的格子才是按钮；全新库上一个都没有，
+  // 按按钮数会得到 0。日期格本身与「能不能点」是两件事。
+  const grid = page.locator("div.grid.grid-cols-7").first()
+  const n = await grid.locator("span.tnum").count()
   expect(n, "日历应有 28–31 个日期格，实际 " + n).toBeGreaterThanOrEqual(28)
   expect(n).toBeLessThanOrEqual(31)
   // 月份导航：两条切换 + 中间那个「回到本月」的月份标签。

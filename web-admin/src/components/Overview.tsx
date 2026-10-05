@@ -931,15 +931,13 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
               const list = byDay.get(day) ?? []
               const isPeak = peak > 1 && list.length === peak
               const on = pickedDay === day
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => setPickedDay(day)}
-                  aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
-                >
-                  {/* 今天用**浅底圆角**而不是实心方块：后者像打卡签到，且会把日期压得很小。 */}
+              // **当天没有到期节点时，这个格子不是按钮**：
+              // 点了没反应的按钮是最糟的一种控件（我一路拒绝的就是这类），而没有事项的日子
+              // 本来也不是可操作对象。所以它降级成普通格子 —— 不响应点击，也不给悬停高亮，
+              // 免得暗示「这里能点」。
+              const cellClass = `flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors ${on ? "ring-2 ring-inset ring-primary" : ""}`
+              const inner = (
+                <>
                   <span
                     className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
                       day === todayKey ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40" : "text-muted-foreground"
@@ -952,6 +950,24 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
                       {list.length} 台
                     </span>
                   )}
+                </>
+              )
+              if (list.length === 0) {
+                return (
+                  <div key={day} className={cellClass}>
+                    {inner}
+                  </div>
+                )
+              }
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => setPickedDay(day)}
+                  aria-label={`${day}：${list.length} 台到期`}
+                  className={`${cellClass} hover:bg-muted`}
+                >
+                  {inner}
                 </button>
               )
             })}
