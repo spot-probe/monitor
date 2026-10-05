@@ -1554,7 +1554,9 @@ pub async fn overview_series(
     Query(q): Query<SeriesQuery>,
 ) -> Json<Value> {
     let days = q.days.unwrap_or(30).clamp(1, 90);
-    let rows = app.db.overview_daily(days);
+    // 空串归一成 None：前端用空值表示"全部节点"，不该被当成"名字为空的分组"。
+    let group = q.group.as_deref().filter(|g| !g.is_empty());
+    let rows = app.db.overview_daily(days, group);
     Json(json!({
         "days": rows
             .iter()
@@ -1585,6 +1587,8 @@ pub async fn overview_series(
 #[derive(Deserialize)]
 pub struct SeriesQuery {
     days: Option<i64>,
+    /// 只看某个分组（机房/客户）；不传即全部节点。
+    group: Option<String>,
 }
 
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {

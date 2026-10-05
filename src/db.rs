@@ -1346,7 +1346,7 @@ impl Db {
     /// **最后一个值是「有数据覆盖的秒数」**：平均速率要除以它，不能除以 86400，否则没有样本的小时
     /// 会以 0 参与平均，把均值压低 —— 那是错的。
     /// 分组用的是 **UTC 日**；面板负责按本地时区显示日期（跨日边界会有小时级的偏移，这一点在那边的注释里写）。
-    pub fn overview_daily(&self, days: i64) -> Vec<[f64; 12]> {
+    pub fn overview_daily(&self, days: i64, group: Option<&str>) -> Vec<[f64; 12]> {
         let since = Utc::now().timestamp() - days * 86_400;
         let conn = self.conn();
         let mut stmt = conn
@@ -1368,7 +1368,7 @@ impl Db {
                             SUM(m.net_rx) OVER (PARTITION BY m.ts) AS fleet_rx,
                             SUM(m.net_tx) OVER (PARTITION BY m.ts) AS fleet_tx
                        FROM metric_hour m JOIN node n ON n.id = m.node_id
-                      WHERE m.ts >= ?1
+                      WHERE m.ts >= ?1 AND (?2 IS NULL OR n.[group] = ?2)
                  ),
                  -- 按天给每个节点-小时排名，用来取 **P95**（而不是简单的 MAX）。MAX 会被偶发的一小时
                  -- 毛刺顶起来，P95 描述的是「最热的那一小撮机器」——更能代表集群里真实的紧绷程度。
@@ -1405,7 +1405,7 @@ impl Db {
             )
             .unwrap();
         let rows = stmt
-            .query_map([since], |r| {
+            .query_map(rusqlite::params![since, group], |r| {
                 Ok([
                     r.get::<_, i64>(0)? as f64,
                     r.get::<_, i64>(1)? as f64,
@@ -4827,7 +4827,7 @@ mod tests {
                 .unwrap();
             ids.push(n);
         }
-        let rows = db.overview_daily(1);
+        let rows = db.overview_daily(1, None);
         assert_eq!(rows.len(), 1, "只插了一个小时，应当只有一天");
         let r = rows[0];
         // 带宽：求和（100+200+300），再乘 60 分钟 × 60 秒
@@ -4848,6 +4848,45 @@ mod tests {
         assert!(r[11] >= r[7], "最热硬盘 {} 不该低于平均 {}", r[11], r[7]);
         assert_eq!(r[10], 50.0, "三台里内存占用率最高的是 a：1000/2000 = 50%");
         let _ = ids;
+    }
+
+    /// 分组筛选：取某一组时只算那一组；**各组合计必须等于全部**（分组最容易错的地方）。
+    #[test]
+    fn overview_daily_filters_by_group() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = (Utc::now().timestamp() / 3600) * 3600;
+        for (name, group, cpu) in [("a1", "east", 10.0), ("a2", "east", 20.0), ("b1", "west", 40.0)] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            // `create_node` 不写 `group`（与它不写 `mem_total` 是同一件事）→ 直接落库；
+            // `group` 是 SQL 关键字，列名必须加引号。
+            db.conn()
+                .execute("UPDATE node SET \"group\" = ?1 WHERE id = ?2", rusqlite::params![group, n])
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                              net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                     VALUES (?1, ?2, 60, ?3, 0, 0, 0, 100, 100, NULL, 100, 100)",
+                    rusqlite::params![n, ts, cpu],
+                )
+                .unwrap();
+        }
+        let all = db.overview_daily(1, None);
+        let east = db.overview_daily(1, Some("east"));
+        let west = db.overview_daily(1, Some("west"));
+        assert!((all[0][5] - 23.333).abs() < 0.01, "全部的平均 {}", all[0][5]);
+        assert!((east[0][5] - 15.0).abs() < 0.01, "east 的平均 {}", east[0][5]);
+        assert!((west[0][5] - 40.0).abs() < 0.01, "west 的平均 {}", west[0][5]);
+        assert_eq!(all[0][1], 300.0 * 3600.0);
+        assert_eq!(east[0][1], 200.0 * 3600.0);
+        assert_eq!(west[0][1], 100.0 * 3600.0);
+        assert_eq!(east[0][1] + west[0][1], all[0][1], "各组合计必须等于全部");
+        assert!(db.overview_daily(1, Some("nowhere")).is_empty(), "不存在的分组应是空结果而不是报错");
     }
 
     /// **证明它是 P95 而不是 MAX**：20 台节点，其中一台 cpu 99（离群），其余 19 台都是 10。
@@ -4876,7 +4915,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let rows = db.overview_daily(1);
+        let rows = db.overview_daily(1, None);
         let r = rows[0];
         // 20 行里排名前 5% 是第 19、20 名（rn >= 19）→ 包含离群的 99。
         assert_eq!(r[9], 99.0, "rn>=19 时应当包含第 19 名，这里就是那台离群的");
