@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react"
 import { ArrowUpCircle, CalendarClock, CircleAlert } from "lucide-react"
 
-import { api } from "@/lib/api"
+import { api, behind } from "@/lib/api"
 import type { Node } from "@/lib/api"
-import { bytes } from "@/lib/format"
+import { bytes, monthUsage } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -558,7 +558,9 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 /// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
 /// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
 /// 颜色），所以暗色主题自动成立。
-export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string | null }) {
+export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]; agentLatest: string | null; hub: string; hubLatest: string }) {
+  // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
+  const hubBehind = behind(hub, hubLatest)
   const [month, setMonth] = useState(() => {
     const d = new Date()
     return { y: d.getFullYear(), m: d.getMonth() }
@@ -633,6 +635,16 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
   }
   if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
   if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
+  // 「异常」按维护者定的口径**并入这里** —— 这两条都是「要动手的事」，正合这张卡的意义，
+  // 不必再占一张卡。判据面板手上就有，不需要新接口。
+  // 「从未上报」与「离线」是两件事：离线是曾经在线、现在断了；从未上报是**装完就没上来过**。
+  const never = nodes.filter((n) => (n.agent_version ?? "") === "").length
+  if (never > 0)
+    notices.push({ text: `${never} 台从未上报`, hint: "装完就没连上，先查安装命令与网络", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  // 已达额度**就计入**（维护者的口径）：运维要提前知道，而不是等超了才看到。
+  const overQuota = nodes.filter((n) => n.traffic_limit > 0 && monthUsage(n) >= n.traffic_limit).length
+  if (overQuota > 0)
+    notices.push({ text: `${overQuota} 台流量已达额度`, hint: "已达本月上限，注意限速或停机", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -645,7 +657,7 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
     <div className="space-y-4">
       {/* 三张复合卡，而不是六个平铺数字：在线 + 离线 = 总数，并列三项本身就是数学冗余；
           而且平铺会把卡片横向拉长、大面积留白。这里按「存活 / 生命周期 / 维护」三件事各归一卡。 */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* 卡片外框一律统一，状态只出现在两处：右上角的状态徽章 + 主数字的颜色。
             三轮下来方向一直是「更克制」，这一版最克制的一处就是**不再给外框上色**。 */}
         <Card>
@@ -707,6 +719,27 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
               <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="text-muted-foreground">
                 最新 <span className="font-mono">{agentLatest ?? "—"}</span>
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 第 4 张：hub 自身。与第 3 张「agent 待升级」成对 —— 升级时两样都要看。 */}
+        <Card>
+          <CardContent>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">待升级 hub</div>
+              <StatusPill tone={hubBehind ? "warn" : "ok"} text={hubBehind ? "有新版" : "最新"} />
+            </div>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${hubBehind ? "text-warn-fg" : ""}`}>
+              {hubBehind ? 1 : 0}
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">个</span>
+            </div>
+            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
+              <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="text-muted-foreground">
+                当前 <span className="font-mono">{hub || "—"}</span>
+                {hubLatest && <span> · 最新 <span className="font-mono">{hubLatest}</span></span>}
               </span>
             </div>
           </CardContent>
