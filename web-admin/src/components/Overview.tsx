@@ -154,7 +154,7 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 ///
 /// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
 /// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
-function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
+function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const cumTop = Math.max(1, ...cum)
@@ -174,15 +174,17 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
         const hi = yOf(r.rx + r.tx, top)
         return (
           <g key={r.day_ts}>
-            <rect x={x} y={mid} width={bar} height={Math.max(0, bottom - mid)} className="fill-primary" />
-            <rect x={x} y={hi} width={bar} height={Math.max(0, mid - hi)} className="fill-primary/45" />
+            {!hidden?.has("入站") && <rect x={x} y={mid} width={bar} height={Math.max(0, bottom - mid)} className="fill-primary" />}
+            {!hidden?.has("出站") && <rect x={x} y={hi} width={bar} height={Math.max(0, mid - hi)} className="fill-primary/45" />}
             {/* 两段是同色系的不同明度，深色主题下交界会糊 —— 用一条 1px 分界线靠结构说清楚，而不是靠色差。 */}
             <line x1={x} y1={mid} x2={x + bar} y2={mid} className="stroke-background" strokeWidth="1" />
           </g>
         )
       })}
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
-        points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      {!hidden?.has("累计") && (
+        <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
+          points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      )}
       {/* 高峰标记：当天总量最大的那根柱子上方标出来 —— 运维第一眼想看的就是它。 */}
       {(() => {
         let peak = 0
@@ -214,7 +216,7 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
 /// 两条线都是**同一个量纲**（字节/秒）：各自都是「当天总字节 ÷ **有数据覆盖的秒数**」。
 /// 之前的柱子画的是当天总字节、线是瞬时峰值，两个量纲画在一根轴上 —— 那才是这张图原来看着别扭的原因。
 /// 颜色用面板自己的 token（入站 ok-fg / 出站 primary），**不写死调色板**，暗色主题才成立。
-function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
+function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
@@ -226,8 +228,12 @@ function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
       <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
-      <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />
-      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line(outRate)} />
+      {!hidden?.has("入站") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />}
+      {/* 出站用**虚线**：两条速率相等时（预览夹具就是）实线会完全重合，看不出是两条。
+          改线型是**画法**上的区分，不动数据 —— 不能把其中一条挪开，那是伪造差异。 */}
+      {!hidden?.has("出站") && (
+        <polyline fill="none" className="stroke-primary" strokeWidth="1.5" strokeDasharray="5 3" points={line(outRate)} />
+      )}
       <ChartAxis rows={rows} />
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
@@ -241,7 +247,7 @@ function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
 }
 
 /// 资源：cpu / 内存 / 硬盘 三条线，都是百分比，共用 0–100 的轴。
-function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
+function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(100, Math.max(0, v)) / 100) * (CHART_H - CHART_PAD * 2)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
@@ -249,9 +255,9 @@ function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
       <ChartTicks left={100} format={(v) => `${Math.round(v)}%`} />
       <ChartAxis rows={rows} />
-      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
-      <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
+      {!hidden?.has("CPU") && <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />}
+      {!hidden?.has("内存") && <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />}
+      {!hidden?.has("硬盘") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />}
     </svg>
   )
 }
@@ -328,6 +334,15 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 
   // 悬停索引。放在趋势卡这一层，三张图共用同一套交互 —— 三张图本身不用改。
   const [hover, setHover] = useState<number | null>(null)
+  // 图例开关：点一下隐藏/恢复某条序列。不能靠「挪开一条线」来区分重合的序列 —— 那是伪造数据。
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const toggle = (t: string) =>
+    setHidden((prev) => {
+      const next = new Set(prev)
+      if (next.has(t)) next.delete(t)
+      else next.add(t)
+      return next
+    })
   const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!rows || rows.length === 0) return
     const r = e.currentTarget.getBoundingClientRect()
@@ -403,13 +418,24 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             ))}
           </div>
         )}
-        <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted-foreground">
-          {legend.map((l) => (
-            <span key={l.t} className="flex items-center gap-1.5">
-              <span className={`size-2 rounded-full ${l.c}`} />
-              {l.t}
-            </span>
-          ))}
+        <div className="flex flex-wrap items-center justify-end gap-1 text-xs text-muted-foreground">
+          {/* 图例可点：这是图表该有的能力，也是两条序列重不重合时唯一能自己分辨的办法。 */}
+          {legend.map((l) => {
+            const off = hidden.has(l.t)
+            return (
+              <button
+                key={l.t}
+                type="button"
+                onClick={() => toggle(l.t)}
+                aria-pressed={!off}
+                title={off ? `显示${l.t}` : `隐藏${l.t}`}
+                className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 transition-colors hover:bg-muted ${off ? "opacity-40" : ""}`}
+              >
+                <span className={`size-2 rounded-full ${l.c}`} />
+                <span className={off ? "line-through" : ""}>{l.t}</span>
+              </button>
+            )
+          })}
         </div>
         {!rows || rows.length === 0 ? (
           <p className="py-10 text-center text-xs text-muted-foreground">
@@ -418,11 +444,11 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ) : (
           <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
             {tab === "traffic" ? (
-              <TrafficChart rows={rows} />
+              <TrafficChart rows={rows} hidden={hidden} />
             ) : tab === "bandwidth" ? (
-              <BandwidthChart rows={rows} />
+              <BandwidthChart rows={rows} hidden={hidden} />
             ) : (
-              <ResourceChart rows={rows} />
+              <ResourceChart rows={rows} hidden={hidden} />
             )}
             {hover !== null && <HoverOverlay rows={rows} index={hover} series={hoverSeries(hover)} />}
           </div>
