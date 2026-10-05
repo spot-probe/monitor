@@ -559,7 +559,13 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 /// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
 /// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
 /// 颜色），所以暗色主题自动成立。
-export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]; agentLatest: string | null; hub: string; hubLatest: string }) {
+export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
+  nodes: Node[]
+  agentLatest: string | null
+  hub: string
+  hubLatest: string
+  refresh: () => void
+}) {
   // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
   const hubBehind = behind(hub, hubLatest)
 
@@ -586,6 +592,23 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
   const series = useOverviewSeries(range)
+  // 自动刷新：**默认关闭**。一块会自己重载的仪表盘会让人意外（正在读的数忽然变了），
+  // 而且它会持续产生请求 —— 所以要不要开，交给使用者，并把选择记住。
+  const [auto, setAuto] = useState(() => localStorage.getItem("overview-auto") === "1")
+  const [lastAt, setLastAt] = useState<number | null>(null)
+  useEffect(() => {
+    if (!auto) return
+    const tick = () => {
+      // 两件事一起做，缺一不可：KPI/事项/日历来自 `nodes`（refresh 触发重取）；
+      // 趋势来自按档位缓存的接口 —— 不清缓存的话，曲线会**纹丝不动**，变成"一半新一半旧"。
+      seriesCache.delete(range)
+      refresh()
+      setLastAt(Date.now())
+    }
+    tick()
+    const id = setInterval(tick, 30_000)
+    return () => clearInterval(id)
+  }, [auto, range, refresh])
 
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
@@ -770,6 +793,23 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* 自动刷新那一条：细、右对齐，不占卡片。开关本身就是"暂停"—— 再点一下即停。 */}
+      <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <button
+          type="button"
+          onClick={() => {
+            const next = !auto
+            setAuto(next)
+            localStorage.setItem("overview-auto", next ? "1" : "0")
+          }}
+          aria-pressed={auto}
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-colors hover:bg-muted ${auto ? "bg-primary/10 font-medium text-primary" : ""}`}
+        >
+          ⟳ 自动刷新{auto ? "（30 秒）" : ""}
+        </button>
+        {auto && lastAt && <span className="tnum">最后更新 {new Date(lastAt).toLocaleTimeString()}</span>}
       </div>
 
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
