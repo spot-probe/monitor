@@ -806,6 +806,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </Card>
       </div>
 
+      {/* 分组与自动刷新**同一行**：左边是"看什么"（页面级控件，影响一整页），右边是"多久看一次"。
+          分成两行会让右边那个孤零零占一行，左边却挤在一起 —— 看着像排版错位。 */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
       {/* 分组选择器：**页面级**控件，因为它影响的是一整页（KPI / 事项 / 版本分布 / 日历 / 趋势）。
           只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -845,6 +848,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           ⟳ 自动刷新{auto ? "（30 秒）" : ""}
         </button>
         {auto && lastAt && <span className="tnum">最后更新 {new Date(lastAt).toLocaleTimeString()}</span>}
+      </div>
+
       </div>
 
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
