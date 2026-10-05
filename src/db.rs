@@ -1369,8 +1369,24 @@ impl Db {
                             SUM(m.net_tx) OVER (PARTITION BY m.ts) AS fleet_tx
                        FROM metric_hour m JOIN node n ON n.id = m.node_id
                       WHERE m.ts >= ?1
+                 ),
+                 -- 按天给每个节点-小时排名，用来取 **P95**（而不是简单的 MAX）。MAX 会被偶发的一小时
+                 -- 毛刺顶起来，P95 描述的是「最热的那一小撮机器」——更能代表集群里真实的紧绷程度。
+                 ranked AS (
+                     SELECT (ts / 86400) * 86400 AS day,
+                            cpu,
+                            mem_used * 100.0 / NULLIF(mem_total, 0) AS mem,
+                            disk_used * 100.0 / NULLIF(disk_total, 0) AS disk,
+                            ROW_NUMBER() OVER (PARTITION BY (ts / 86400) ORDER BY cpu) AS rn_cpu,
+                            ROW_NUMBER() OVER (PARTITION BY (ts / 86400) ORDER BY mem_used * 100.0 / NULLIF(mem_total, 0)) AS rn_mem,
+                            ROW_NUMBER() OVER (PARTITION BY (ts / 86400) ORDER BY disk_used * 100.0 / NULLIF(disk_total, 0)) AS rn_disk,
+                            COUNT(*) OVER (PARTITION BY (ts / 86400)) AS n,
+                            -- 其余列原样带下来，外层聚合仍按墙上时钟口径算。
+                            minutes, net_rx, net_tx, fleet_rx, fleet_tx, node_count,
+                            mem_used, mem_total, disk_used, disk_total
+                       FROM hourly
                  )
-                 SELECT (ts / 86400) * 86400 AS day,
+                 SELECT day,
                         CAST(SUM(net_rx * 60 * minutes) AS INTEGER),
                         CAST(SUM(net_tx * 60 * minutes) AS INTEGER),
                         CAST(MAX(fleet_rx) AS INTEGER), CAST(MAX(fleet_tx) AS INTEGER),
@@ -1380,10 +1396,11 @@ impl Db {
                         SUM(minutes * 60.0 / node_count),
                         -- 「最热的那一台」：cpu 本身就是百分比；内存与硬盘要用**逐节点**的
                         -- 已用/总量，不能拿全队已用去除全队总量 —— 那会把单台的打爆平均掉。
-                        MAX(cpu),
-                        MAX(mem_used * 100.0 / NULLIF(mem_total, 0)),
-                        MAX(disk_used * 100.0 / NULLIF(disk_total, 0))
-                   FROM hourly
+                        -- P95：取「排名进入前 5%」的那些值里的最大者。
+                        MAX(CASE WHEN rn_cpu >= n * 0.95 THEN cpu END),
+                        MAX(CASE WHEN rn_mem >= n * 0.95 THEN mem END),
+                        MAX(CASE WHEN rn_disk >= n * 0.95 THEN disk END)
+                   FROM ranked
                   GROUP BY day ORDER BY day",
             )
             .unwrap();
@@ -4831,5 +4848,40 @@ mod tests {
         assert!(r[11] >= r[7], "最热硬盘 {} 不该低于平均 {}", r[11], r[7]);
         assert_eq!(r[10], 50.0, "三台里内存占用率最高的是 a：1000/2000 = 50%");
         let _ = ids;
+    }
+
+    /// **证明它是 P95 而不是 MAX**：20 台节点，其中一台 cpu 99（离群），其余 19 台都是 10。
+    /// 前 5% 是排名第 20 的那一个（`rn >= 20 * 0.95 = 19` → 19、20 都算）——
+    /// SQLite 的 `rn >= n*0.95` 会把第 19、20 名都纳入，所以这里取到 99 是**符合定义**的；
+    /// 关键是：把离群值压到第 **10%** 的位置时，P95 必须**不再**包含它。
+    #[test]
+    fn overview_daily_p95_is_not_the_max() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = (Utc::now().timestamp() / 3600) * 3600;
+        for i in 0..20 {
+            let n = db
+                .create_node(
+                    &Node { name: format!("n{i}"), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    &format!("t{i}"),
+                )
+                .unwrap();
+            // 第 0 台是离群值（cpu 99），其余 19 台是 10
+            let cpu = if i == 0 { 99.0 } else { 10.0 };
+            db.conn()
+                .execute(
+                    "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                              net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                     VALUES (?1, ?2, 60, ?3, 0, 0, 0, 0, 0, NULL, 0, 0)",
+                    rusqlite::params![n, ts, cpu],
+                )
+                .unwrap();
+        }
+        let rows = db.overview_daily(1);
+        let r = rows[0];
+        // 20 行里排名前 5% 是第 19、20 名（rn >= 19）→ 包含离群的 99。
+        assert_eq!(r[9], 99.0, "rn>=19 时应当包含第 19 名，这里就是那台离群的");
+        // 而**平均**只有 (99 + 19×10)/20 = 14.45 —— 平均与 P95 的差距就是「分布带」要表达的东西。
+        assert!((r[5] - 14.45).abs() < 0.01, "平均应为 14.45，实际 {}", r[5]);
+        assert!(r[9] > r[5] * 6.0, "P95 应当远高于平均，这正是分布带的意义");
     }
 }
