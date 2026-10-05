@@ -68,6 +68,22 @@ function dayLabel(ts: number) {
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
+/// 轴上限：按 tab 各自的算法算**唯一一次**。三张图与悬浮胶囊共用 —— 两处各算一遍迟早会错开。
+function chartTop(tab: "traffic" | "bandwidth" | "resource", rows: SeriesPoint[]): number {
+  if (rows.length === 0) return 1
+  if (tab === "traffic") return Math.max(1, ...rows.map((r) => r.rx + r.tx))
+  if (tab === "bandwidth")
+    return Math.max(1, ...rows.map((r) => Math.max(r.covered > 0 ? r.rx / r.covered : 0, r.covered > 0 ? r.tx / r.covered : 0)))
+  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
+  return Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
+}
+
+/// 值 → viewBox 里的 y。**唯一**的一份映射。
+function chartY(v: number, top: number): number {
+  const t = Math.min(top, Math.max(0, v)) / top
+  return CHART_H - CHART_PAD - t * (CHART_H - CHART_PAD * 2)
+}
+
 const CHART_W = 640
 /// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
 /// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
@@ -91,15 +107,30 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 ///
 /// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
 /// viewBox 裁掉（`left` 夹在 12%–88% 之间，卡片永远完整）。
-function HoverOverlay({ rows, index, series }: {
+function HoverOverlay({ rows, index, series, top, single }: {
   rows: SeriesPoint[]
   index: number
-  series: { c: string; t: string; v: string }[]
+  series: { c: string; t: string; v: string; raw: number }[]
+  top: number
+  /** 这张图是不是单轴（双轴时 Y 胶囊会让人分不清指向哪根轴）。 */
+  single: boolean
 }) {
   const pct = ((index + 0.5) / rows.length) * 100
   return (
     <div className="pointer-events-none absolute inset-0">
       <span className="absolute top-0 bottom-5 w-px border-l border-dashed border-foreground/30" style={{ left: `${pct}%` }} />
+      {/* Y 轴数值胶囊：贴在左边轴上，位置由**同一份映射**（chartY）算出 —— 胶囊与线永远对齐。
+          显示用格式化后的文本（`2.34 TB/s`），不是 p2 里那个原始字节数（`16,914,893.62`）——
+          那个读者读不出量级。取第一条**未被隐藏**的序列。
+          **流量 tab 不显示**：那张图是双 Y 轴（柱用左轴、累计线用右轴），一个胶囊说不清它指的是哪根轴。 */}
+      {single && series[0] && (
+        <span
+          className="tnum absolute -translate-y-1/2 rounded-md bg-foreground px-1.5 py-0.5 text-[11px] leading-tight font-medium text-background"
+          style={{ top: `${(chartY(series[0].raw, top) / CHART_H) * 100}%` }}
+        >
+          {series[0].v}
+        </span>
+      )}
       {/* X 轴上的日期胶囊：准星最有用的部分 —— 竖线指到哪一天，轴上就写哪一天，
           不用回头去找浮层。用 token（foreground/background 反色），暗色主题下自动成立。 */}
       <span
@@ -167,14 +198,14 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 /// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
 /// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
 function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
-  const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
+  const top = chartTop("traffic", rows)
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const cumTop = Math.max(1, ...cum)
   const bw = CHART_W / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const bottom = CHART_H - CHART_PAD
-  const yOf = (v: number, m: number) => bottom - (v / m) * (CHART_H - CHART_PAD * 2)
+  const yOf = (v: number, m: number) => chartY(v, m)
   // 30/90 天时每格都标会糊在一起，按数量抽稀。
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
@@ -232,9 +263,9 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
   const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
-  const top = Math.max(1, ...rows.map((r) => Math.max(inRate(r), outRate(r))))
+  const top = chartTop("bandwidth", rows)
   const bw = CHART_W / Math.max(1, rows.length)
-  const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  const yOf = (v: number) => chartY(v, top)
   const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
@@ -264,9 +295,8 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
 /// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
 function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   // 轴上限要**含分布带的上沿** —— 只看均值的话带会溢出轴（这是 A 与 B 唯一真正的耦合处）。
-  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
-  const top = Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
-  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(top, Math.max(0, v)) / top) * (CHART_H - CHART_PAD * 2)
+  const top = chartTop("resource", rows)
+  const yOf = (v: number) => chartY(v, top)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
@@ -410,19 +440,19 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
       ? []
       : tab === "traffic"
         ? [
-            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx) },
-            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx) },
-            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)) },
+            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx), raw: rows[i].rx },
+            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx), raw: rows[i].tx },
+            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)), raw: cumAt(i) },
           ]
         : tab === "bandwidth"
           ? [
-              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
-              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s` },
+              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s`, raw: rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0 },
+              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s`, raw: rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0 },
             ]
           : [
-              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%` },
-              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%` },
-              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%` },
+              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%`, raw: rows[i].cpu },
+              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%`, raw: rows[i].mem },
+              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%`, raw: rows[i].disk },
             ]
 
   const pill = (on: boolean) =>
@@ -504,7 +534,15 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             ) : (
               <ResourceChart rows={rows} hidden={hidden} />
             )}
-            {hover !== null && <HoverOverlay rows={rows} index={hover} series={hoverSeries(hover)} />}
+            {hover !== null && (
+              <HoverOverlay
+                rows={rows}
+                index={hover}
+                series={hoverSeries(hover)}
+                top={chartTop(tab, rows)}
+                single={tab !== "traffic"}
+              />
+            )}
           </div>
         )}
       </CardContent>
