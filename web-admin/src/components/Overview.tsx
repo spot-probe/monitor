@@ -209,32 +209,29 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 带宽：**日均速率（线）+ 峰值区间（带）** —— 方案 B。
+/// 带宽：**入站与出站两条日均速率线**（照维护者给的原型）。
 ///
-/// 关键是「均值与峰值必须是同一个指标」：改前柱是**出站**、线是**入站**，本身就是两个东西；
-/// 而摘要卡的「区间峰值」说的是**入站**，所以这里画入站。两者同为**字节/秒**，量纲自洽。
-/// 均值 = 当天总字节 ÷ **有数据覆盖的秒数**（不是 86400，也不是各节点分钟数之和）。
+/// 两条线都是**同一个量纲**（字节/秒）：各自都是「当天总字节 ÷ **有数据覆盖的秒数**」。
+/// 之前的柱子画的是当天总字节、线是瞬时峰值，两个量纲画在一根轴上 —— 那才是这张图原来看着别扭的原因。
+/// 颜色用面板自己的 token（入站 ok-fg / 出站 primary），**不写死调色板**，暗色主题才成立。
 function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
-  const avgRx = (r: SeriesPoint) => (r.covered > 0 ? r.rx / r.covered : 0)
-  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, avgRx(r))))
+  const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
+  const inRate = (r: SeriesPoint) => rate(r.rx, r)
+  const outRate = (r: SeriesPoint) => rate(r.tx, r)
+  const top = Math.max(1, ...rows.map((r) => Math.max(inRate(r), outRate(r))))
   const bw = CHART_W / Math.max(1, rows.length)
-  const bottom = CHART_H - CHART_PAD
-  const yOf = (v: number) => bottom - (v / top) * (CHART_H - CHART_PAD * 2)
-  const x = (i: number) => i * bw + bw / 2
-  const band = rows.map((r, i) => `${x(i)},${yOf(r.rx_peak)}`).join(" ")
-  const mean = rows.map((r, i) => `${x(i)},${yOf(avgRx(r))}`).join(" ")
+  const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站带宽：日均速率与峰值区间">
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
       <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
-      {/* 峰值带：从均值一直铺到当天的峰值 —— 「均值多少、能冲到多高」一眼看完。 */}
-      <polygon className="fill-warn-fg/20" points={`${band} ${rows.map((_, i) => `${x(rows.length - 1 - i)},${yOf(avgRx(rows[rows.length - 1 - i]))}`).join(" ")}`} />
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1" strokeDasharray="3 2" points={band} />
-      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={mean} />
+      <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />
+      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line(outRate)} />
       <ChartAxis rows={rows} />
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
-          <text key={r.day_ts} x={x(i)} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+          <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
             {dayLabel(r.day_ts)}
           </text>
         ) : null,
@@ -276,7 +273,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
     tab === "traffic"
       ? [{ c: "bg-primary", t: "入站" }, { c: "bg-primary/45", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
       : tab === "bandwidth"
-        ? [{ c: "bg-primary", t: "日均入站" }, { c: "bg-warn-fg/40", t: "入站峰值区间" }]
+        ? [{ c: "bg-ok-fg", t: "入站" }, { c: "bg-primary", t: "出站" }]
         : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
 
   // 摘要卡：**每个 tab 都有三项**，各是按那个 tab 真正要看的数。都由已取到的序列算出，不额外请求。
@@ -297,9 +294,17 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   const trafficTotal = totals
   const busiest = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
   // 日均出站 = 区间总字节 ÷ 区间覆盖秒数。**不是**逐日平均后再相加，也不是除以天数 —— 那是错的。
+  const rxSum = totalOf("rx").reduce((n, v) => n + v, 0)
   const txSum = totalOf("tx").reduce((n, v) => n + v, 0)
   const coveredSum = list.reduce((n, r) => n + r.covered, 0)
+  // 平均速率 = **区间总字节 ÷ 区间覆盖秒数**（不是逐日平均再相加，也不除以天数）。
+  const rxAvg = coveredSum > 0 ? rxSum / coveredSum : 0
   const txAvg = coveredSum > 0 ? txSum / coveredSum : 0
+  // 最高日均带宽：逐日算「当天日均（入+出）」，取最大的那天。
+  const dailyRate = list.map((r) => (r.covered > 0 ? (r.rx + r.tx) / r.covered : 0))
+  const busiestIdx = dailyRate.length > 0 ? dailyRate.indexOf(Math.max(...dailyRate)) : -1
+  const busiestSum = busiestIdx >= 0 ? dailyRate[busiestIdx] : 0
+  const busiestSumDay = busiestIdx >= 0 ? dayLabel(list[busiestIdx].day_ts) : ""
   const stats =
     tab === "traffic"
       ? [
@@ -309,9 +314,11 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ]
       : tab === "bandwidth"
         ? [
-            { label: "区间峰值", value: `${bytes(pick("rx_peak").max)}/s`, hint: "入站最高速率" },
-            { label: "日均出站", value: `${bytes(txAvg)}/s`, hint: "按有数据的时间摊算" },
-            { label: "出站峰值日", value: `${bytes(pick("tx_peak").max)}/s`, hint: pick("tx_peak").day },
+            { label: "平均入站", value: `${bytes(rxAvg)}/s`, hint: "节点日均速率汇总" },
+            { label: "平均出站", value: `${bytes(txAvg)}/s`, hint: "节点日均速率汇总" },
+            // 「最高日均带宽」= **当天日均（入+出）最高**的那一天。注意它不是「峰值速率」——
+            // 峰值是小时级的瞬时值，这里要的是日平均的量级，两者别混。
+            { label: "最高日均带宽", value: `${bytes(busiestSum)}/s`, hint: busiestSumDay },
           ]
         : [
             { label: "CPU 峰值", value: `${pick("cpu").max.toFixed(1)}%`, hint: pick("cpu").day },
@@ -340,8 +347,8 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
           ]
         : tab === "bandwidth"
           ? [
-              { c: "bg-primary", t: "日均入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
-              { c: "bg-warn-fg/40", t: "入站峰值", v: `${bytes(rows[i].rx_peak)}/s` },
+              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
+              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s` },
             ]
           : [
               { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}%` },
