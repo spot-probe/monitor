@@ -108,6 +108,13 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
 }
 
+/// 「多选一」控件的**唯一**样子：灰底轨道 + 选中项实心。
+/// 这类控件本来散在各处、各写一遍，就会慢慢长出第二种样子 —— 所以提到模块级，共用。
+/// （**开关**不在此列：那是"开/关"，不是"多选一"，硬塞进轨道才是错的。）
+const TRACK = "flex items-center rounded-full bg-muted p-0.5"
+const pill = (on: boolean) =>
+  `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
+
 /// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
 ///
 /// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
@@ -459,9 +466,6 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
               { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%`, raw: rows[i].mem },
               { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%`, raw: rows[i].disk },
             ]
-
-  const pill = (on: boolean) =>
-    `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
 
   return (
     <Card>
@@ -830,15 +834,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         <span className="text-muted-foreground">分组</span>
-        <div className="inline-flex flex-wrap gap-1">
+        <div className={`${TRACK} flex-wrap`}>
           {[{ v: "", label: "全部" }, ...groups.map((gp) => ({ v: gp, label: gp }))].map((o) => (
-            <button
-              key={o.v || "all"}
-              type="button"
-              onClick={() => setGroup(o.v)}
-              aria-pressed={group === o.v}
-              className={`rounded-full px-2.5 py-1 transition-colors hover:bg-muted ${group === o.v ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground"}`}
-            >
+            <button key={o.v || "all"} type="button" onClick={() => setGroup(o.v)} aria-pressed={group === o.v} className={pill(group === o.v)}>
               {o.label}
             </button>
           ))}
@@ -1005,15 +1003,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2">
             <CardTitle className="text-sm">需要处理的节点</CardTitle>
-            <div className="inline-flex gap-1">
+            <div className={TRACK}>
               {([["latency", "延迟最差"], ["loss", "丢包最多"], ["down", "离线最久"]] as const).map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setRiskTab(k)}
-                  aria-pressed={riskTab === k}
-                  className={`rounded-full px-2.5 py-1 text-xs transition-colors hover:bg-muted ${riskTab === k ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground"}`}
-                >
+                <button key={k} type="button" onClick={() => setRiskTab(k)} aria-pressed={riskTab === k} className={pill(riskTab === k)}>
                   {label}
                 </button>
               ))}
