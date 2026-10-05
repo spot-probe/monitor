@@ -11,6 +11,7 @@ import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/componen
 // `daysUntil` 与 `Expiry` 仍在 `Admin.tsx`（节点表也在用）。从那里 import 会形成**循环引用**，
 // 但两者都是函数声明 —— 声明会提升，且只在渲染时调用，所以这个环是安全的；比把它们复制一份好。
 import { Expiry, Help, daysUntil } from "./Admin"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 /// 全队按天的趋势（对应 hub 的 `Db::overview_daily`）。
 type SeriesPoint = {
@@ -566,6 +567,9 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
+  // 「查看详情」弹窗：卡片只显示最急的 2 条、高度固定；全貌在弹窗里看。
+  // 不用「卡内滚动」：同行两卡高度会互相牵扯，而滚轮落在卡片上会先滚卡片再滚页面，体验很碎。
+  const [noticesOpen, setNoticesOpen] = useState(false)
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
   const series = useOverviewSeries(range)
@@ -652,7 +656,7 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
   // 最多显示三条：这个卡与右边「版本分布」同处一行，全展开会让两栏高度差一大截。
   // 其余的用一行汇总 —— 卡片高度可预期，最要紧的三条仍然一眼看到。
   const shown = [...urgent, ...routine]
-  const NOTICE_LIMIT = 3
+  const NOTICE_LIMIT = 2
   notices.push(...shown.slice(0, NOTICE_LIMIT))
   const hiddenNotices = shown.slice(NOTICE_LIMIT)
 
@@ -759,8 +763,13 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
             <CardTitle className="text-sm">近期事项</CardTitle>
+            {shown.length > NOTICE_LIMIT && (
+              <Button size="sm" variant="ghost" onClick={() => setNoticesOpen(true)}>
+                查看详情
+              </Button>
+            )}
           </CardHeader>
           <CardContent className="space-y-2">
             {notices.length === 0 ? (
@@ -833,6 +842,31 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
           </CardContent>
         </Card>
       </div>
+
+      {/* 全部事项的弹窗。卡片只显示最急的 2 条，全貌在这里 —— 同行两张卡的高度都固定。 */}
+      <Dialog open={noticesOpen} onOpenChange={setNoticesOpen}>
+        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-sm">全部待处理事项（{shown.length} 条）</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
+            {shown.map((n) => (
+              <div key={n.text} className="flex items-start gap-2.5 py-3">
+                <span className="mt-0.5 shrink-0 text-muted-foreground">{n.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm">{n.text}</div>
+                  <div className="text-xs text-muted-foreground">{n.hint}</div>
+                </div>
+                {n.href && (
+                  <Button size="sm" variant="ghost" asChild className="shrink-0 self-center">
+                    <a href={n.href}>查看</a>
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
