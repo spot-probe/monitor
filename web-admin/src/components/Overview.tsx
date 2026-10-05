@@ -623,28 +623,38 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
     return n >= 0 && n <= 30
   }).sort((a, b) => a[0].localeCompare(b[0]))
   const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
+  // 严重度分级：**要立刻动手**的排在前面。原来按 push 顺序（到期在前），但「装完就没连上」
+  // 和「流量已达额度」比「30 天后到期」急得多 —— 顺序本身也是信息。
+  const urgent: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
+  const routine: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
   const notices: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
   if (soon.length > 0) {
     const total = soon.reduce((n, [, list]) => n + list.length, 0)
-    notices.push({
+    routine.push({
       text: `未来 30 天有 ${total} 台到期`,
       hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
       icon: <CalendarClock className="size-4" />,
       href: "/admin/nodes",
     })
   }
-  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
-  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
+  if (expired > 0) urgent.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  if (outdated > 0) routine.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
   // 「异常」按维护者定的口径**并入这里** —— 这两条都是「要动手的事」，正合这张卡的意义，
   // 不必再占一张卡。判据面板手上就有，不需要新接口。
   // 「从未上报」与「离线」是两件事：离线是曾经在线、现在断了；从未上报是**装完就没上来过**。
   const never = nodes.filter((n) => (n.agent_version ?? "") === "").length
   if (never > 0)
-    notices.push({ text: `${never} 台从未上报`, hint: "装完就没连上，先查安装命令与网络", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+    urgent.push({ text: `${never} 台从未上报`, hint: "装完就没连上，先查安装命令与网络", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
   // 已达额度**就计入**（维护者的口径）：运维要提前知道，而不是等超了才看到。
   const overQuota = nodes.filter((n) => n.traffic_limit > 0 && monthUsage(n) >= n.traffic_limit).length
   if (overQuota > 0)
-    notices.push({ text: `${overQuota} 台流量已达额度`, hint: "已达本月上限，注意限速或停机", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+    urgent.push({ text: `${overQuota} 台流量已达额度`, hint: "已达本月上限，注意限速或停机", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  // 最多显示三条：这个卡与右边「版本分布」同处一行，全展开会让两栏高度差一大截。
+  // 其余的用一行汇总 —— 卡片高度可预期，最要紧的三条仍然一眼看到。
+  const shown = [...urgent, ...routine]
+  const NOTICE_LIMIT = 3
+  notices.push(...shown.slice(0, NOTICE_LIMIT))
+  const hiddenNotices = shown.slice(NOTICE_LIMIT)
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -777,6 +787,9 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
                     )}
                   </div>
                 ))}
+                {hiddenNotices.length > 0 && (
+                  <div className="pt-2.5 text-xs text-muted-foreground">还有 {hiddenNotices.length} 条待处理事项</div>
+                )}
               </div>
             )}
           </CardContent>
