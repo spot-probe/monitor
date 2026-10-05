@@ -246,14 +246,19 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
   )
 }
 
-/// 资源：cpu / 内存 / 硬盘 三条线，都是百分比，共用 0–100 的轴。
+/// 资源：cpu / 内存 / 硬盘 三条线，都是百分比。
+///
+/// **Y 轴跟着数据走**，不再死锁 0–100%：集群的平均负载通常只有二三成，锁死在 100% 会把实际波动
+/// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
 function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
-  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(100, Math.max(0, v)) / 100) * (CHART_H - CHART_PAD * 2)
+  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk])
+  const top = Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
+  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(top, Math.max(0, v)) / top) * (CHART_H - CHART_PAD * 2)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
-      <ChartTicks left={100} format={(v) => `${Math.round(v)}%`} />
+      <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} />
       <ChartAxis rows={rows} />
       {!hidden?.has("CPU") && <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />}
       {!hidden?.has("内存") && <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />}
@@ -288,14 +293,6 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   // 「最高流量日」要的是**当天总量最大**的那一天，而不是「rx 最大的那天 + tx 最大的那天」——
   // 后者的两个最大值可能不在同一天，加出来的数从未发生过。
   const totals = list.map((r) => r.rx + r.tx)
-  const pick = (key: "rx" | "tx" | "rx_peak" | "tx_peak" | "cpu" | "mem" | "disk") => {
-    if (list.length === 0) return { max: 0, day: "" }
-    let idx = 0
-    list.forEach((r, i) => {
-      if (r[key] > list[idx][key]) idx = i
-    })
-    return { max: list[idx][key], day: dayLabel(list[idx].day_ts) }
-  }
   const totalOf = (key: "rx" | "tx" | "rx_peak" | "tx_peak") => list.map((r) => r[key])
   const trafficTotal = totals
   const busiest = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
@@ -311,6 +308,9 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   const busiestIdx = dailyRate.length > 0 ? dailyRate.indexOf(Math.max(...dailyRate)) : -1
   const busiestSum = busiestIdx >= 0 ? dailyRate[busiestIdx] : 0
   const busiestSumDay = busiestIdx >= 0 ? dayLabel(list[busiestIdx].day_ts) : ""
+  // 按覆盖秒数加权：覆盖长的日子更能代表这段时间。与带宽的平均速率同一套口径。
+  const weighted = (key: "cpu" | "mem" | "disk") =>
+    coveredSum > 0 ? list.reduce((n, r) => n + r[key] * r.covered, 0) / coveredSum : 0
   const stats =
     tab === "traffic"
       ? [
@@ -327,9 +327,12 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             { label: "最高日均带宽", value: `${bytes(busiestSum)}/s`, hint: busiestSumDay },
           ]
         : [
-            { label: "CPU 峰值", value: `${pick("cpu").max.toFixed(1)}%`, hint: pick("cpu").day },
-            { label: "内存峰值", value: `${pick("mem").max.toFixed(1)}%`, hint: pick("mem").day },
-            { label: "硬盘峰值", value: `${pick("disk").max.toFixed(1)}%`, hint: pick("disk").day },
+            // 集群大盘要看的是**水位**（平均），不是某一天的尖峰 —— 尖峰由「均值 + 分布带」
+            // 在图上表达（方案 B，需要端点新增字段，下一步做）。
+            // 权重用 covered：覆盖时间长的日子更有代表性，与带宽那边的口径一致。
+            { label: "平均 CPU", value: `${weighted("cpu").toFixed(1)}%`, hint: `近 ${range} 天` },
+            { label: "平均内存", value: `${weighted("mem").toFixed(1)}%`, hint: `近 ${range} 天` },
+            { label: "平均硬盘", value: `${weighted("disk").toFixed(1)}%`, hint: `近 ${range} 天` },
           ]
 
   // 悬停索引。放在趋势卡这一层，三张图共用同一套交互 —— 三张图本身不用改。
