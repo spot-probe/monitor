@@ -4926,6 +4926,60 @@ mod tests {
         let _ = ids;
     }
 
+    /// 「需要处理的节点」：最差的排第一；**没丢包的探测不该出现在丢包榜**；离线榜排除从未上报。
+    #[test]
+    fn at_risk_ranks_worst_first() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let hour = (now / 3600) * 3600;
+        let mut ids = Vec::new();
+        for name in ["slow", "fast", "never"] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            // create_node 不写 last_seen，直接落库；never 保持 0（= 从未上报）
+            if name != "never" {
+                db.conn()
+                    .execute("UPDATE node SET last_seen=?1 WHERE id=?2", params![now - 3600, n])
+                    .unwrap();
+            }
+            ids.push(n);
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (1,'t','x',60,0,'icmp')",
+                [],
+            )
+            .unwrap();
+        for n in &ids {
+            db.conn().execute("INSERT INTO ping_node (task_id,node_id) VALUES (1,?1)", params![n]).unwrap();
+        }
+        // slow：慢且丢包；fast：快且不丢；never：也报一次但很快
+        for (n, lat, answered, lost) in
+            [(ids[0], 300.0, 90_i64, 10_i64), (ids[1], 20.0, 100, 0), (ids[2], 10.0, 100, 0)]
+        {
+            db.conn()
+                .execute(
+                    "INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi) VALUES (?1,1,?2,?3,?4,?5,?5,?5)",
+                    params![n, hour, answered, lost, lat],
+                )
+                .unwrap();
+        }
+        let (latency, loss, down) = db.at_risk(7, 5);
+        assert_eq!(latency.len(), 3, "延迟榜应有 3 行");
+        assert_eq!(latency[0].1, "slow", "最慢的必须排第一，实际 {:?}", latency[0]);
+        assert!((latency[0].2 - 300.0).abs() < 1.0, "加权均值 {}", latency[0].2);
+        assert_eq!(loss.len(), 1, "**只有丢过包的**才该进丢包榜");
+        assert_eq!(loss[0].1, "slow");
+        assert!((loss[0].2 - 0.1).abs() < 0.001, "丢包率 {}", loss[0].2);
+        // 离线榜：never（last_seen=0）不该出现
+        assert_eq!(down.len(), 2, "从来未上报的不是离线，应排除");
+        assert!(down.iter().all(|(name, _)| name != "never"), "实际 {:?}", down);
+    }
+
     /// 分组筛选：取某一组时只算那一组；**各组合计必须等于全部**（分组最容易错的地方）。
     #[test]
     fn overview_daily_filters_by_group() {
