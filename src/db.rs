@@ -976,6 +976,12 @@ impl Tally {
     }
 }
 
+/// 「需要处理的节点」一条榜的行：探测名 · 节点名 · 数值 · 样本数。
+pub type AtRiskRow = (String, String, f64, i64);
+
+/// 三条榜：延迟最差 · 丢包最多 · 离线最久（后者是 `(节点名, last_seen)`）。
+pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -1432,11 +1438,7 @@ impl Db {
     /// - 丢包：`Σlost / Σ(answered+lost)`，就是这段时间的丢包率。
     /// - 离线：只按 `last_seen` 从旧到新取（且 `last_seen > 0`，排除"从未上报"）。
     ///   **在线与否的判定不在这里重写** —— 面板已经有 `online` 标志，阈值只该有一处。
-    pub fn at_risk(
-        &self,
-        days: i64,
-        limit: i64,
-    ) -> (Vec<(String, String, f64, i64)>, Vec<(String, String, f64, i64)>, Vec<(String, i64)>) {
+    pub fn at_risk(&self, days: i64, limit: i64) -> AtRisk {
         let conn = self.conn();
         let since = Utc::now().timestamp() - days * 86_400;
         let latency = {
@@ -1459,7 +1461,7 @@ impl Db {
             })
             .unwrap()
             .filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
+            .collect::<Vec<AtRiskRow>>()
         };
         let loss = {
             let mut stmt = conn
@@ -1482,7 +1484,7 @@ impl Db {
             })
             .unwrap()
             .filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
+            .collect::<Vec<AtRiskRow>>()
         };
         let down = {
             let mut stmt = conn
