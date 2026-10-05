@@ -603,6 +603,23 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
   const series = useOverviewSeries(range, group)
+
+  // 「需要处理的节点」：三条榜由 hub 一次算好（延迟/丢包要在 SQL 里按 `answered` 加权，
+  // 前端拿不到那种聚合），所以只取一次、切换榜不再发请求。
+  type RiskRow = { task: string; node: string; value: number; samples: number }
+  type Risk = { latency: RiskRow[]; loss: RiskRow[]; down: { node: string; last_seen: number }[] }
+  const [risk, setRisk] = useState<Risk | null>(null)
+  const [riskTab, setRiskTab] = useState<"latency" | "loss" | "down">("latency")
+  useEffect(() => {
+    let stop = false
+    api<Risk>("/nodes/at-risk?days=7&limit=5")
+      .then((d) => { if (!stop) setRisk(d) })
+      .catch(() => { if (!stop) setRisk(null) })
+    return () => { stop = true }
+  }, [])
+  // 秒 → 「3 天 2 小时」；只在"离线"那一栏用，口径写在一处。
+  const span = (sec: number) =>
+    sec >= 86400 ? `${Math.floor(sec / 86400)} 天 ${Math.floor((sec % 86400) / 3600)} 小时` : `${Math.max(1, Math.floor(sec / 3600))} 小时`
   // 自动刷新：**默认关闭**。一块会自己重载的仪表盘会让人意外（正在读的数忽然变了），
   // 而且它会持续产生请求 —— 所以要不要开，交给使用者，并把选择记住。
   const [auto, setAuto] = useState(() => localStorage.getItem("overview-auto") === "1")
@@ -982,6 +999,70 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </DialogContent>
       </Dialog>
 
+      {/* 「需要处理的节点」与「用量榜」并排：两张都是五行的榜，高度天然相近，
+          用同行的 items-stretch 对齐（与上面「近期事项 | Agent 版本分布」一致）。 */}
+      <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
+            <CardTitle className="text-sm">需要处理的节点</CardTitle>
+            <div className="inline-flex gap-1">
+              {([["latency", "延迟最差"], ["loss", "丢包最多"], ["down", "离线最久"]] as const).map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setRiskTab(k)}
+                  aria-pressed={riskTab === k}
+                  className={`rounded-full px-2.5 py-1 text-xs transition-colors hover:bg-muted ${riskTab === k ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {risk === null ? (
+              <p className="text-sm text-muted-foreground">取不到数据。</p>
+            ) : riskTab === "down" ? (
+              (() => {
+                // hub 给的是「`last_seen` 最旧且非 0」的几台；**在不在线仍以面板已有的 `online`
+                // 标志为准**（阈值只该有一处）。按名字对上 —— 这一列的名字在界面上是唯一的。
+                const offline = risk.down.filter((d) => nodes.some((n) => n.name === d.node && !n.online))
+                const nowSec = Math.floor(Date.now() / 1000)
+                return offline.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">没有离线的节点。</p>
+                ) : (
+                  offline.map((d) => (
+                    <div key={d.node} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                      <span className="w-40 shrink-0 truncate font-medium">{d.node}</span>
+                      <span className="text-xs text-danger-fg">已离线 {span(nowSec - d.last_seen)}</span>
+                    </div>
+                  ))
+                )
+              })()
+            ) : (
+              (() => {
+                const rows = riskTab === "latency" ? risk.latency : risk.loss
+                return rows.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {riskTab === "latency" ? "近 7 天没有探测数据。" : "近 7 天没有丢包。"}
+                  </p>
+                ) : (
+                  rows.map((r) => (
+                    <div key={`${r.task}-${r.node}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                      <span className="w-40 shrink-0 truncate font-medium">{r.node}</span>
+                      <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
+                      <span className="tnum text-xs">
+                        {riskTab === "latency" ? `平均 ${Math.round(r.value)} ms` : `丢包 ${(r.value * 100).toFixed(1)}%`}
+                      </span>
+                      <span className="ml-auto text-xs text-muted-foreground">{r.samples} 次</span>
+                    </div>
+                  ))
+                )
+              })()
+            )}
+          </CardContent>
+        </Card>
+
       {/* 用量榜：只报**现状**（谁用得最满），不做"还能用几天"这类预测。 */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-2">
@@ -1017,6 +1098,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           )}
         </CardContent>
       </Card>
+
+      </div>
 
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
