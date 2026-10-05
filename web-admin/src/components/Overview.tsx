@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react"
 import { ArrowUpCircle, CalendarClock, CircleAlert } from "lucide-react"
 
-import { api } from "@/lib/api"
+import { api, behind } from "@/lib/api"
 import type { Node } from "@/lib/api"
-import { bytes } from "@/lib/format"
+import { bytes, monthUsage } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -11,6 +11,7 @@ import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/componen
 // `daysUntil` 与 `Expiry` 仍在 `Admin.tsx`（节点表也在用）。从那里 import 会形成**循环引用**，
 // 但两者都是函数声明 —— 声明会提升，且只在渲染时调用，所以这个环是安全的；比把它们复制一份好。
 import { Expiry, Help, daysUntil } from "./Admin"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 /// 全队按天的趋势（对应 hub 的 `Db::overview_daily`）。
 type SeriesPoint = {
@@ -68,6 +69,22 @@ function dayLabel(ts: number) {
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
+/// 轴上限：按 tab 各自的算法算**唯一一次**。三张图与悬浮胶囊共用 —— 两处各算一遍迟早会错开。
+function chartTop(tab: "traffic" | "bandwidth" | "resource", rows: SeriesPoint[]): number {
+  if (rows.length === 0) return 1
+  if (tab === "traffic") return Math.max(1, ...rows.map((r) => r.rx + r.tx))
+  if (tab === "bandwidth")
+    return Math.max(1, ...rows.map((r) => Math.max(r.covered > 0 ? r.rx / r.covered : 0, r.covered > 0 ? r.tx / r.covered : 0)))
+  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
+  return Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
+}
+
+/// 值 → viewBox 里的 y。**唯一**的一份映射。
+function chartY(v: number, top: number): number {
+  const t = Math.min(top, Math.max(0, v)) / top
+  return CHART_H - CHART_PAD - t * (CHART_H - CHART_PAD * 2)
+}
+
 const CHART_W = 640
 /// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
 /// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
@@ -91,15 +108,30 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 ///
 /// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
 /// viewBox 裁掉（`left` 夹在 12%–88% 之间，卡片永远完整）。
-function HoverOverlay({ rows, index, series }: {
+function HoverOverlay({ rows, index, series, top, single }: {
   rows: SeriesPoint[]
   index: number
-  series: { c: string; t: string; v: string }[]
+  series: { c: string; t: string; v: string; raw: number }[]
+  top: number
+  /** 这张图是不是单轴（双轴时 Y 胶囊会让人分不清指向哪根轴）。 */
+  single: boolean
 }) {
   const pct = ((index + 0.5) / rows.length) * 100
   return (
     <div className="pointer-events-none absolute inset-0">
       <span className="absolute top-0 bottom-5 w-px border-l border-dashed border-foreground/30" style={{ left: `${pct}%` }} />
+      {/* Y 轴数值胶囊：贴在左边轴上，位置由**同一份映射**（chartY）算出 —— 胶囊与线永远对齐。
+          显示用格式化后的文本（`2.34 TB/s`），不是 p2 里那个原始字节数（`16,914,893.62`）——
+          那个读者读不出量级。取第一条**未被隐藏**的序列。
+          **流量 tab 不显示**：那张图是双 Y 轴（柱用左轴、累计线用右轴），一个胶囊说不清它指的是哪根轴。 */}
+      {single && series[0] && (
+        <span
+          className="tnum absolute -translate-y-1/2 rounded-md bg-foreground px-1.5 py-0.5 text-[11px] leading-tight font-medium text-background"
+          style={{ top: `${(chartY(series[0].raw, top) / CHART_H) * 100}%` }}
+        >
+          {series[0].v}
+        </span>
+      )}
       {/* X 轴上的日期胶囊：准星最有用的部分 —— 竖线指到哪一天，轴上就写哪一天，
           不用回头去找浮层。用 token（foreground/background 反色），暗色主题下自动成立。 */}
       <span
@@ -167,14 +199,14 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 /// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
 /// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
 function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
-  const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
+  const top = chartTop("traffic", rows)
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const cumTop = Math.max(1, ...cum)
   const bw = CHART_W / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const bottom = CHART_H - CHART_PAD
-  const yOf = (v: number, m: number) => bottom - (v / m) * (CHART_H - CHART_PAD * 2)
+  const yOf = (v: number, m: number) => chartY(v, m)
   // 30/90 天时每格都标会糊在一起，按数量抽稀。
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
@@ -232,9 +264,9 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
   const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
-  const top = Math.max(1, ...rows.map((r) => Math.max(inRate(r), outRate(r))))
+  const top = chartTop("bandwidth", rows)
   const bw = CHART_W / Math.max(1, rows.length)
-  const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  const yOf = (v: number) => chartY(v, top)
   const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
@@ -264,9 +296,8 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
 /// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
 function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   // 轴上限要**含分布带的上沿** —— 只看均值的话带会溢出轴（这是 A 与 B 唯一真正的耦合处）。
-  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
-  const top = Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
-  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(top, Math.max(0, v)) / top) * (CHART_H - CHART_PAD * 2)
+  const top = chartTop("resource", rows)
+  const yOf = (v: number) => chartY(v, top)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
@@ -410,19 +441,19 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
       ? []
       : tab === "traffic"
         ? [
-            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx) },
-            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx) },
-            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)) },
+            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx), raw: rows[i].rx },
+            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx), raw: rows[i].tx },
+            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)), raw: cumAt(i) },
           ]
         : tab === "bandwidth"
           ? [
-              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
-              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s` },
+              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s`, raw: rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0 },
+              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s`, raw: rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0 },
             ]
           : [
-              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%` },
-              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%` },
-              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%` },
+              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%`, raw: rows[i].cpu },
+              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%`, raw: rows[i].mem },
+              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%`, raw: rows[i].disk },
             ]
 
   const pill = (on: boolean) =>
@@ -504,7 +535,15 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             ) : (
               <ResourceChart rows={rows} hidden={hidden} />
             )}
-            {hover !== null && <HoverOverlay rows={rows} index={hover} series={hoverSeries(hover)} />}
+            {hover !== null && (
+              <HoverOverlay
+                rows={rows}
+                index={hover}
+                series={hoverSeries(hover)}
+                top={chartTop(tab, rows)}
+                single={tab !== "traffic"}
+              />
+            )}
           </div>
         )}
       </CardContent>
@@ -520,12 +559,17 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 /// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
 /// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
 /// 颜色），所以暗色主题自动成立。
-export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: string | null }) {
+export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]; agentLatest: string | null; hub: string; hubLatest: string }) {
+  // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
+  const hubBehind = behind(hub, hubLatest)
   const [month, setMonth] = useState(() => {
     const d = new Date()
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
+  // 「查看详情」弹窗：卡片只显示最急的 2 条、高度固定；全貌在弹窗里看。
+  // 不用「卡内滚动」：同行两卡高度会互相牵扯，而滚轮落在卡片上会先滚卡片再滚页面，体验很碎。
+  const [noticesOpen, setNoticesOpen] = useState(false)
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
   const series = useOverviewSeries(range)
@@ -583,18 +627,37 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
     return n >= 0 && n <= 30
   }).sort((a, b) => a[0].localeCompare(b[0]))
   const busiest = soon.reduce<[string, Node[]] | null>((best, cur) => (!best || cur[1].length > best[1].length ? cur : best), null)
+  // 严重度分级：**要立刻动手**的排在前面。原来按 push 顺序（到期在前），但「装完就没连上」
+  // 和「流量已达额度」比「30 天后到期」急得多 —— 顺序本身也是信息。
+  const urgent: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
+  const routine: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
   const notices: { text: string; hint: string; icon: ReactNode; href?: string }[] = []
   if (soon.length > 0) {
     const total = soon.reduce((n, [, list]) => n + list.length, 0)
-    notices.push({
+    routine.push({
       text: `未来 30 天有 ${total} 台到期`,
       hint: busiest && busiest[1].length > 1 ? `其中 ${busiest[1].length} 台集中在 ${busiest[0].slice(5)}` : `最早 ${soon[0][0].slice(5)}`,
       icon: <CalendarClock className="size-4" />,
       href: "/admin/nodes",
     })
   }
-  if (expired > 0) notices.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
-  if (outdated > 0) notices.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
+  if (expired > 0) urgent.push({ text: `已经有 ${expired} 台过期`, hint: "续费或下线", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  if (outdated > 0) routine.push({ text: `${outdated} 台 agent 落后`, hint: `最新 ${agentLatest ?? "—"}`, icon: <ArrowUpCircle className="size-4" />, href: "/admin/update" })
+  // 「异常」按维护者定的口径**并入这里** —— 这两条都是「要动手的事」，正合这张卡的意义，
+  // 不必再占一张卡。判据面板手上就有，不需要新接口。
+  // 「从未上报」与「离线」是两件事：离线是曾经在线、现在断了；从未上报是**装完就没上来过**。
+  const never = nodes.filter((n) => (n.agent_version ?? "") === "").length
+  if (never > 0)
+    urgent.push({ text: `${never} 台从未上报`, hint: "装完就没连上，先查安装命令与网络", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  // 已达额度**就计入**（维护者的口径）：运维要提前知道，而不是等超了才看到。
+  const overQuota = nodes.filter((n) => n.traffic_limit > 0 && monthUsage(n) >= n.traffic_limit).length
+  if (overQuota > 0)
+    urgent.push({ text: `${overQuota} 台流量已达额度`, hint: "已达本月上限，注意限速或停机", icon: <CircleAlert className="size-4" />, href: "/admin/nodes" })
+  // 最多显示三条：这个卡与右边「版本分布」同处一行，全展开会让两栏高度差一大截。
+  // 其余的用一行汇总 —— 卡片高度可预期，最要紧的三条仍然一眼看到。
+  const shown = [...urgent, ...routine]
+  const NOTICE_LIMIT = 2
+  notices.push(...shown.slice(0, NOTICE_LIMIT))
 
   const shift = (delta: number) => {
     const d = new Date(month.y, month.m + delta, 1)
@@ -607,7 +670,7 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
     <div className="space-y-4">
       {/* 三张复合卡，而不是六个平铺数字：在线 + 离线 = 总数，并列三项本身就是数学冗余；
           而且平铺会把卡片横向拉长、大面积留白。这里按「存活 / 生命周期 / 维护」三件事各归一卡。 */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* 卡片外框一律统一，状态只出现在两处：右上角的状态徽章 + 主数字的颜色。
             三轮下来方向一直是「更克制」，这一版最克制的一处就是**不再给外框上色**。 */}
         <Card>
@@ -673,13 +736,39 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
             </div>
           </CardContent>
         </Card>
+
+        {/* 第 4 张：hub 自身。与第 3 张「agent 待升级」成对 —— 升级时两样都要看。 */}
+        <Card>
+          <CardContent>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">待升级 hub</div>
+              <StatusPill tone={hubBehind ? "warn" : "ok"} text={hubBehind ? "有新版" : "最新"} />
+            </div>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${hubBehind ? "text-warn-fg" : ""}`}>
+              {hubBehind ? 1 : 0}
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">个</span>
+            </div>
+            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
+              <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="text-muted-foreground">
+                当前 <span className="font-mono">{hub || "—"}</span>
+                {hubLatest && <span> · 最新 <span className="font-mono">{hubLatest}</span></span>}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
             <CardTitle className="text-sm">近期事项</CardTitle>
+            {shown.length > NOTICE_LIMIT && (
+              <Button size="sm" variant="ghost" onClick={() => setNoticesOpen(true)}>
+                查看详情（{shown.length}）
+              </Button>
+            )}
           </CardHeader>
           <CardContent className="space-y-2">
             {notices.length === 0 ? (
@@ -750,6 +839,56 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
         </Card>
       </div>
 
+      {/* 某一天的到期明细：**弹窗**而不是在卡内向下展开 —— 展开会把卡片和同行另一张卡一起撑高。 */}
+      <Dialog open={pickedDay !== null} onOpenChange={(v) => !v && setPickedDay(null)}>
+        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              {pickedDay ?? ""} 到期（{(pickedDay && byDay.get(pickedDay)?.length) ?? 0} 台）
+            </DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
+            {(pickedDay ? byDay.get(pickedDay) ?? [] : []).map((n) => (
+              <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 py-3">
+                <span className="font-medium">{n.name}</span>
+                <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                <span className="tnum ml-auto text-xs text-muted-foreground">
+                  {n.price > 0
+                    ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}`
+                    : "未记价格"}
+                </span>
+                <Expiry date={n.expires_at} />
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 全部事项的弹窗。卡片只显示最急的 2 条，全貌在这里 —— 同行两张卡的高度都固定。 */}
+      <Dialog open={noticesOpen} onOpenChange={setNoticesOpen}>
+        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-sm">全部待处理事项（{shown.length} 条）</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
+            {shown.map((n) => (
+              <div key={n.text} className="flex items-start gap-2.5 py-3">
+                <span className="mt-0.5 shrink-0 text-muted-foreground">{n.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm">{n.text}</div>
+                  <div className="text-xs text-muted-foreground">{n.hint}</div>
+                </div>
+                {n.href && (
+                  <Button size="sm" variant="ghost" asChild className="shrink-0 self-center">
+                    <a href={n.href}>查看</a>
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
@@ -792,15 +931,13 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
               const list = byDay.get(day) ?? []
               const isPeak = peak > 1 && list.length === peak
               const on = pickedDay === day
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => setPickedDay(on ? null : day)}
-                  aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
-                >
-                  {/* 今天用**浅底圆角**而不是实心方块：后者像打卡签到，且会把日期压得很小。 */}
+              // **当天没有到期节点时，这个格子不是按钮**：
+              // 点了没反应的按钮是最糟的一种控件（我一路拒绝的就是这类），而没有事项的日子
+              // 本来也不是可操作对象。所以它降级成普通格子 —— 不响应点击，也不给悬停高亮，
+              // 免得暗示「这里能点」。
+              const cellClass = `flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors ${on ? "ring-2 ring-inset ring-primary" : ""}`
+              const inner = (
+                <>
                   <span
                     className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
                       day === todayKey ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40" : "text-muted-foreground"
@@ -813,33 +950,28 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
                       {list.length} 台
                     </span>
                   )}
+                </>
+              )
+              if (list.length === 0) {
+                return (
+                  <div key={day} className={cellClass}>
+                    {inner}
+                  </div>
+                )
+              }
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => setPickedDay(day)}
+                  aria-label={`${day}：${list.length} 台到期`}
+                  className={`${cellClass} hover:bg-muted`}
+                >
+                  {inner}
                 </button>
               )
             })}
           </div>
-
-          {pickedDay && (
-            <div className="rounded-lg bg-muted p-3">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h4 className="text-sm font-medium">{pickedDay} 到期</h4>
-                <button type="button" onClick={() => setPickedDay(null)} className="text-xs text-primary underline underline-offset-2">
-                  收起
-                </button>
-              </div>
-              <div className="mt-2 space-y-1">
-                {(byDay.get(pickedDay) ?? []).map((n) => (
-                  <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 text-sm">
-                    <span className="font-medium">{n.name}</span>
-                    <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                    <span className="tnum ml-auto text-xs text-muted-foreground">
-                      {n.price > 0 ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}` : "未记价格"}
-                    </span>
-                    <Expiry date={n.expires_at} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
         </CardContent>
