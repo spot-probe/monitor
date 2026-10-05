@@ -1019,7 +1019,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               ))}
             </div>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-1.5">
             {risk === null ? (
               <p className="text-sm text-muted-foreground">取不到数据。</p>
             ) : riskTab === "down" ? (
@@ -1031,10 +1031,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 return offline.length === 0 ? (
                   <p className="text-sm text-muted-foreground">没有离线的节点。</p>
                 ) : (
-                  offline.map((d) => (
-                    <div key={d.node} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                      <span className="w-40 shrink-0 truncate font-medium">{d.node}</span>
-                      <span className="text-xs text-danger-fg">已离线 {span(nowSec - d.last_seen)}</span>
+                  offline.map((d, idx) => (
+                    <div key={d.node} className="flex items-center gap-3 py-0.5 text-sm">
+                      <span className="min-w-0 flex-1 truncate font-medium">{d.node}</span>
+                      <span className={`tnum w-40 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                        已离线 {span(nowSec - d.last_seen)}
+                      </span>
                     </div>
                   ))
                 )
@@ -1047,14 +1049,16 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     {riskTab === "latency" ? "近 7 天没有探测数据。" : "近 7 天没有丢包。"}
                   </p>
                 ) : (
-                  rows.map((r) => (
-                    <div key={`${r.task}-${r.node}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                      <span className="w-40 shrink-0 truncate font-medium">{r.node}</span>
-                      <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
-                      <span className="tnum text-xs">
+                  rows.map((r, idx) => (
+                    // 定宽 + 不换行：数字列各自对齐，行高一致。**最差那行同时用加粗与语义色**
+                    // 两种信号（颜色不单独承担含义）。
+                    <div key={`${r.task}-${r.node}`} className="flex items-center gap-3 py-0.5 text-sm">
+                      <span className="min-w-0 flex-1 truncate font-medium">{r.node}</span>
+                      <span className="w-16 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
+                      <span className={`tnum w-24 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
                         {riskTab === "latency" ? `平均 ${Math.round(r.value)} ms` : `丢包 ${(r.value * 100).toFixed(1)}%`}
                       </span>
-                      <span className="ml-auto text-xs text-muted-foreground">{r.samples} 次</span>
+                      <span className="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">{r.samples} 次</span>
                     </div>
                   ))
                 )
@@ -1069,27 +1073,28 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           <CardTitle className="text-sm">用量榜</CardTitle>
           <span className="text-xs text-muted-foreground">按本月已用额度排序</span>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-1.5">
           {quota.length === 0 ? (
             <p className="text-sm text-muted-foreground">没有节点设置流量额度。</p>
           ) : (
             quota.map(({ node: n, used, pct }) => {
               const over = pct >= 1
               return (
-                <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                  <span className="w-40 shrink-0 truncate font-medium">{n.name}</span>
-                  <span className="w-24 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                // 定宽 + 不换行：百分比在最后、右对齐，永远与数字列同一行（原来会被挤到第二行）。
+                <div key={n.id} className="flex items-center gap-3 py-0.5 text-sm">
+                  <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
+                  <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
                   {/* 进度条复用版本分布那条的形状与高度 */}
-                  <span className="min-w-24 flex-1 overflow-hidden rounded-full bg-muted">
+                  <span className="w-24 shrink-0 overflow-hidden rounded-full bg-muted">
                     <span
                       className={`block h-2.5 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
                       style={{ width: `${Math.min(100, pct * 100)}%` }}
                     />
                   </span>
-                  <span className="tnum shrink-0 text-xs text-muted-foreground">
+                  <span className="tnum w-32 shrink-0 text-right text-xs text-muted-foreground">
                     {bytes(used)} / {bytes(n.traffic_limit)}
                   </span>
-                  <span className={`tnum w-14 shrink-0 text-right text-xs font-medium ${over ? "text-danger-fg" : ""}`}>
+                  <span className={`tnum w-12 shrink-0 text-right text-xs ${over ? "font-semibold text-danger-fg" : "font-medium"}`}>
                     {Math.round(pct * 100)}%
                   </span>
                 </div>
