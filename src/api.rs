@@ -1572,6 +1572,10 @@ pub async fn overview_series(
                     "disk": r[7],
                     // 有数据覆盖的秒数：面板用它算**精确**的平均速率（不是除以 86400）。
                     "covered": r[8],
+                    // 「最热的那一台」，给「均值 + 分布带」用（最热 ≥ 平均是恒成立的）。
+                    "cpu_max": r[9],
+                    "mem_max": r[10],
+                    "disk_max": r[11],
                 })
             })
             .collect::<Vec<_>>()

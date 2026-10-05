@@ -22,6 +22,10 @@ type SeriesPoint = {
   cpu: number
   mem: number
   disk: number
+  /** 当天**最热的那一台**（逐节点算的），给「均值 + 分布带」用。 */
+  cpu_max: number
+  mem_max: number
+  disk_max: number
   /** 当天**有数据覆盖的秒数**：平均速率要除以它，不能除以 86400。 */
   covered: number
 }
@@ -259,11 +263,19 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
 /// **Y 轴跟着数据走**，不再死锁 0–100%：集群的平均负载通常只有二三成，锁死在 100% 会把实际波动
 /// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
 function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
-  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk])
+  // 轴上限要**含分布带的上沿** —— 只看均值的话带会溢出轴（这是 A 与 B 唯一真正的耦合处）。
+  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
   const top = Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
   const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(top, Math.max(0, v)) / top) * (CHART_H - CHART_PAD * 2)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
+  // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
+  // 一层带就能把这件事摆出来。带跟着它那条线的图例开关走（关掉 CPU，它的带也一起关）。
+  const band = (avgKey: "cpu" | "mem" | "disk", maxKey: "cpu_max" | "mem_max" | "disk_max") => {
+    const up = rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[maxKey])}`)
+    const down = [...rows].reverse().map((r, i) => `${(rows.length - 1 - i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[avgKey])}`)
+    return [...up, ...down].join(" ")
+  }
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
       <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} />
@@ -284,9 +296,24 @@ function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<str
         </g>
       )}
       <ChartAxis rows={rows} />
-      {!hidden?.has("CPU") && <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />}
-      {!hidden?.has("内存") && <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />}
-      {!hidden?.has("硬盘") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />}
+      {!hidden?.has("CPU") && (
+        <>
+          <polygon className="fill-primary/15" points={band("cpu", "cpu_max")} />
+          <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
+        </>
+      )}
+      {!hidden?.has("内存") && (
+        <>
+          <polygon className="fill-warn-fg/15" points={band("mem", "mem_max")} />
+          <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
+        </>
+      )}
+      {!hidden?.has("硬盘") && (
+        <>
+          <polygon className="fill-ok-fg/15" points={band("disk", "disk_max")} />
+          <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
+        </>
+      )}
     </svg>
   )
 }
@@ -393,9 +420,9 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
               { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s` },
             ]
           : [
-              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}%` },
-              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}%` },
-              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}%` },
+              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%` },
+              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%` },
+              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%` },
             ]
 
   const pill = (on: boolean) =>

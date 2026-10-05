@@ -1342,10 +1342,11 @@ impl Db {
     ///
     /// `metric_hour.net_rx` 是**字节/秒**（见 `agent_ws` 里 `(total_rx - rx0) / elapsed`），所以一天的
     /// 字节数 = `Σ(速率 × 60 × minutes)`。这是积分近似：假设采样间隔内速率不变，也是这类图表的通行做法。
+    /// 最后四个值依次是：**覆盖秒数**、**最热节点的 cpu / 内存 / 硬盘**（给「均值 + 分布带」用）。
     /// **最后一个值是「有数据覆盖的秒数」**：平均速率要除以它，不能除以 86400，否则没有样本的小时
     /// 会以 0 参与平均，把均值压低 —— 那是错的。
     /// 分组用的是 **UTC 日**；面板负责按本地时区显示日期（跨日边界会有小时级的偏移，这一点在那边的注释里写）。
-    pub fn overview_daily(&self, days: i64) -> Vec<[f64; 9]> {
+    pub fn overview_daily(&self, days: i64) -> Vec<[f64; 12]> {
         let since = Utc::now().timestamp() - days * 86_400;
         let conn = self.conn();
         let mut stmt = conn
@@ -1376,7 +1377,12 @@ impl Db {
                         SUM(cpu * minutes) * 1.0 / NULLIF(SUM(minutes), 0),
                         SUM(mem_used * minutes) * 100.0 / NULLIF(SUM(mem_total * minutes), 0),
                         SUM(disk_used * minutes) * 100.0 / NULLIF(SUM(disk_total * minutes), 0),
-                        SUM(minutes * 60.0 / node_count)
+                        SUM(minutes * 60.0 / node_count),
+                        -- 「最热的那一台」：cpu 本身就是百分比；内存与硬盘要用**逐节点**的
+                        -- 已用/总量，不能拿全队已用去除全队总量 —— 那会把单台的打爆平均掉。
+                        MAX(cpu),
+                        MAX(mem_used * 100.0 / NULLIF(mem_total, 0)),
+                        MAX(disk_used * 100.0 / NULLIF(disk_total, 0))
                    FROM hourly
                   GROUP BY day ORDER BY day",
             )
@@ -1393,6 +1399,9 @@ impl Db {
                     r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
                     r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
                     r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
+                    r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+                    r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+                    r.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
                 ])
             })
             .unwrap();
@@ -4816,6 +4825,11 @@ mod tests {
         // 三台都在同一个小时里、各给 60 分钟：**墙上时钟**的覆盖时间就是 3600 秒。
         // （若按各节点相加会得到 10800，那与折线「全队速率」不同口径，会让柱与线不可比。）
         assert_eq!(r[8], 3600.0, "覆盖秒数应当是墙上时钟的 3600 秒，实际 {}", r[8]);
+        // 三条真不变量：**最热的那台 ≥ 全队平均**（三台都是 10% cpu、内存 50/25/10%，所以这里取等）。
+        assert!(r[9] >= r[5], "最热 cpu {} 不该低于平均 {}", r[9], r[5]);
+        assert!(r[10] >= r[6], "最热内存 {} 不该低于平均 {}", r[10], r[6]);
+        assert!(r[11] >= r[7], "最热硬盘 {} 不该低于平均 {}", r[11], r[7]);
+        assert_eq!(r[10], 50.0, "三台里内存占用率最高的是 a：1000/2000 = 50%");
         let _ = ids;
     }
 }
