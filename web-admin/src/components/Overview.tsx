@@ -861,9 +861,6 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
               </div>
             ))}
           </div>
-          <div className="shrink-0 border-t pt-4">
-            <Button variant="ghost" onClick={() => setPickedDay(null)}>关闭</Button>
-          </div>
         </DialogContent>
       </Dialog>
 
