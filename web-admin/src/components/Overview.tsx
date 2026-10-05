@@ -95,7 +95,15 @@ function HoverOverlay({ rows, index, series }: {
   const pct = ((index + 0.5) / rows.length) * 100
   return (
     <div className="pointer-events-none absolute inset-0">
-      <span className="absolute top-0 bottom-5 w-px bg-foreground/25" style={{ left: `${pct}%` }} />
+      <span className="absolute top-0 bottom-5 w-px border-l border-dashed border-foreground/30" style={{ left: `${pct}%` }} />
+      {/* X 轴上的日期胶囊：准星最有用的部分 —— 竖线指到哪一天，轴上就写哪一天，
+          不用回头去找浮层。用 token（foreground/background 反色），暗色主题下自动成立。 */}
+      <span
+        className="tnum absolute bottom-0 -translate-x-1/2 rounded-md bg-foreground px-1.5 py-0.5 text-[11px] leading-tight font-medium text-background"
+        style={{ left: `${Math.min(Math.max(pct, 5), 95)}%` }}
+      >
+        {dayLabel(rows[index].day_ts)}
+      </span>
       <div
         className="absolute top-1 z-10 min-w-32 rounded-lg border bg-background p-2.5 shadow-lg"
         style={{ left: `${Math.min(Math.max(pct, 12), 88)}%`, transform: "translateX(-50%)" }}
