@@ -35,21 +35,25 @@ type SeriesPoint = {
 ///
 /// **放在模块作用域是必要的**：总览页切走会卸载组件，state 随之丢失，于是每次切回来都重新请求 ——
 /// 这正是维护者报的「反复加载」。缓存按档位存，切回来立刻有数，只有没取过的档位才发请求。
-const seriesCache = new Map<number, SeriesPoint[]>()
+const seriesCache = new Map<string, SeriesPoint[]>()
+
+/// 缓存的键必须**带上分组** —— 否则切换分组会拿到另一组的曲线（"半新半旧"那一类问题）。
+const seriesKey = (days: number, group: string) => `${days}:${group}`
 
 /// 取全队趋势；`days` 变了就取那一档（已取过的档位直接给缓存）。
-function useOverviewSeries(days: number) {
-  const [rows, setRows] = useState<SeriesPoint[] | null>(() => seriesCache.get(days) ?? null)
+function useOverviewSeries(days: number, group: string) {
+  const key = seriesKey(days, group)
+  const [rows, setRows] = useState<SeriesPoint[] | null>(() => seriesCache.get(key) ?? null)
   useEffect(() => {
-    const hit = seriesCache.get(days)
+    const hit = seriesCache.get(key)
     if (hit) {
       setRows(hit)
       return
     }
     let stop = false
-    api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}`)
+    api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}&group=${encodeURIComponent(group)}`)
       .then((d) => {
-        seriesCache.set(days, d.days)
+        seriesCache.set(key, d.days)
         if (!stop) setRows(d.days)
       })
       .catch(() => {
@@ -58,7 +62,7 @@ function useOverviewSeries(days: number) {
     return () => {
       stop = true
     }
-  }, [days])
+  }, [days, group])
   return rows
 }
 
@@ -559,7 +563,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 /// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
 /// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
 /// 颜色），所以暗色主题自动成立。
-export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
+export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh }: {
   nodes: Node[]
   agentLatest: string | null
   hub: string
@@ -568,6 +572,13 @@ export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
 }) {
   // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
   const hubBehind = behind(hub, hubLatest)
+
+  // **在入口处过滤一次**，下游（KPI / 事项 / 版本分布 / 日历）全部自动跟随 ——
+  // 比在每个消费者里各写一次 filter 稳：那种写法迟早漏掉一处，变成"一半按分组、一半不按"。
+  // 趋势另说：它的数是在 hub 侧聚合的，所以还要把分组传给接口（见 useOverviewSeries）。
+  const groups = [...new Set(allNodes.map((n) => n.group).filter(Boolean))].sort()
+  const [group, setGroup] = useState("")
+  const nodes = group ? allNodes.filter((n) => n.group === group) : allNodes
 
   // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
   // 按「已用 ÷ 额度」降序：运维要的就是"谁离上限最近"。
@@ -591,7 +602,7 @@ export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
   const [noticesOpen, setNoticesOpen] = useState(false)
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
-  const series = useOverviewSeries(range)
+  const series = useOverviewSeries(range, group)
   // 自动刷新：**默认关闭**。一块会自己重载的仪表盘会让人意外（正在读的数忽然变了），
   // 而且它会持续产生请求 —— 所以要不要开，交给使用者，并把选择记住。
   const [auto, setAuto] = useState(() => localStorage.getItem("overview-auto") === "1")
@@ -601,7 +612,7 @@ export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
     const tick = () => {
       // 两件事一起做，缺一不可：KPI/事项/日历来自 `nodes`（refresh 触发重取）；
       // 趋势来自按档位缓存的接口 —— 不清缓存的话，曲线会**纹丝不动**，变成"一半新一半旧"。
-      seriesCache.delete(range)
+      seriesCache.delete(seriesKey(range, group))
       refresh()
       setLastAt(Date.now())
     }
@@ -793,6 +804,30 @@ export function Overview({ nodes, agentLatest, hub, hubLatest, refresh }: {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* 分组选择器：**页面级**控件，因为它影响的是一整页（KPI / 事项 / 版本分布 / 日历 / 趋势）。
+          只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <span className="text-muted-foreground">分组</span>
+        <div className="inline-flex flex-wrap gap-1">
+          {[{ v: "", label: "全部" }, ...groups.map((gp) => ({ v: gp, label: gp }))].map((o) => (
+            <button
+              key={o.v || "all"}
+              type="button"
+              onClick={() => setGroup(o.v)}
+              aria-pressed={group === o.v}
+              className={`rounded-full px-2.5 py-1 transition-colors hover:bg-muted ${group === o.v ? "bg-primary/10 font-medium text-primary" : "text-muted-foreground"}`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+        {group && (
+          <span className="text-muted-foreground">
+            只统计 <span className="font-medium">{nodes.length}</span> 台（共 {allNodes.length} 台）
+          </span>
+        )}
       </div>
 
       {/* 自动刷新那一条：细、右对齐，不占卡片。开关本身就是"暂停"—— 再点一下即停。 */}
