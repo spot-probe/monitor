@@ -562,6 +562,19 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]; agentLatest: string | null; hub: string; hubLatest: string }) {
   // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
   const hubBehind = behind(hub, hubLatest)
+
+  // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
+  // 按「已用 ÷ 额度」降序：运维要的就是"谁离上限最近"。
+  // 口径用 `monthUsage()`（面板已有的那个），所以与「近期事项」里的"流量已达额度"
+  // 是**同一把尺**，不会两处各说各的。
+  const quota = nodes
+    .filter((n) => n.traffic_limit > 0)
+    .map((n) => {
+      const used = monthUsage(n)
+      return { node: n, used, pct: used / n.traffic_limit }
+    })
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, 5)
   const [month, setMonth] = useState(() => {
     const d = new Date()
     return { y: d.getFullYear(), m: d.getMonth() }
@@ -888,6 +901,42 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 用量榜：只报**现状**（谁用得最满），不做"还能用几天"这类预测。 */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <CardTitle className="text-sm">用量榜</CardTitle>
+          <span className="text-xs text-muted-foreground">按本月已用额度排序</span>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {quota.length === 0 ? (
+            <p className="text-sm text-muted-foreground">没有节点设置流量额度。</p>
+          ) : (
+            quota.map(({ node: n, used, pct }) => {
+              const over = pct >= 1
+              return (
+                <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <span className="w-40 shrink-0 truncate font-medium">{n.name}</span>
+                  <span className="w-24 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                  {/* 进度条复用版本分布那条的形状与高度 */}
+                  <span className="min-w-24 flex-1 overflow-hidden rounded-full bg-muted">
+                    <span
+                      className={`block h-2.5 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
+                      style={{ width: `${Math.min(100, pct * 100)}%` }}
+                    />
+                  </span>
+                  <span className="tnum shrink-0 text-xs text-muted-foreground">
+                    {bytes(used)} / {bytes(n.traffic_limit)}
+                  </span>
+                  <span className={`tnum w-14 shrink-0 text-right text-xs font-medium ${over ? "text-danger-fg" : ""}`}>
+                    {Math.round(pct * 100)}%
+                  </span>
+                </div>
+              )
+            })
+          )}
+        </CardContent>
+      </Card>
 
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
