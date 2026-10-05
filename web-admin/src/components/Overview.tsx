@@ -839,6 +839,34 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
         </Card>
       </div>
 
+      {/* 某一天的到期明细：**弹窗**而不是在卡内向下展开 —— 展开会把卡片和同行另一张卡一起撑高。 */}
+      <Dialog open={pickedDay !== null} onOpenChange={(v) => !v && setPickedDay(null)}>
+        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              {pickedDay ?? ""} 到期（{(pickedDay && byDay.get(pickedDay)?.length) ?? 0} 台）
+            </DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
+            {(pickedDay ? byDay.get(pickedDay) ?? [] : []).map((n) => (
+              <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 py-3">
+                <span className="font-medium">{n.name}</span>
+                <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                <span className="tnum ml-auto text-xs text-muted-foreground">
+                  {n.price > 0
+                    ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}`
+                    : "未记价格"}
+                </span>
+                <Expiry date={n.expires_at} />
+              </div>
+            ))}
+          </div>
+          <div className="shrink-0 border-t pt-4">
+            <Button variant="ghost" onClick={() => setPickedDay(null)}>关闭</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* 全部事项的弹窗。卡片只显示最急的 2 条，全貌在这里 —— 同行两张卡的高度都固定。 */}
       <Dialog open={noticesOpen} onOpenChange={setNoticesOpen}>
         <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
@@ -910,7 +938,7 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
                 <button
                   key={day}
                   type="button"
-                  onClick={() => setPickedDay(on ? null : day)}
+                  onClick={() => setPickedDay(day)}
                   aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
                   className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
                 >
@@ -931,29 +959,6 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
               )
             })}
           </div>
-
-          {pickedDay && (
-            <div className="rounded-lg bg-muted p-3">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h4 className="text-sm font-medium">{pickedDay} 到期</h4>
-                <button type="button" onClick={() => setPickedDay(null)} className="text-xs text-primary underline underline-offset-2">
-                  收起
-                </button>
-              </div>
-              <div className="mt-2 space-y-1">
-                {(byDay.get(pickedDay) ?? []).map((n) => (
-                  <div key={n.id} className="flex flex-wrap items-baseline gap-x-3 text-sm">
-                    <span className="font-medium">{n.name}</span>
-                    <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                    <span className="tnum ml-auto text-xs text-muted-foreground">
-                      {n.price > 0 ? `${n.currency} ${n.price} / ${n.billing_cycle === "yearly" ? "年" : n.billing_cycle === "quarterly" ? "季" : "月"}` : "未记价格"}
-                    </span>
-                    <Expiry date={n.expires_at} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
         </CardContent>
