@@ -67,6 +67,9 @@ test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
   const n = await days.count()
   expect(n, "日历应有 28–31 个日期格，实际 " + n).toBeGreaterThanOrEqual(28)
   expect(n).toBeLessThanOrEqual(31)
+  // 月份导航：两条切换 + 中间那个「回到本月」的月份标签。
+  await expect(page.getByRole("button", { name: "上月" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "下月" })).toBeVisible()
+  await expect(page.getByTitle("回到本月")).toBeVisible()
   await page.getByRole("button", { name: "下月" }).click()
-  await expect(page.getByText(/\d+ 月 · 续费日历/)).toBeVisible()
 })

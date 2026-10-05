@@ -22,6 +22,12 @@ type SeriesPoint = {
   cpu: number
   mem: number
   disk: number
+  /** 当天**最热的那一台**（逐节点算的），给「均值 + 分布带」用。 */
+  cpu_max: number
+  mem_max: number
+  disk_max: number
+  /** 当天**有数据覆盖的秒数**：平均速率要除以它，不能除以 86400。 */
+  covered: number
 }
 
 /// 按档位缓存已取到的趋势。
@@ -65,7 +71,7 @@ function dayLabel(ts: number) {
 const CHART_W = 640
 /// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
 /// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
-const CHART_BAR_MAX = 24
+const CHART_BAR_MAX = 16
 const CHART_H = 150
 const CHART_PAD = 18
 
@@ -79,6 +85,46 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
     muted: "bg-muted text-muted-foreground",
   }[tone]
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
+}
+
+/// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
+///
+/// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
+/// viewBox 裁掉（`left` 夹在 12%–88% 之间，卡片永远完整）。
+function HoverOverlay({ rows, index, series }: {
+  rows: SeriesPoint[]
+  index: number
+  series: { c: string; t: string; v: string }[]
+}) {
+  const pct = ((index + 0.5) / rows.length) * 100
+  return (
+    <div className="pointer-events-none absolute inset-0">
+      <span className="absolute top-0 bottom-5 w-px border-l border-dashed border-foreground/30" style={{ left: `${pct}%` }} />
+      {/* X 轴上的日期胶囊：准星最有用的部分 —— 竖线指到哪一天，轴上就写哪一天，
+          不用回头去找浮层。用 token（foreground/background 反色），暗色主题下自动成立。 */}
+      <span
+        className="tnum absolute bottom-0 -translate-x-1/2 rounded-md bg-foreground px-1.5 py-0.5 text-[11px] leading-tight font-medium text-background"
+        style={{ left: `${Math.min(Math.max(pct, 5), 95)}%` }}
+      >
+        {dayLabel(rows[index].day_ts)}
+      </span>
+      <div
+        className="absolute top-1 z-10 min-w-32 rounded-lg border bg-background p-2.5 shadow-lg"
+        style={{ left: `${Math.min(Math.max(pct, 12), 88)}%`, transform: "translateX(-50%)" }}
+      >
+        <div className="tnum mb-1.5 text-xs font-medium">{dayLabel(rows[index].day_ts)}</div>
+        <div className="space-y-1">
+          {series.map((s) => (
+            <div key={s.t} className="flex items-center gap-2 whitespace-nowrap text-xs">
+              <span className={`size-2 shrink-0 rounded-full ${s.c}`} />
+              <span className="text-muted-foreground">{s.t}</span>
+              <span className="tnum ml-auto font-medium">{s.v}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /// 三档刻度（0 / 一半 / 满）与左右轴数值。**三张图共用**：
@@ -120,7 +166,7 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 ///
 /// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
 /// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
-function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
+function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const top = Math.max(1, ...rows.map((r) => r.rx + r.tx))
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const cumTop = Math.max(1, ...cum)
@@ -140,15 +186,32 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
         const hi = yOf(r.rx + r.tx, top)
         return (
           <g key={r.day_ts}>
-            <rect x={x} y={mid} width={bar} height={Math.max(0, bottom - mid)} className="fill-primary" />
-            <rect x={x} y={hi} width={bar} height={Math.max(0, mid - hi)} className="fill-primary/45" />
+            {!hidden?.has("入站") && <rect x={x} y={mid} width={bar} height={Math.max(0, bottom - mid)} className="fill-primary" />}
+            {!hidden?.has("出站") && <rect x={x} y={hi} width={bar} height={Math.max(0, mid - hi)} className="fill-primary/45" />}
             {/* 两段是同色系的不同明度，深色主题下交界会糊 —— 用一条 1px 分界线靠结构说清楚，而不是靠色差。 */}
             <line x1={x} y1={mid} x2={x + bar} y2={mid} className="stroke-background" strokeWidth="1" />
           </g>
         )
       })}
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
-        points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      {!hidden?.has("累计") && (
+        <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
+          points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
+      )}
+      {/* 高峰标记：当天总量最大的那根柱子上方标出来 —— 运维第一眼想看的就是它。 */}
+      {(() => {
+        let peak = 0
+        rows.forEach((r, i) => {
+          if (r.rx + r.tx > rows[peak].rx + rows[peak].tx) peak = i
+        })
+        const x = peak * bw + bw / 2
+        const yy = yOf(rows[peak].rx + rows[peak].tx, top) - 6
+        return (
+          <g>
+            <rect x={x - 15} y={yy - 11} width={30} height={13} rx={6} className="fill-primary" />
+            <text x={x} y={yy - 1} fontSize="9" textAnchor="middle" className="fill-primary-foreground">高峰</text>
+          </g>
+        )
+      })()}
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
           <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
@@ -160,48 +223,97 @@ function TrafficChart({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 带宽：当天平均速率（柱）与峰值（线）。同一个量纲，所以共用一根轴 —— 不需要双轴。
-function BandwidthChart({ rows }: { rows: SeriesPoint[] }) {
-  const top = Math.max(1, ...rows.map((r) => Math.max(r.rx_peak, r.tx_peak)))
+/// 带宽：**入站与出站两条日均速率线**（照维护者给的原型）。
+///
+/// 两条线都是**同一个量纲**（字节/秒）：各自都是「当天总字节 ÷ **有数据覆盖的秒数**」。
+/// 之前的柱子画的是当天总字节、线是瞬时峰值，两个量纲画在一根轴上 —— 那才是这张图原来看着别扭的原因。
+/// 颜色用面板自己的 token（入站 ok-fg / 出站 primary），**不写死调色板**，暗色主题才成立。
+function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+  const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
+  const inRate = (r: SeriesPoint) => rate(r.rx, r)
+  const outRate = (r: SeriesPoint) => rate(r.tx, r)
+  const top = Math.max(1, ...rows.map((r) => Math.max(inRate(r), outRate(r))))
   const bw = CHART_W / Math.max(1, rows.length)
-  const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const yOf = (v: number) => CHART_H - CHART_PAD - (v / top) * (CHART_H - CHART_PAD * 2)
+  const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${i * bw + bw / 2},${yOf(f(r))}`).join(" ")
+  const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日带宽峰值与出站速率">
+    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
       <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
+      {!hidden?.has("入站") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />}
+      {/* 出站用**虚线**：两条速率相等时（预览夹具就是）实线会完全重合，看不出是两条。
+          改线型是**画法**上的区分，不动数据 —— 不能把其中一条挪开，那是伪造差异。 */}
+      {!hidden?.has("出站") && (
+        <polyline fill="none" className="stroke-primary" strokeWidth="1.5" strokeDasharray="5 3" points={line(outRate)} />
+      )}
       <ChartAxis rows={rows} />
-      {rows.map((r, i) => (
-        <rect
-          key={r.day_ts}
-          x={i * bw + (bw - bar) / 2}
-          y={yOf(r.tx)}
-          width={bar}
-          height={Math.max(0, CHART_H - CHART_PAD - yOf(r.tx))}
-          className="fill-primary/45"
-        />
-      ))}
-      <polyline
-        fill="none"
-        className="stroke-warn-fg"
-        strokeWidth="1.5"
-        points={rows.map((r, i) => `${i * bw + bw / 2},${yOf(r.rx_peak)}`).join(" ")}
-      />
+      {rows.map((r, i) =>
+        i % step === 0 || i === rows.length - 1 ? (
+          <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+            {dayLabel(r.day_ts)}
+          </text>
+        ) : null,
+      )}
     </svg>
   )
 }
 
-/// 资源：cpu / 内存 / 硬盘 三条线，都是百分比，共用 0–100 的轴。
-function ResourceChart({ rows }: { rows: SeriesPoint[] }) {
-  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(100, Math.max(0, v)) / 100) * (CHART_H - CHART_PAD * 2)
+/// 资源：cpu / 内存 / 硬盘 三条线，都是百分比。
+///
+/// **Y 轴跟着数据走**，不再死锁 0–100%：集群的平均负载通常只有二三成，锁死在 100% 会把实际波动
+/// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
+function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+  // 轴上限要**含分布带的上沿** —— 只看均值的话带会溢出轴（这是 A 与 B 唯一真正的耦合处）。
+  const values = rows.flatMap((r) => [r.cpu, r.mem, r.disk, r.cpu_max, r.mem_max, r.disk_max])
+  const top = Math.max(10, Math.ceil((Math.max(...values) * 1.1) / 10) * 10)
+  const yOf = (v: number) => CHART_H - CHART_PAD - (Math.min(top, Math.max(0, v)) / top) * (CHART_H - CHART_PAD * 2)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
+  // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
+  // 一层带就能把这件事摆出来。带跟着它那条线的图例开关走（关掉 CPU，它的带也一起关）。
+  const band = (avgKey: "cpu" | "mem" | "disk", maxKey: "cpu_max" | "mem_max" | "disk_max") => {
+    const up = rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[maxKey])}`)
+    const down = [...rows].reverse().map((r, i) => `${(rows.length - 1 - i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[avgKey])}`)
+    return [...up, ...down].join(" ")
+  }
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
-      <ChartTicks left={100} format={(v) => `${Math.round(v)}%`} />
+      <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} />
+      {/* 80% 阈值线**有条件地画**：轴上限低于 80 时它根本不在画面里，画了只会让人以为没数据。
+          动态轴之后这条才有意义 —— 它出现的那一刻，正是负载真的接近危险区的时候。 */}
+      {top > 80 && (
+        <g>
+          <line
+            x1={0}
+            y1={yOf(80)}
+            x2={CHART_W}
+            y2={yOf(80)}
+            className="stroke-danger-fg"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+          />
+          <text x={CHART_W - 2} y={yOf(80) - 3} fontSize="9" textAnchor="end" className="fill-danger-fg">80% 阈值</text>
+        </g>
+      )}
       <ChartAxis rows={rows} />
-      <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
-      <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
+      {!hidden?.has("CPU") && (
+        <>
+          <polygon className="fill-primary/15" points={band("cpu", "cpu_max")} />
+          <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />
+        </>
+      )}
+      {!hidden?.has("内存") && (
+        <>
+          <polygon className="fill-warn-fg/15" points={band("mem", "mem_max")} />
+          <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />
+        </>
+      )}
+      {!hidden?.has("硬盘") && (
+        <>
+          <polygon className="fill-ok-fg/15" points={band("disk", "disk_max")} />
+          <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line("disk")} />
+        </>
+      )}
     </svg>
   )
 }
@@ -223,7 +335,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
     tab === "traffic"
       ? [{ c: "bg-primary", t: "入站" }, { c: "bg-primary/45", t: "出站" }, { c: "bg-warn-fg", t: "累计" }]
       : tab === "bandwidth"
-        ? [{ c: "bg-primary/45", t: "出站速率" }, { c: "bg-warn-fg", t: "入站峰值" }]
+        ? [{ c: "bg-ok-fg", t: "入站" }, { c: "bg-primary", t: "出站" }]
         : [{ c: "bg-primary", t: "CPU" }, { c: "bg-warn-fg", t: "内存" }, { c: "bg-ok-fg", t: "硬盘" }]
 
   // 摘要卡：**每个 tab 都有三项**，各是按那个 tab 真正要看的数。都由已取到的序列算出，不额外请求。
@@ -232,18 +344,24 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   // 「最高流量日」要的是**当天总量最大**的那一天，而不是「rx 最大的那天 + tx 最大的那天」——
   // 后者的两个最大值可能不在同一天，加出来的数从未发生过。
   const totals = list.map((r) => r.rx + r.tx)
-  const pick = (key: "rx" | "tx" | "rx_peak" | "tx_peak" | "cpu" | "mem" | "disk") => {
-    if (list.length === 0) return { max: 0, day: "" }
-    let idx = 0
-    list.forEach((r, i) => {
-      if (r[key] > list[idx][key]) idx = i
-    })
-    return { max: list[idx][key], day: dayLabel(list[idx].day_ts) }
-  }
   const totalOf = (key: "rx" | "tx" | "rx_peak" | "tx_peak") => list.map((r) => r[key])
   const trafficTotal = totals
   const busiest = totals.length > 0 ? totals.indexOf(Math.max(...totals)) : -1
-  const txAvg = list.length > 0 ? totalOf("tx").reduce((n, v) => n + v, 0) / list.length : 0
+  // 日均出站 = 区间总字节 ÷ 区间覆盖秒数。**不是**逐日平均后再相加，也不是除以天数 —— 那是错的。
+  const rxSum = totalOf("rx").reduce((n, v) => n + v, 0)
+  const txSum = totalOf("tx").reduce((n, v) => n + v, 0)
+  const coveredSum = list.reduce((n, r) => n + r.covered, 0)
+  // 平均速率 = **区间总字节 ÷ 区间覆盖秒数**（不是逐日平均再相加，也不除以天数）。
+  const rxAvg = coveredSum > 0 ? rxSum / coveredSum : 0
+  const txAvg = coveredSum > 0 ? txSum / coveredSum : 0
+  // 最高日均带宽：逐日算「当天日均（入+出）」，取最大的那天。
+  const dailyRate = list.map((r) => (r.covered > 0 ? (r.rx + r.tx) / r.covered : 0))
+  const busiestIdx = dailyRate.length > 0 ? dailyRate.indexOf(Math.max(...dailyRate)) : -1
+  const busiestSum = busiestIdx >= 0 ? dailyRate[busiestIdx] : 0
+  const busiestSumDay = busiestIdx >= 0 ? dayLabel(list[busiestIdx].day_ts) : ""
+  // 按覆盖秒数加权：覆盖长的日子更能代表这段时间。与带宽的平均速率同一套口径。
+  const weighted = (key: "cpu" | "mem" | "disk") =>
+    coveredSum > 0 ? list.reduce((n, r) => n + r[key] * r.covered, 0) / coveredSum : 0
   const stats =
     tab === "traffic"
       ? [
@@ -253,15 +371,59 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ]
       : tab === "bandwidth"
         ? [
-            { label: "区间峰值", value: `${bytes(pick("rx_peak").max)}/s`, hint: "入站最高速率" },
-            { label: "日均出站", value: `${bytes(txAvg)}/s`, hint: "按有数据的逻辑日" },
-            { label: "出站峰值日", value: `${bytes(pick("tx_peak").max)}/s`, hint: pick("tx_peak").day },
+            { label: "平均入站", value: `${bytes(rxAvg)}/s`, hint: "节点日均速率汇总" },
+            { label: "平均出站", value: `${bytes(txAvg)}/s`, hint: "节点日均速率汇总" },
+            // 「最高日均带宽」= **当天日均（入+出）最高**的那一天。注意它不是「峰值速率」——
+            // 峰值是小时级的瞬时值，这里要的是日平均的量级，两者别混。
+            { label: "最高日均带宽", value: `${bytes(busiestSum)}/s`, hint: busiestSumDay },
           ]
         : [
-            { label: "CPU 峰值", value: `${pick("cpu").max.toFixed(1)}%`, hint: pick("cpu").day },
-            { label: "内存峰值", value: `${pick("mem").max.toFixed(1)}%`, hint: pick("mem").day },
-            { label: "硬盘峰值", value: `${pick("disk").max.toFixed(1)}%`, hint: pick("disk").day },
+            // 集群大盘要看的是**水位**（平均），不是某一天的尖峰 —— 尖峰由「均值 + 分布带」
+            // 在图上表达（方案 B，需要端点新增字段，下一步做）。
+            // 权重用 covered：覆盖时间长的日子更有代表性，与带宽那边的口径一致。
+            { label: "平均 CPU", value: `${weighted("cpu").toFixed(1)}%`, hint: `近 ${range} 天` },
+            { label: "平均内存", value: `${weighted("mem").toFixed(1)}%`, hint: `近 ${range} 天` },
+            { label: "平均硬盘", value: `${weighted("disk").toFixed(1)}%`, hint: `近 ${range} 天` },
           ]
+
+  // 悬停索引。放在趋势卡这一层，三张图共用同一套交互 —— 三张图本身不用改。
+  const [hover, setHover] = useState<number | null>(null)
+  // 图例开关：点一下隐藏/恢复某条序列。不能靠「挪开一条线」来区分重合的序列 —— 那是伪造数据。
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const toggle = (t: string) =>
+    setHidden((prev) => {
+      const next = new Set(prev)
+      if (next.has(t)) next.delete(t)
+      else next.add(t)
+      return next
+    })
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!rows || rows.length === 0) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const x = ((e.clientX - r.left) / r.width) * CHART_W
+    setHover(Math.max(0, Math.min(rows.length - 1, Math.floor(x / (CHART_W / rows.length)))))
+  }
+  // 浮层里要显示的序列：按 tab 取，和图上画的是同一批数（累计在这里现算）。
+  const cumAt = (i: number) => (rows ?? []).slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0)
+  const hoverSeries = (i: number) =>
+    !rows
+      ? []
+      : tab === "traffic"
+        ? [
+            { c: "bg-primary", t: "入站", v: bytes(rows[i].rx) },
+            { c: "bg-primary/45", t: "出站", v: bytes(rows[i].tx) },
+            { c: "bg-warn-fg", t: "累计", v: bytes(cumAt(i)) },
+          ]
+        : tab === "bandwidth"
+          ? [
+              { c: "bg-ok-fg", t: "入站", v: `${bytes(rows[i].covered > 0 ? rows[i].rx / rows[i].covered : 0)}/s` },
+              { c: "bg-primary", t: "出站", v: `${bytes(rows[i].covered > 0 ? rows[i].tx / rows[i].covered : 0)}/s` },
+            ]
+          : [
+              { c: "bg-primary", t: "CPU", v: `${rows[i].cpu.toFixed(1)}% · 最热 ${rows[i].cpu_max.toFixed(1)}%` },
+              { c: "bg-warn-fg", t: "内存", v: `${rows[i].mem.toFixed(1)}% · 最热 ${rows[i].mem_max.toFixed(1)}%` },
+              { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%` },
+            ]
 
   const pill = (on: boolean) =>
     `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
@@ -310,24 +472,40 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             ))}
           </div>
         )}
-        <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted-foreground">
-          {legend.map((l) => (
-            <span key={l.t} className="flex items-center gap-1.5">
-              <span className={`size-2 rounded-full ${l.c}`} />
-              {l.t}
-            </span>
-          ))}
+        <div className="flex flex-wrap items-center justify-end gap-1 text-xs text-muted-foreground">
+          {/* 图例可点：这是图表该有的能力，也是两条序列重不重合时唯一能自己分辨的办法。 */}
+          {legend.map((l) => {
+            const off = hidden.has(l.t)
+            return (
+              <button
+                key={l.t}
+                type="button"
+                onClick={() => toggle(l.t)}
+                aria-pressed={!off}
+                title={off ? `显示${l.t}` : `隐藏${l.t}`}
+                className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 transition-colors hover:bg-muted ${off ? "opacity-40" : ""}`}
+              >
+                <span className={`size-2 rounded-full ${l.c}`} />
+                <span className={off ? "line-through" : ""}>{l.t}</span>
+              </button>
+            )
+          })}
         </div>
         {!rows || rows.length === 0 ? (
           <p className="py-10 text-center text-xs text-muted-foreground">
             {rows ? "这段时间还没有指标数据。" : "正在读取…"}
           </p>
-        ) : tab === "traffic" ? (
-          <TrafficChart rows={rows} />
-        ) : tab === "bandwidth" ? (
-          <BandwidthChart rows={rows} />
         ) : (
-          <ResourceChart rows={rows} />
+          <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+            {tab === "traffic" ? (
+              <TrafficChart rows={rows} hidden={hidden} />
+            ) : tab === "bandwidth" ? (
+              <BandwidthChart rows={rows} hidden={hidden} />
+            ) : (
+              <ResourceChart rows={rows} hidden={hidden} />
+            )}
+            {hover !== null && <HoverOverlay rows={rows} index={hover} series={hoverSeries(hover)} />}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -576,32 +754,38 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       	<TrendCard rows={series} tab={tab} setTab={setTab} range={range} setRange={setRange} />
       <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">
-            {month.m + 1} 月 · 续费日历
-          </CardTitle>
-          <CardAction>
-            <div className="flex items-center gap-1">
-              <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  const d = new Date()
-                  setMonth({ y: d.getFullYear(), m: d.getMonth() })
-                  setPickedDay(null)
-                }}
-              >
-                本月
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
-            </div>
-          </CardAction>
+        {/* 标题与导航放在**同一个 flex 行**里。
+            不用 `CardAction` 了：dump 出来才看清 —— `CardHeader` 是 grid，标题占第一行（20px），
+            而 `CardAction` 是 `row-span-2` + `self-center`，它的中心落在「两行加起来」的区域上，
+            于是两者中心天然差 6px。我先后改过 `CardHeader` 的 `items-center` 与 `CardAction` 的
+            `self-center`，**都压不过它**（计算结果仍是 align-items: flex-start）。
+            一行 flex + items-center 是确定的解法，不再跟原语较劲。 */}
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <CardTitle className="text-sm">续费日历</CardTitle>
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="h-5 w-px bg-border" />
+            <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
+            <button
+              type="button"
+              onClick={() => {
+                const d = new Date()
+                setMonth({ y: d.getFullYear(), m: d.getMonth() })
+                setPickedDay(null)
+              }}
+              className="tnum min-w-24 text-center text-base font-semibold hover:text-primary"
+              title="回到本月"
+            >
+              {month.y} 年 {month.m + 1} 月
+            </button>
+            <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {/* 保留框线（维护者要求）。同事那一轮建议去掉，但这是维护者的取舍 —— 日历的框线帮助
+              逐格定位，尤其在有到期副标的日子里。 */}
           <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
             {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-              <div key={w} className="bg-muted py-1.5 font-medium text-muted-foreground">{w}</div>
+              <div key={w} className="bg-background py-1.5 font-medium text-muted-foreground">{w}</div>
             ))}
             {cells.map((day, i) => {
               if (!day) return <div key={`lead-${i}`} className="bg-background" />
@@ -614,9 +798,14 @@ export function Overview({ nodes, agentLatest }: { nodes: Node[]; agentLatest: s
                   type="button"
                   onClick={() => setPickedDay(on ? null : day)}
                   aria-label={`${day}${list.length ? `：${list.length} 台到期` : ""}`}
-                  className={`flex min-h-[52px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
+                  className={`flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors hover:bg-muted ${on ? "ring-2 ring-inset ring-primary" : ""}`}
                 >
-                  <span className={`tnum text-xs ${day === todayKey ? "rounded bg-primary px-1 font-medium text-primary-foreground" : "text-muted-foreground"}`}>
+                  {/* 今天用**浅底圆角**而不是实心方块：后者像打卡签到，且会把日期压得很小。 */}
+                  <span
+                    className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
+                      day === todayKey ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40" : "text-muted-foreground"
+                    }`}
+                  >
                     {Number(day.slice(8))}
                   </span>
                   {list.length > 0 && (
