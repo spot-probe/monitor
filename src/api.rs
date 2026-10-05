@@ -1554,7 +1554,9 @@ pub async fn overview_series(
     Query(q): Query<SeriesQuery>,
 ) -> Json<Value> {
     let days = q.days.unwrap_or(30).clamp(1, 90);
-    let rows = app.db.overview_daily(days);
+    // 空串归一成 None：前端用空值表示"全部节点"，不该被当成"名字为空的分组"。
+    let group = q.group.as_deref().filter(|g| !g.is_empty());
+    let rows = app.db.overview_daily(days, group);
     Json(json!({
         "days": rows
             .iter()
@@ -1585,6 +1587,32 @@ pub async fn overview_series(
 #[derive(Deserialize)]
 pub struct SeriesQuery {
     days: Option<i64>,
+    /// 只看某个分组（机房/客户）；不传即全部节点。
+    group: Option<String>,
+}
+
+/// 「需要处理的节点」：三条榜一次返回（延迟最差 / 丢包最多 / 离线最久）。
+#[derive(Deserialize)]
+pub struct AtRiskQuery {
+    days: Option<i64>,
+    limit: Option<i64>,
+}
+
+pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Json<Value> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+    let (latency, loss, down) = app.db.at_risk(days, limit);
+    let rows = |v: Vec<(String, String, f64, i64)>| {
+        v.into_iter()
+            .map(|(task, node, value, samples)| json!({ "task": task, "node": node, "value": value, "samples": samples }))
+            .collect::<Vec<_>>()
+    };
+    Json(json!({
+        "days": days,
+        "latency": rows(latency),
+        "loss": rows(loss),
+        "down": down.into_iter().map(|(node, last_seen)| json!({ "node": node, "last_seen": last_seen })).collect::<Vec<_>>(),
+    }))
 }
 
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {

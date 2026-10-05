@@ -3983,7 +3983,7 @@ export function Admin({
     <div className="min-w-0">
         {path === "/admin/overview" ? (
           <Suspense fallback={<PageSkeleton shape="list" rows={4} />}>
-            <Overview nodes={nodes} agentLatest={agentLatest} hub={versions?.hub ?? ""} hubLatest={versions?.hub_latest ?? ""} />
+            <Overview nodes={nodes} agentLatest={agentLatest} hub={versions?.hub ?? ""} hubLatest={versions?.hub_latest ?? ""}  refresh={refresh} />
           </Suspense>
         ) : path === "/admin/ping" ? (
           <Ping nodes={nodes} />

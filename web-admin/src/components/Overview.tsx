@@ -35,21 +35,25 @@ type SeriesPoint = {
 ///
 /// **放在模块作用域是必要的**：总览页切走会卸载组件，state 随之丢失，于是每次切回来都重新请求 ——
 /// 这正是维护者报的「反复加载」。缓存按档位存，切回来立刻有数，只有没取过的档位才发请求。
-const seriesCache = new Map<number, SeriesPoint[]>()
+const seriesCache = new Map<string, SeriesPoint[]>()
+
+/// 缓存的键必须**带上分组** —— 否则切换分组会拿到另一组的曲线（"半新半旧"那一类问题）。
+const seriesKey = (days: number, group: string) => `${days}:${group}`
 
 /// 取全队趋势；`days` 变了就取那一档（已取过的档位直接给缓存）。
-function useOverviewSeries(days: number) {
-  const [rows, setRows] = useState<SeriesPoint[] | null>(() => seriesCache.get(days) ?? null)
+function useOverviewSeries(days: number, group: string) {
+  const key = seriesKey(days, group)
+  const [rows, setRows] = useState<SeriesPoint[] | null>(() => seriesCache.get(key) ?? null)
   useEffect(() => {
-    const hit = seriesCache.get(days)
+    const hit = seriesCache.get(key)
     if (hit) {
       setRows(hit)
       return
     }
     let stop = false
-    api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}`)
+    api<{ days: SeriesPoint[] }>(`/overview/series?days=${days}&group=${encodeURIComponent(group)}`)
       .then((d) => {
-        seriesCache.set(days, d.days)
+        seriesCache.set(key, d.days)
         if (!stop) setRows(d.days)
       })
       .catch(() => {
@@ -58,7 +62,7 @@ function useOverviewSeries(days: number) {
     return () => {
       stop = true
     }
-  }, [days])
+  }, [days, group])
   return rows
 }
 
@@ -103,6 +107,13 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
   }[tone]
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
 }
+
+/// 「多选一」控件的**唯一**样子：灰底轨道 + 选中项实心。
+/// 这类控件本来散在各处、各写一遍，就会慢慢长出第二种样子 —— 所以提到模块级，共用。
+/// （**开关**不在此列：那是"开/关"，不是"多选一"，硬塞进轨道才是错的。）
+const TRACK = "flex items-center rounded-full bg-muted p-0.5"
+const pill = (on: boolean) =>
+  `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
 
 /// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
 ///
@@ -456,9 +467,6 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
               { c: "bg-ok-fg", t: "硬盘", v: `${rows[i].disk.toFixed(1)}% · 最热 ${rows[i].disk_max.toFixed(1)}%`, raw: rows[i].disk },
             ]
 
-  const pill = (on: boolean) =>
-    `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
-
   return (
     <Card>
       <CardHeader>
@@ -559,9 +567,35 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 /// 结构统一用面板自己的复合并发件（`Card` + `CardHeader`/`CardTitle`/`CardAction`/`CardContent`），
 /// 而不是手写 div —— 同一套槽位才有同一套内边距与标题排版。颜色全部走 token（没有一处写死的调色板
 /// 颜色），所以暗色主题自动成立。
-export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]; agentLatest: string | null; hub: string; hubLatest: string }) {
+export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh }: {
+  nodes: Node[]
+  agentLatest: string | null
+  hub: string
+  hubLatest: string
+  refresh: () => void
+}) {
   // hub 自身待升级：与第 3 张「agent 待升级」成对。判据复用更新页那一套 `behind()`。
   const hubBehind = behind(hub, hubLatest)
+
+  // **在入口处过滤一次**，下游（KPI / 事项 / 版本分布 / 日历）全部自动跟随 ——
+  // 比在每个消费者里各写一次 filter 稳：那种写法迟早漏掉一处，变成"一半按分组、一半不按"。
+  // 趋势另说：它的数是在 hub 侧聚合的，所以还要把分组传给接口（见 useOverviewSeries）。
+  const groups = [...new Set(allNodes.map((n) => n.group).filter(Boolean))].sort()
+  const [group, setGroup] = useState("")
+  const nodes = group ? allNodes.filter((n) => n.group === group) : allNodes
+
+  // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
+  // 按「已用 ÷ 额度」降序：运维要的就是"谁离上限最近"。
+  // 口径用 `monthUsage()`（面板已有的那个），所以与「近期事项」里的"流量已达额度"
+  // 是**同一把尺**，不会两处各说各的。
+  const quota = nodes
+    .filter((n) => n.traffic_limit > 0)
+    .map((n) => {
+      const used = monthUsage(n)
+      return { node: n, used, pct: used / n.traffic_limit }
+    })
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, 5)
   const [month, setMonth] = useState(() => {
     const d = new Date()
     return { y: d.getFullYear(), m: d.getMonth() }
@@ -572,7 +606,41 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
   const [noticesOpen, setNoticesOpen] = useState(false)
   const [tab, setTab] = useState<"traffic" | "bandwidth" | "resource">("traffic")
   const [range, setRange] = useState(30)
-  const series = useOverviewSeries(range)
+  const series = useOverviewSeries(range, group)
+
+  // 「需要处理的节点」：三条榜由 hub 一次算好（延迟/丢包要在 SQL 里按 `answered` 加权，
+  // 前端拿不到那种聚合），所以只取一次、切换榜不再发请求。
+  type RiskRow = { task: string; node: string; value: number; samples: number }
+  type Risk = { latency: RiskRow[]; loss: RiskRow[]; down: { node: string; last_seen: number }[] }
+  const [risk, setRisk] = useState<Risk | null>(null)
+  const [riskTab, setRiskTab] = useState<"latency" | "loss" | "down">("latency")
+  useEffect(() => {
+    let stop = false
+    api<Risk>("/nodes/at-risk?days=7&limit=5")
+      .then((d) => { if (!stop) setRisk(d) })
+      .catch(() => { if (!stop) setRisk(null) })
+    return () => { stop = true }
+  }, [])
+  // 秒 → 「3 天 2 小时」；只在"离线"那一栏用，口径写在一处。
+  const span = (sec: number) =>
+    sec >= 86400 ? `${Math.floor(sec / 86400)} 天 ${Math.floor((sec % 86400) / 3600)} 小时` : `${Math.max(1, Math.floor(sec / 3600))} 小时`
+  // 自动刷新：**默认关闭**。一块会自己重载的仪表盘会让人意外（正在读的数忽然变了），
+  // 而且它会持续产生请求 —— 所以要不要开，交给使用者，并把选择记住。
+  const [auto, setAuto] = useState(() => localStorage.getItem("overview-auto") === "1")
+  const [lastAt, setLastAt] = useState<number | null>(null)
+  useEffect(() => {
+    if (!auto) return
+    const tick = () => {
+      // 两件事一起做，缺一不可：KPI/事项/日历来自 `nodes`（refresh 触发重取）；
+      // 趋势来自按档位缓存的接口 —— 不清缓存的话，曲线会**纹丝不动**，变成"一半新一半旧"。
+      seriesCache.delete(seriesKey(range, group))
+      refresh()
+      setLastAt(Date.now())
+    }
+    tick()
+    const id = setInterval(tick, 30_000)
+    return () => clearInterval(id)
+  }, [auto, range, refresh])
 
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
@@ -759,6 +827,46 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
         </Card>
       </div>
 
+      {/* 分组与自动刷新**同一行**：左边是"看什么"（页面级控件，影响一整页），右边是"多久看一次"。
+          分成两行会让右边那个孤零零占一行，左边却挤在一起 —— 看着像排版错位。 */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      {/* 分组选择器：**页面级**控件，因为它影响的是一整页（KPI / 事项 / 版本分布 / 日历 / 趋势）。
+          只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <span className="text-muted-foreground">分组</span>
+        <div className={`${TRACK} flex-wrap`}>
+          {[{ v: "", label: "全部" }, ...groups.map((gp) => ({ v: gp, label: gp }))].map((o) => (
+            <button key={o.v || "all"} type="button" onClick={() => setGroup(o.v)} aria-pressed={group === o.v} className={pill(group === o.v)}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+        {group && (
+          <span className="text-muted-foreground">
+            只统计 <span className="font-medium">{nodes.length}</span> 台（共 {allNodes.length} 台）
+          </span>
+        )}
+      </div>
+
+      {/* 自动刷新那一条：细、右对齐，不占卡片。开关本身就是"暂停"—— 再点一下即停。 */}
+      <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <button
+          type="button"
+          onClick={() => {
+            const next = !auto
+            setAuto(next)
+            localStorage.setItem("overview-auto", next ? "1" : "0")
+          }}
+          aria-pressed={auto}
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-colors hover:bg-muted ${auto ? "bg-primary/10 font-medium text-primary" : ""}`}
+        >
+          ⟳ 自动刷新{auto ? "（30 秒）" : ""}
+        </button>
+        {auto && lastAt && <span className="tnum">最后更新 {new Date(lastAt).toLocaleTimeString()}</span>}
+      </div>
+
+      </div>
+
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
@@ -888,6 +996,107 @@ export function Overview({ nodes, agentLatest, hub, hubLatest }: { nodes: Node[]
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 「需要处理的节点」与「用量榜」并排：两张都是五行的榜，高度天然相近，
+          用同行的 items-stretch 对齐（与上面「近期事项 | Agent 版本分布」一致）。 */}
+      <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
+            <CardTitle className="text-sm">需要处理的节点</CardTitle>
+            <div className={TRACK}>
+              {([["latency", "延迟最差"], ["loss", "丢包最多"], ["down", "离线最久"]] as const).map(([k, label]) => (
+                <button key={k} type="button" onClick={() => setRiskTab(k)} aria-pressed={riskTab === k} className={pill(riskTab === k)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-1.5">
+            {risk === null ? (
+              <p className="text-sm text-muted-foreground">取不到数据。</p>
+            ) : riskTab === "down" ? (
+              (() => {
+                // hub 给的是「`last_seen` 最旧且非 0」的几台；**在不在线仍以面板已有的 `online`
+                // 标志为准**（阈值只该有一处）。按名字对上 —— 这一列的名字在界面上是唯一的。
+                const offline = risk.down.filter((d) => nodes.some((n) => n.name === d.node && !n.online))
+                const nowSec = Math.floor(Date.now() / 1000)
+                return offline.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">没有离线的节点。</p>
+                ) : (
+                  offline.map((d, idx) => (
+                    <div key={d.node} className="flex items-center gap-3 py-0.5 text-sm">
+                      <span className="min-w-0 flex-1 truncate font-medium">{d.node}</span>
+                      <span className={`tnum w-40 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                        已离线 {span(nowSec - d.last_seen)}
+                      </span>
+                    </div>
+                  ))
+                )
+              })()
+            ) : (
+              (() => {
+                const rows = riskTab === "latency" ? risk.latency : risk.loss
+                return rows.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {riskTab === "latency" ? "近 7 天没有探测数据。" : "近 7 天没有丢包。"}
+                  </p>
+                ) : (
+                  rows.map((r, idx) => (
+                    // 定宽 + 不换行：数字列各自对齐，行高一致。**最差那行同时用加粗与语义色**
+                    // 两种信号（颜色不单独承担含义）。
+                    <div key={`${r.task}-${r.node}`} className="flex items-center gap-3 py-0.5 text-sm">
+                      <span className="min-w-0 flex-1 truncate font-medium">{r.node}</span>
+                      <span className="w-16 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
+                      <span className={`tnum w-24 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                        {riskTab === "latency" ? `平均 ${Math.round(r.value)} ms` : `丢包 ${(r.value * 100).toFixed(1)}%`}
+                      </span>
+                      <span className="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">{r.samples} 次</span>
+                    </div>
+                  ))
+                )
+              })()
+            )}
+          </CardContent>
+        </Card>
+
+      {/* 用量榜：只报**现状**（谁用得最满），不做"还能用几天"这类预测。 */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <CardTitle className="text-sm">用量榜</CardTitle>
+          <span className="text-xs text-muted-foreground">按本月已用额度排序</span>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          {quota.length === 0 ? (
+            <p className="text-sm text-muted-foreground">没有节点设置流量额度。</p>
+          ) : (
+            quota.map(({ node: n, used, pct }) => {
+              const over = pct >= 1
+              return (
+                // 定宽 + 不换行：百分比在最后、右对齐，永远与数字列同一行（原来会被挤到第二行）。
+                <div key={n.id} className="flex items-center gap-3 py-0.5 text-sm">
+                  <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
+                  <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                  {/* 进度条复用版本分布那条的形状与高度 */}
+                  <span className="w-24 shrink-0 overflow-hidden rounded-full bg-muted">
+                    <span
+                      className={`block h-2.5 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
+                      style={{ width: `${Math.min(100, pct * 100)}%` }}
+                    />
+                  </span>
+                  <span className="tnum w-32 shrink-0 text-right text-xs text-muted-foreground">
+                    {bytes(used)} / {bytes(n.traffic_limit)}
+                  </span>
+                  <span className={`tnum w-12 shrink-0 text-right text-xs ${over ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                    {Math.round(pct * 100)}%
+                  </span>
+                </div>
+              )
+            })
+          )}
+        </CardContent>
+      </Card>
+
+      </div>
 
       {/* 左图右历：照维护者给的参考，趋势在左、日历在右，同一行；窄屏自动上下堆叠。 */}
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">

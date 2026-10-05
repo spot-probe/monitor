@@ -976,6 +976,12 @@ impl Tally {
     }
 }
 
+/// 「需要处理的节点」一条榜的行：探测名 · 节点名 · 数值 · 样本数。
+pub type AtRiskRow = (String, String, f64, i64);
+
+/// 三条榜：延迟最差 · 丢包最多 · 离线最久（后者是 `(节点名, last_seen)`）。
+pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -1346,7 +1352,7 @@ impl Db {
     /// **最后一个值是「有数据覆盖的秒数」**：平均速率要除以它，不能除以 86400，否则没有样本的小时
     /// 会以 0 参与平均，把均值压低 —— 那是错的。
     /// 分组用的是 **UTC 日**；面板负责按本地时区显示日期（跨日边界会有小时级的偏移，这一点在那边的注释里写）。
-    pub fn overview_daily(&self, days: i64) -> Vec<[f64; 12]> {
+    pub fn overview_daily(&self, days: i64, group: Option<&str>) -> Vec<[f64; 12]> {
         let since = Utc::now().timestamp() - days * 86_400;
         let conn = self.conn();
         let mut stmt = conn
@@ -1368,7 +1374,7 @@ impl Db {
                             SUM(m.net_rx) OVER (PARTITION BY m.ts) AS fleet_rx,
                             SUM(m.net_tx) OVER (PARTITION BY m.ts) AS fleet_tx
                        FROM metric_hour m JOIN node n ON n.id = m.node_id
-                      WHERE m.ts >= ?1
+                      WHERE m.ts >= ?1 AND (?2 IS NULL OR n.[group] = ?2)
                  ),
                  -- 按天给每个节点-小时排名，用来取 **P95**（而不是简单的 MAX）。MAX 会被偶发的一小时
                  -- 毛刺顶起来，P95 描述的是「最热的那一小撮机器」——更能代表集群里真实的紧绷程度。
@@ -1405,7 +1411,7 @@ impl Db {
             )
             .unwrap();
         let rows = stmt
-            .query_map([since], |r| {
+            .query_map(rusqlite::params![since, group], |r| {
                 Ok([
                     r.get::<_, i64>(0)? as f64,
                     r.get::<_, i64>(1)? as f64,
@@ -1423,6 +1429,78 @@ impl Db {
             })
             .unwrap();
         rows.filter_map(|r| r.ok()).collect()
+    }
+
+    /// 「需要处理的节点」三条榜。**一次算完**，卡片切榜时不必再发请求。
+    ///
+    /// - 延迟：`ping_hour.latency` 是**逐小时的中位**，所以这里按 `answered` 加权求平均 ——
+    ///   那是**均值**，不是中位。**标签就写「平均」**，不冒充 p50。
+    /// - 丢包：`Σlost / Σ(answered+lost)`，就是这段时间的丢包率。
+    /// - 离线：只按 `last_seen` 从旧到新取（且 `last_seen > 0`，排除"从未上报"）。
+    ///   **在线与否的判定不在这里重写** —— 面板已经有 `online` 标志，阈值只该有一处。
+    pub fn at_risk(&self, days: i64, limit: i64) -> AtRisk {
+        let conn = self.conn();
+        let since = Utc::now().timestamp() - days * 86_400;
+        let latency = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.name, n.name,
+                            SUM(h.latency * h.answered) * 1.0 / NULLIF(SUM(h.answered), 0),
+                            SUM(h.answered)
+                       FROM ping_hour h
+                       JOIN ping_task t ON t.id = h.task_id
+                       JOIN node n ON n.id = h.node_id
+                      WHERE h.ts >= ?1 AND h.answered > 0
+                      GROUP BY h.task_id, h.node_id
+                      ORDER BY 3 DESC
+                      LIMIT ?2",
+                )
+                .unwrap();
+            stmt.query_map(params![since, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<AtRiskRow>>()
+        };
+        let loss = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.name, n.name,
+                            SUM(h.lost) * 1.0 / NULLIF(SUM(h.answered + h.lost), 0),
+                            SUM(h.answered + h.lost)
+                       FROM ping_hour h
+                       JOIN ping_task t ON t.id = h.task_id
+                       JOIN node n ON n.id = h.node_id
+                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0
+                      GROUP BY h.task_id, h.node_id
+                      HAVING SUM(h.lost) > 0
+                      ORDER BY 3 DESC
+                      LIMIT ?2",
+                )
+                .unwrap();
+            stmt.query_map(params![since, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<AtRiskRow>>()
+        };
+        let down = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT name, last_seen FROM node
+                      WHERE last_seen > 0
+                      ORDER BY last_seen ASC
+                      LIMIT ?1",
+                )
+                .unwrap();
+            stmt.query_map(params![limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>()
+        };
+        (latency, loss, down)
     }
 
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
@@ -4827,7 +4905,7 @@ mod tests {
                 .unwrap();
             ids.push(n);
         }
-        let rows = db.overview_daily(1);
+        let rows = db.overview_daily(1, None);
         assert_eq!(rows.len(), 1, "只插了一个小时，应当只有一天");
         let r = rows[0];
         // 带宽：求和（100+200+300），再乘 60 分钟 × 60 秒
@@ -4848,6 +4926,99 @@ mod tests {
         assert!(r[11] >= r[7], "最热硬盘 {} 不该低于平均 {}", r[11], r[7]);
         assert_eq!(r[10], 50.0, "三台里内存占用率最高的是 a：1000/2000 = 50%");
         let _ = ids;
+    }
+
+    /// 「需要处理的节点」：最差的排第一；**没丢包的探测不该出现在丢包榜**；离线榜排除从未上报。
+    #[test]
+    fn at_risk_ranks_worst_first() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let hour = (now / 3600) * 3600;
+        let mut ids = Vec::new();
+        for name in ["slow", "fast", "never"] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            // create_node 不写 last_seen，直接落库；never 保持 0（= 从未上报）
+            if name != "never" {
+                db.conn()
+                    .execute("UPDATE node SET last_seen=?1 WHERE id=?2", params![now - 3600, n])
+                    .unwrap();
+            }
+            ids.push(n);
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (1,'t','x',60,0,'icmp')",
+                [],
+            )
+            .unwrap();
+        for n in &ids {
+            db.conn().execute("INSERT INTO ping_node (task_id,node_id) VALUES (1,?1)", params![n]).unwrap();
+        }
+        // slow：慢且丢包；fast：快且不丢；never：也报一次但很快
+        for (n, lat, answered, lost) in
+            [(ids[0], 300.0, 90_i64, 10_i64), (ids[1], 20.0, 100, 0), (ids[2], 10.0, 100, 0)]
+        {
+            db.conn()
+                .execute(
+                    "INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi) VALUES (?1,1,?2,?3,?4,?5,?5,?5)",
+                    params![n, hour, answered, lost, lat],
+                )
+                .unwrap();
+        }
+        let (latency, loss, down) = db.at_risk(7, 5);
+        assert_eq!(latency.len(), 3, "延迟榜应有 3 行");
+        assert_eq!(latency[0].1, "slow", "最慢的必须排第一，实际 {:?}", latency[0]);
+        assert!((latency[0].2 - 300.0).abs() < 1.0, "加权均值 {}", latency[0].2);
+        assert_eq!(loss.len(), 1, "**只有丢过包的**才该进丢包榜");
+        assert_eq!(loss[0].1, "slow");
+        assert!((loss[0].2 - 0.1).abs() < 0.001, "丢包率 {}", loss[0].2);
+        // 离线榜：never（last_seen=0）不该出现
+        assert_eq!(down.len(), 2, "从来未上报的不是离线，应排除");
+        assert!(down.iter().all(|(name, _)| name != "never"), "实际 {:?}", down);
+    }
+
+    /// 分组筛选：取某一组时只算那一组；**各组合计必须等于全部**（分组最容易错的地方）。
+    #[test]
+    fn overview_daily_filters_by_group() {
+        let db = Db::open(":memory:").unwrap();
+        let ts = (Utc::now().timestamp() / 3600) * 3600;
+        for (name, group, cpu) in [("a1", "east", 10.0), ("a2", "east", 20.0), ("b1", "west", 40.0)] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            // `create_node` 不写 `group`（与它不写 `mem_total` 是同一件事）→ 直接落库；
+            // `group` 是 SQL 关键字，列名必须加引号。
+            db.conn()
+                .execute("UPDATE node SET \"group\" = ?1 WHERE id = ?2", rusqlite::params![group, n])
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                              net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                     VALUES (?1, ?2, 60, ?3, 0, 0, 0, 100, 100, NULL, 100, 100)",
+                    rusqlite::params![n, ts, cpu],
+                )
+                .unwrap();
+        }
+        let all = db.overview_daily(1, None);
+        let east = db.overview_daily(1, Some("east"));
+        let west = db.overview_daily(1, Some("west"));
+        assert!((all[0][5] - 23.333).abs() < 0.01, "全部的平均 {}", all[0][5]);
+        assert!((east[0][5] - 15.0).abs() < 0.01, "east 的平均 {}", east[0][5]);
+        assert!((west[0][5] - 40.0).abs() < 0.01, "west 的平均 {}", west[0][5]);
+        assert_eq!(all[0][1], 300.0 * 3600.0);
+        assert_eq!(east[0][1], 200.0 * 3600.0);
+        assert_eq!(west[0][1], 100.0 * 3600.0);
+        assert_eq!(east[0][1] + west[0][1], all[0][1], "各组合计必须等于全部");
+        assert!(db.overview_daily(1, Some("nowhere")).is_empty(), "不存在的分组应是空结果而不是报错");
     }
 
     /// **证明它是 P95 而不是 MAX**：20 台节点，其中一台 cpu 99（离群），其余 19 台都是 10。
@@ -4876,7 +5047,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let rows = db.overview_daily(1);
+        let rows = db.overview_daily(1, None);
         let r = rows[0];
         // 20 行里排名前 5% 是第 19、20 名（rn >= 19）→ 包含离群的 99。
         assert_eq!(r[9], 99.0, "rn>=19 时应当包含第 19 名，这里就是那台离群的");
