@@ -259,6 +259,22 @@ function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<str
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
       <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} />
+      {/* 80% 阈值线**有条件地画**：轴上限低于 80 时它根本不在画面里，画了只会让人以为没数据。
+          动态轴之后这条才有意义 —— 它出现的那一刻，正是负载真的接近危险区的时候。 */}
+      {top > 80 && (
+        <g>
+          <line
+            x1={0}
+            y1={yOf(80)}
+            x2={CHART_W}
+            y2={yOf(80)}
+            className="stroke-danger-fg"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+          />
+          <text x={CHART_W - 2} y={yOf(80) - 3} fontSize="9" textAnchor="end" className="fill-danger-fg">80% 阈值</text>
+        </g>
+      )}
       <ChartAxis rows={rows} />
       {!hidden?.has("CPU") && <polyline fill="none" className="stroke-primary" strokeWidth="1.5" points={line("cpu")} />}
       {!hidden?.has("内存") && <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5" points={line("mem")} />}
