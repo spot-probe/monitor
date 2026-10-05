@@ -1591,6 +1591,30 @@ pub struct SeriesQuery {
     group: Option<String>,
 }
 
+/// 「需要处理的节点」：三条榜一次返回（延迟最差 / 丢包最多 / 离线最久）。
+#[derive(Deserialize)]
+pub struct AtRiskQuery {
+    days: Option<i64>,
+    limit: Option<i64>,
+}
+
+pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Json<Value> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+    let (latency, loss, down) = app.db.at_risk(days, limit);
+    let rows = |v: Vec<(String, String, f64, i64)>| {
+        v.into_iter()
+            .map(|(task, node, value, samples)| json!({ "task": task, "node": node, "value": value, "samples": samples }))
+            .collect::<Vec<_>>()
+    };
+    Json(json!({
+        "days": days,
+        "latency": rows(latency),
+        "loss": rows(loss),
+        "down": down.into_iter().map(|(node, last_seen)| json!({ "node": node, "last_seen": last_seen })).collect::<Vec<_>>(),
+    }))
+}
+
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
     Json(json!({
         "hub": env!("CARGO_PKG_VERSION"),

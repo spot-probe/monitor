@@ -1425,6 +1425,82 @@ impl Db {
         rows.filter_map(|r| r.ok()).collect()
     }
 
+    /// 「需要处理的节点」三条榜。**一次算完**，卡片切榜时不必再发请求。
+    ///
+    /// - 延迟：`ping_hour.latency` 是**逐小时的中位**，所以这里按 `answered` 加权求平均 ——
+    ///   那是**均值**，不是中位。**标签就写「平均」**，不冒充 p50。
+    /// - 丢包：`Σlost / Σ(answered+lost)`，就是这段时间的丢包率。
+    /// - 离线：只按 `last_seen` 从旧到新取（且 `last_seen > 0`，排除"从未上报"）。
+    ///   **在线与否的判定不在这里重写** —— 面板已经有 `online` 标志，阈值只该有一处。
+    pub fn at_risk(
+        &self,
+        days: i64,
+        limit: i64,
+    ) -> (Vec<(String, String, f64, i64)>, Vec<(String, String, f64, i64)>, Vec<(String, i64)>) {
+        let conn = self.conn();
+        let since = Utc::now().timestamp() - days * 86_400;
+        let latency = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.name, n.name,
+                            SUM(h.latency * h.answered) * 1.0 / NULLIF(SUM(h.answered), 0),
+                            SUM(h.answered)
+                       FROM ping_hour h
+                       JOIN ping_task t ON t.id = h.task_id
+                       JOIN node n ON n.id = h.node_id
+                      WHERE h.ts >= ?1 AND h.answered > 0
+                      GROUP BY h.task_id, h.node_id
+                      ORDER BY 3 DESC
+                      LIMIT ?2",
+                )
+                .unwrap();
+            stmt.query_map(params![since, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>()
+        };
+        let loss = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.name, n.name,
+                            SUM(h.lost) * 1.0 / NULLIF(SUM(h.answered + h.lost), 0),
+                            SUM(h.answered + h.lost)
+                       FROM ping_hour h
+                       JOIN ping_task t ON t.id = h.task_id
+                       JOIN node n ON n.id = h.node_id
+                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0
+                      GROUP BY h.task_id, h.node_id
+                      HAVING SUM(h.lost) > 0
+                      ORDER BY 3 DESC
+                      LIMIT ?2",
+                )
+                .unwrap();
+            stmt.query_map(params![since, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>()
+        };
+        let down = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT name, last_seen FROM node
+                      WHERE last_seen > 0
+                      ORDER BY last_seen ASC
+                      LIMIT ?1",
+                )
+                .unwrap();
+            stmt.query_map(params![limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>()
+        };
+        (latency, loss, down)
+    }
+
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
         let conn = self.conn();
         let Ok(mut stmt) = conn.prepare_cached(
