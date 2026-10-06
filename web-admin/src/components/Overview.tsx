@@ -115,7 +115,7 @@ const TRACK = "flex items-center rounded-full bg-muted p-0.5"
 const pill = (on: boolean) =>
   `tnum rounded-full px-3 py-1 text-xs transition-colors ${
     on
-      ? "bg-background font-medium text-foreground shadow-sm"
+      ? "bg-primary font-medium text-primary-foreground"
       : "text-muted-foreground hover:text-foreground"
   }`
 
