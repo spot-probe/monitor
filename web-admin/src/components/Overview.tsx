@@ -945,7 +945,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </div>
             <div className="space-y-1.5">
               {agentBuckets.map((b) => (
-                <div key={b.key} className="flex items-baseline justify-between gap-3 text-xs">
+                <a
+                  key={b.key}
+                  href={b.key === "old" && b.count > 0 ? "/admin/update" : undefined}
+                  className="flex items-baseline justify-between gap-3 rounded text-xs transition-colors hover:bg-muted/40"
+                >
                   <span className="flex items-center gap-1.5 text-muted-foreground">
                     <span className={`size-2 rounded-sm ${b.color}`} />
                     {b.label}
@@ -955,7 +959,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     <span className="tnum font-medium">{b.count} 台</span>
                     <span className="tnum ml-1.5 text-muted-foreground">{nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%</span>
                   </span>
-                </div>
+                </a>
               ))}
             </div>
           </CardContent>
