@@ -616,11 +616,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const [riskTab, setRiskTab] = useState<"latency" | "loss" | "down">("latency")
   useEffect(() => {
     let stop = false
-    api<Risk>("/nodes/at-risk?days=7&limit=5")
+    api<Risk>(`/nodes/at-risk?days=7&limit=5&group=${encodeURIComponent(group)}`)
       .then((d) => { if (!stop) setRisk(d) })
       .catch(() => { if (!stop) setRisk(null) })
     return () => { stop = true }
-  }, [])
+  }, [group])
   // 秒 → 「3 天 2 小时」；只在"离线"那一栏用，口径写在一处。
   const span = (sec: number) =>
     sec >= 86400 ? `${Math.floor(sec / 86400)} 天 ${Math.floor((sec % 86400) / 3600)} 小时` : `${Math.max(1, Math.floor(sec / 3600))} 小时`

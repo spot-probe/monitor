@@ -1438,7 +1438,7 @@ impl Db {
     /// - 丢包：`Σlost / Σ(answered+lost)`，就是这段时间的丢包率。
     /// - 离线：只按 `last_seen` 从旧到新取（且 `last_seen > 0`，排除"从未上报"）。
     ///   **在线与否的判定不在这里重写** —— 面板已经有 `online` 标志，阈值只该有一处。
-    pub fn at_risk(&self, days: i64, limit: i64) -> AtRisk {
+    pub fn at_risk(&self, days: i64, limit: i64, group: Option<&str>) -> AtRisk {
         let conn = self.conn();
         let since = Utc::now().timestamp() - days * 86_400;
         let latency = {
@@ -1450,13 +1450,13 @@ impl Db {
                        FROM ping_hour h
                        JOIN ping_task t ON t.id = h.task_id
                        JOIN node n ON n.id = h.node_id
-                      WHERE h.ts >= ?1 AND h.answered > 0
+                      WHERE h.ts >= ?1 AND h.answered > 0 AND (?3 IS NULL OR n.[group] = ?3)
                       GROUP BY h.task_id, h.node_id
                       ORDER BY 3 DESC
                       LIMIT ?2",
                 )
                 .unwrap();
-            stmt.query_map(params![since, limit], |r| {
+            stmt.query_map(params![since, limit, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
             })
             .unwrap()
@@ -1472,14 +1472,14 @@ impl Db {
                        FROM ping_hour h
                        JOIN ping_task t ON t.id = h.task_id
                        JOIN node n ON n.id = h.node_id
-                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0
+                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0 AND (?3 IS NULL OR n.[group] = ?3)
                       GROUP BY h.task_id, h.node_id
                       HAVING SUM(h.lost) > 0
                       ORDER BY 3 DESC
                       LIMIT ?2",
                 )
                 .unwrap();
-            stmt.query_map(params![since, limit], |r| {
+            stmt.query_map(params![since, limit, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
             })
             .unwrap()
@@ -1490,12 +1490,12 @@ impl Db {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT name, last_seen FROM node
-                      WHERE last_seen > 0
+                      WHERE last_seen > 0 AND (?2 IS NULL OR [group] = ?2)
                       ORDER BY last_seen ASC
                       LIMIT ?1",
                 )
                 .unwrap();
-            stmt.query_map(params![limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            stmt.query_map(params![limit, group], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
                 .unwrap()
                 .filter_map(|r| r.ok())
                 .collect::<Vec<_>>()
@@ -4970,7 +4970,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (latency, loss, down) = db.at_risk(7, 5);
+        let (latency, loss, down) = db.at_risk(7, 5, None);
         assert_eq!(latency.len(), 3, "延迟榜应有 3 行");
         assert_eq!(latency[0].1, "slow", "最慢的必须排第一，实际 {:?}", latency[0]);
         assert!((latency[0].2 - 300.0).abs() < 1.0, "加权均值 {}", latency[0].2);
@@ -4980,6 +4980,48 @@ mod tests {
         // 离线榜：never（last_seen=0）不该出现
         assert_eq!(down.len(), 2, "从来未上报的不是离线，应排除");
         assert!(down.iter().all(|(name, _)| name != "never"), "实际 {:?}", down);
+    }
+
+    /// 分组筛选也要作用于「需要处理的节点」—— 否则切换分组时，KPI/事项跟着变、这三条榜不变，
+    /// 正是"一半按分组、一半不按"。
+    #[test]
+    fn at_risk_filters_by_group() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let hour = (now / 3600) * 3600;
+        let mut ids = Vec::new();
+        for (name, group) in [("slow", "east"), ("fast", "west")] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE node SET last_seen=?1, \"group\"=?2 WHERE id=?3",
+                    params![now - 60, group, n],
+                )
+                .unwrap();
+            ids.push(n);
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (1,'t','x',60,0,'icmp')",
+                [],
+            )
+            .unwrap();
+        for (n, lat) in [(ids[0], 300.0), (ids[1], 20.0)] {
+            db.conn().execute("INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi) VALUES (?1,1,?2,100,0,?3,?3,?3)", params![n, hour, lat]).unwrap();
+        }
+        let all = db.at_risk(7, 5, None);
+        assert_eq!(all.0.len(), 2, "不分分组时两条都在");
+        let east = db.at_risk(7, 5, Some("east"));
+        assert_eq!(east.0.len(), 1, "只看 east 时应当只剩一条");
+        assert_eq!(east.0[0].1, "slow");
+        assert_eq!(east.2.len(), 1, "离线榜也要按分组过滤");
+        assert_eq!(east.2[0].0, "slow");
+        assert!(db.at_risk(7, 5, Some("nowhere")).0.is_empty());
     }
 
     /// 分组筛选：取某一组时只算那一组；**各组合计必须等于全部**（分组最容易错的地方）。

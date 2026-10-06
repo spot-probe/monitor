@@ -1596,12 +1596,15 @@ pub struct SeriesQuery {
 pub struct AtRiskQuery {
     days: Option<i64>,
     limit: Option<i64>,
+    /// 只看某个分组（机房/客户）；不传即全部节点。空串归一成 None，与趋势端点同一套规矩。
+    group: Option<String>,
 }
 
 pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Json<Value> {
     let days = q.days.unwrap_or(7).clamp(1, 90);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let (latency, loss, down) = app.db.at_risk(days, limit);
+    let group = q.group.as_deref().filter(|g| !g.is_empty());
+    let (latency, loss, down) = app.db.at_risk(days, limit, group);
     let rows = |v: Vec<(String, String, f64, i64)>| {
         v.into_iter()
             .map(|(task, node, value, samples)| json!({ "task": task, "node": node, "value": value, "samples": samples }))
