@@ -1516,14 +1516,14 @@ impl Db {
     /// 而不是"每台一个"（100 台 = 100 个请求；100 ms RTT 下实测 2 326 ms 对 698 ms，
     /// 且随节点数线性增长）。
     ///
-    /// **必须与 [`Db::ping_records`]（线上那条）给出一样的数**，所以它照抄那条的三件事：
-    /// 同一个 [`close_bucket`]（中位而不是平均、桶级 `loss` 向上取整且只在非零时给）、
-    /// 同一套 **rank 排序**（*"Themes take their series, colours and legend from the order in
-    /// which probes first appear"*）、以及**窗口级 `loss` 不取整**（取整会把 0.14% 变成
-    /// 表示"完全没丢"的 0%）。这一点由单测 `ping_series_by_task_matches_the_per_node_path`
-    /// 钉住：它拿**逐节点调用 `ping_records`** 的结果逐点比对。
+    /// **与 [`Db::ping_window`] 逐点一致** —— 那一条是 `api.rs` 真正调用的
+    /// （`/nodes/{id}/metrics?series=ping`），所以参照必须是它：
+    /// 同一段**两层拼接**的 SQL（`ping_hour` 到水位线 + `ping_record` 之后，分钟行改造成
+    /// 同一个 `Sample` 形状）、同一个 [`Tally`] 折叠、同一个 [`close_tallies`] 收尾、
+    /// 同一套 rank 排序与**未取整**的窗口 loss。区别只有一个：这里按节点分组。
     ///
-    /// 数据源是**分钟级** `ping_record`（与线上同层），不是小时级死代码。
+    /// 先前两版都把参照认错了（先是小时级 `ping_records_hourly`，再是分钟级 `ping_records`），
+    /// 结果"与 X 一致"是对着一个**不是线上用的**函数成立的。这一版按 `ping_window` 的 SQL 抄。
     pub fn ping_series_by_task(
         &self,
         task_id: i64,
@@ -1532,62 +1532,63 @@ impl Db {
         group: Option<&str>,
     ) -> Result<ByTaskSeries> {
         let conn = self.conn();
+        let rolled = rolled(&conn)?.unwrap_or(0);
         let mut stmt = conn.prepare_cached(
-            "SELECT p.node_id, p.ts/?2, p.task_id, p.latency
-               FROM ping_record p JOIN node n ON n.id = p.node_id
-              WHERE p.task_id=?1 AND p.ts>=?3 AND (?4 IS NULL OR n.[group]=?4)
-              ORDER BY p.node_id, p.ts",
+            "SELECT (ts/?5)*?5 AS bucket, node_id, task_id, latency, answered, lost, lo, hi FROM (
+               SELECT ts, node_id, task_id, latency, answered, lost, lo, hi FROM ping_hour
+                WHERE task_id=?1 AND ts>=?2 AND ts<?3
+                  AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
+               UNION ALL
+               SELECT ts, node_id, task_id,
+                      CASE WHEN latency >= 0 THEN latency END,
+                      CASE WHEN latency >= 0 THEN 1 ELSE 0 END,
+                      CASE WHEN latency < 0 THEN 1 ELSE 0 END,
+                      CASE WHEN latency >= 0 THEN latency END,
+                      CASE WHEN latency >= 0 THEN latency END
+                 FROM ping_record WHERE task_id=?1 AND ts>=?2 AND ts>=?3
+                  AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
+             ) ORDER BY node_id, (ts/?5)*?5",
         )?;
-        let mut rows = stmt.query(params![task_id, step, since, group])?;
+        let mut rows = stmt.query(params![task_id, since, rolled, rolled, step, group])?;
         let mut out: NodeTotals = Default::default();
         let mut node = -1i64;
         let mut bucket = -1i64;
-        let mut open: Vec<(i64, Vec<i64>, i64)> = Vec::new();
+        let mut open: std::collections::BTreeMap<i64, Tally> = Default::default();
+        let flush = |out: &mut NodeTotals,
+                     node: i64,
+                     bucket: i64,
+                     open: &mut std::collections::BTreeMap<i64, Tally>| {
+            if node < 0 || open.is_empty() {
+                return;
+            }
+            let mut v: Vec<serde_json::Value> = Vec::new();
+            close_tallies(&mut v, std::mem::take(open), bucket);
+            out.entry(node).or_default().0.extend(v);
+        };
         while let Some(row) = rows.next()? {
-            let (n, b, task, latency) =
-                (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?);
-            if n != node {
-                // 换节点：先把上一个节点的桶收掉
-                if node >= 0 {
-                    let mut v: Vec<serde_json::Value> = Vec::new();
-                    close_bucket(&mut v, &mut open, bucket * step);
-                    out.entry(node).or_default().0.extend(v);
-                }
+            let b = row.get::<_, i64>(0)?;
+            let n = row.get::<_, i64>(1)?;
+            if n != node || b != bucket {
+                flush(&mut out, node, bucket, &mut open);
                 node = n;
                 bucket = b;
-                open.clear();
-                out.entry(n).or_default();
-            } else if b != bucket {
-                let mut v: Vec<serde_json::Value> = Vec::new();
-                close_bucket(&mut v, &mut open, bucket * step);
-                out.entry(node).or_default().0.extend(v);
-                bucket = b;
             }
-            let totals = &mut out.entry(n).or_default().1;
-            let seen = totals.entry(task).or_insert((0, 0));
-            seen.1 += 1;
-            let probe = match open.iter().position(|(id, ..)| *id == task) {
-                Some(at) => &mut open[at],
-                None => {
-                    open.push((task, Vec::new(), 0));
-                    open.last_mut().expect("just pushed")
-                }
+            let task = row.get::<_, i64>(2)?;
+            let sample = Sample {
+                median: row.get::<_, Option<i64>>(3)?,
+                answered: row.get::<_, i64>(4)?,
+                lost: row.get::<_, i64>(5)?,
+                lo: row.get::<_, Option<i64>>(6)?,
+                hi: row.get::<_, Option<i64>>(7)?,
             };
-            if latency < 0 {
-                probe.2 += 1;
-                seen.0 += 1;
-            } else {
-                probe.1.push(latency);
-            }
+            let seen = out.entry(n).or_default().1.entry(task).or_insert((0, 0));
+            seen.0 += sample.lost;
+            seen.1 += sample.answered + sample.lost;
+            open.entry(task).or_default().add(sample);
         }
-        if node >= 0 {
-            let mut v: Vec<serde_json::Value> = Vec::new();
-            close_bucket(&mut v, &mut open, bucket * step);
-            out.entry(node).or_default().0.extend(v);
-        }
+        flush(&mut out, node, bucket, &mut open);
         drop(rows);
         drop(stmt);
-        // rank 与线上一致：按 sort, id；排序也用同一条键。
         let rank: HashMap<i64, usize> = conn
             .prepare_cached("SELECT id FROM ping_task ORDER BY sort, id")?
             .query_map([], |r| r.get(0))?
@@ -1601,7 +1602,6 @@ impl Db {
                 v.sort_by_cached_key(|row| {
                     row["task_id"].as_i64().and_then(|id| rank.get(&id).copied()).unwrap_or(usize::MAX)
                 });
-                // 窗口级 loss：**不取整**，且只给丢过的探测（与 ping_records 相同）
                 let loss: serde_json::Map<String, serde_json::Value> = totals
                     .into_iter()
                     .filter(|(_, (lost, _))| *lost > 0)
@@ -5135,7 +5135,7 @@ mod tests {
         assert!(db.at_risk(7, 5, Some("nowhere")).0.is_empty());
     }
 
-    /// **不变量**：一次按任务取回的结果，必须与**逐节点调用线上那条 `ping_records`** 的结果
+    /// **不变量**：一次按任务取回的结果，必须与**逐节点调用线上那条 `ping_window`** 的结果
     /// **逐点相等**（行与窗口 loss 都相等）。
     ///
     /// 面板从此只发一个请求，但用户看到的数**一个也不能变** —— 这条测试就是那个保证。
@@ -5180,7 +5180,7 @@ mod tests {
         let many = db.ping_series_by_task(1, minute - 3_600, 300, None).unwrap();
         assert_eq!(many.len(), 2, "两台节点都该有序列");
         for n in &ids {
-            let (one_rows, one_loss) = db.ping_records(*n, minute - 3_600, 300).unwrap();
+            let (one_rows, one_loss) = db.ping_window(*n, minute - 3_600, 300).unwrap();
             let (rows, loss) = many.get(n).cloned().unwrap_or_default();
             assert_eq!(
                 serde_json::to_string(&rows).unwrap(),
