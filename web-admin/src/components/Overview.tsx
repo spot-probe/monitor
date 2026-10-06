@@ -1011,7 +1011,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               ))}
             </div>
           </CardHeader>
-          <CardContent className="space-y-1.5">
+          <CardContent className="flex min-h-[8.5rem] flex-col space-y-1.5">
             {risk === null ? (
               <p className="text-sm text-muted-foreground">取不到数据。</p>
             ) : riskTab === "down" ? (
@@ -1073,22 +1073,23 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               const over = pct >= 1
               return (
                 // 定宽 + 不换行：百分比在最后、右对齐，永远与数字列同一行（原来会被挤到第二行）。
-                <div key={n.id} className="flex items-center gap-3 py-0.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
-                  <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                  {/* 进度条复用版本分布那条的形状与高度 */}
-                  <span className="w-24 shrink-0 overflow-hidden rounded-full bg-muted">
-                    <span
-                      className={`block h-2.5 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
+                <div key={n.id} className="text-sm">
+                  <div className="flex items-center gap-3 py-0.5">
+                    <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
+                    <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                    <span className="tnum w-32 shrink-0 text-right text-xs text-muted-foreground">
+                      {bytes(used)} / {bytes(n.traffic_limit)}
+                    </span>
+                    <span className={`tnum w-12 shrink-0 text-right text-xs ${over ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                      {Math.round(pct * 100)}%
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={`h-full rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
                       style={{ width: `${Math.min(100, pct * 100)}%` }}
                     />
-                  </span>
-                  <span className="tnum w-32 shrink-0 text-right text-xs text-muted-foreground">
-                    {bytes(used)} / {bytes(n.traffic_limit)}
-                  </span>
-                  <span className={`tnum w-12 shrink-0 text-right text-xs ${over ? "font-semibold text-danger-fg" : "font-medium"}`}>
-                    {Math.round(pct * 100)}%
-                  </span>
+                  </div>
                 </div>
               )
             })
