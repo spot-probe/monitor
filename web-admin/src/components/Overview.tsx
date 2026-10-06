@@ -113,7 +113,11 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 /// （**开关**不在此列：那是"开/关"，不是"多选一"，硬塞进轨道才是错的。）
 const TRACK = "flex items-center rounded-full bg-muted p-0.5"
 const pill = (on: boolean) =>
-  `tnum rounded-full px-3 py-1 text-xs transition-colors ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`
+  `tnum rounded-full px-3 py-1 text-xs transition-colors ${
+    on
+      ? "bg-background font-medium text-foreground shadow-sm"
+      : "text-muted-foreground hover:text-foreground"
+  }`
 
 /// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
 ///
@@ -834,6 +838,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         <span className="text-muted-foreground">分组</span>
+        <span aria-hidden className="h-4 w-px bg-border" />
         <div className={`${TRACK} flex-wrap`}>
           {[{ v: "", label: "全部" }, ...groups.map((gp) => ({ v: gp, label: gp }))].map((o) => (
             <button key={o.v || "all"} type="button" onClick={() => setGroup(o.v)} aria-pressed={group === o.v} className={pill(group === o.v)}>
