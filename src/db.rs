@@ -1503,6 +1503,60 @@ impl Db {
         (latency, loss, down)
     }
 
+    /// 一次拿到**一个探测任务**在窗口内的全部节点序列 —— 面板因此只发一个请求，
+    /// 而不是"每台一个"（100 台就是 100 个请求；在 100 ms RTT 下实测 2.3s 对 0.7s）。
+    ///
+    /// **必须与 [`Db::ping_records_hourly`] 给出一样的数**：同一个 `Tally` 折叠、
+    /// 同一个 `close_tallies` 收尾，只是把 `node_id = ?1` 换成"任务 + 可选分组"。
+    /// 这一点由单测 `ping_series_by_task_matches_the_per_node_path` 钉住。
+    pub fn ping_series_by_task(
+        &self,
+        task_id: i64,
+        since: i64,
+        until: i64,
+        step: i64,
+        group: Option<&str>,
+    ) -> Result<std::collections::BTreeMap<i64, Vec<serde_json::Value>>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT h.node_id, (h.ts/?4)*?4, h.task_id, h.answered, h.lost, h.latency, h.lo, h.hi
+               FROM ping_hour h JOIN node n ON n.id = h.node_id
+              WHERE h.task_id=?1 AND h.ts>=?2 AND h.ts<?3 AND (?5 IS NULL OR n.[group]=?5)
+              ORDER BY h.node_id, h.ts/?4",
+        )?;
+        let mut rows = stmt.query(params![task_id, since, until, step, group])?;
+        let mut out: std::collections::BTreeMap<i64, Vec<serde_json::Value>> = Default::default();
+        // 当前打开的 (节点, 桶)：与逐节点那条路径同样的折叠方式，只是按节点分开。
+        let mut open: Option<(i64, i64, std::collections::BTreeMap<i64, Tally>)> = None;
+        let flush = |open: &mut Option<(i64, i64, std::collections::BTreeMap<i64, Tally>)>,
+                     out: &mut std::collections::BTreeMap<i64, Vec<serde_json::Value>>| {
+            if let Some((node, ts, tallies)) = open.take() {
+                let mut v: Vec<serde_json::Value> = Vec::new();
+                close_tallies(&mut v, tallies, ts);
+                out.entry(node).or_default().extend(v);
+            }
+        };
+        while let Some(r) = rows.next()? {
+            let node = r.get::<_, i64>(0)?;
+            let bucket = r.get::<_, i64>(1)?;
+            if open.as_ref().map(|(n, b, _)| (*n, *b)) != Some((node, bucket)) {
+                flush(&mut open, &mut out);
+                open = Some((node, bucket, Default::default()));
+            }
+            let task = r.get::<_, i64>(2)?;
+            let sample = Sample {
+                answered: r.get(3)?,
+                lost: r.get(4)?,
+                median: r.get(5)?,
+                lo: r.get(6)?,
+                hi: r.get(7)?,
+            };
+            open.as_mut().expect("just set").2.entry(task).or_default().add(sample);
+        }
+        flush(&mut open, &mut out);
+        Ok(out)
+    }
+
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
         let conn = self.conn();
         let Ok(mut stmt) = conn.prepare_cached(
@@ -5022,6 +5076,68 @@ mod tests {
         assert_eq!(east.2.len(), 1, "离线榜也要按分组过滤");
         assert_eq!(east.2[0].0, "slow");
         assert!(db.at_risk(7, 5, Some("nowhere")).0.is_empty());
+    }
+
+    /// **不变量**：一次按任务取回的结果，必须与逐节点请求的结果**逐点相等**。
+    ///
+    /// 面板从此只发一个请求，但用户看到的数**一个也不能变** —— 这条测试就是那个保证。
+    #[test]
+    fn ping_series_by_task_matches_the_per_node_path() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let hour = (now / 3600) * 3600;
+        let mut ids = Vec::new();
+        for (name, group) in [("a", "east"), ("b", "west")] {
+            let n = db
+                .create_node(
+                    &Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                    name,
+                )
+                .unwrap();
+            db.conn().execute("UPDATE node SET \"group\"=?1 WHERE id=?2", params![group, n]).unwrap();
+            ids.push(n);
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (1,'t','x',60,0,'icmp')",
+                [],
+            )
+            .unwrap();
+        // 每台两个桶，第二个桶里造出 hi > lo 的带与一次丢包（覆盖 close_tallies 的两个可选字段）
+        for (i, n) in ids.iter().enumerate() {
+            for (h, (lat, lost, lo, hi)) in [(2, 0, 0, 0), (1, 3, 10, 40)].iter().enumerate() {
+                db.conn()
+                    .execute(
+                        "INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi)
+                         VALUES (?1,1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            n,
+                            hour - (h as i64) * 3600,
+                            60 - lost,
+                            lost,
+                            lat + i as i64,
+                            lo + i as i64,
+                            hi + i as i64
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+        let many = db.ping_series_by_task(1, hour - 3 * 3600, hour + 3600, 3_600, None).unwrap();
+        assert_eq!(many.len(), 2, "两台节点都该有序列");
+        for n in &ids {
+            let one = db.ping_records_hourly(*n, hour - 3 * 3600, hour + 3600, 3_600).unwrap();
+            let got = many.get(n).cloned().unwrap_or_default();
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&one).unwrap(),
+                "节点 {} 的聚合结果必须与逐节点请求逐点相等",
+                n
+            );
+        }
+        // 分组过滤：只取 east，应当只剩一台
+        let east = db.ping_series_by_task(1, hour - 3 * 3600, hour + 3600, 3_600, Some("east")).unwrap();
+        assert_eq!(east.len(), 1, "按分组应当只剩一台");
     }
 
     /// 分组筛选：取某一组时只算那一组；**各组合计必须等于全部**（分组最容易错的地方）。
