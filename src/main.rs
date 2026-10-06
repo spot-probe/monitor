@@ -10,6 +10,7 @@ mod api;
 mod auth;
 mod db;
 mod frontend;
+mod fx;
 mod notify;
 mod theme;
 
@@ -505,6 +506,7 @@ async fn main() -> Result<()> {
     // reports: installing stays a button in the panel.
     tokio::spawn(theme::watch(app.clone()));
     tokio::spawn(agent_release::watch(app.clone()));
+    tokio::spawn(fx::watch(app.clone()));
 
     let router = Router::new()
         // Agents.
