@@ -817,6 +817,15 @@ fn on_disk(file: &str) -> i64 {
 ///
 /// A constant because the query plan is asserted against it in
 /// `rekeying_ping_record_keeps_the_rows_and_lets_the_chart_query_seek`.
+/// 一个节点的两条产出：按 rank 排好的行，以及窗口级 loss（不取整、只给丢过的探测）。
+pub type NodeSeries = (Vec<serde_json::Value>, serde_json::Value);
+
+/// 一次按任务取回的结果：节点 id → 该节点的序列。[`Db::ping_series_by_task`] 的返回类型。
+pub type ByTaskSeries = std::collections::BTreeMap<i64, NodeSeries>;
+
+/// 折叠过程中的累计：节点 → （行，探测 → (丢了多少, 一共多少)）。
+type NodeTotals = std::collections::BTreeMap<i64, (Vec<serde_json::Value>, HashMap<i64, (i64, i64)>)>;
+
 const PING_ROWS: &str = "SELECT ts/?3, task_id, latency FROM ping_record
      WHERE node_id=?1 AND ts>=?2
            AND task_id IN (SELECT task_id FROM ping_node WHERE node_id=?1)
@@ -1521,7 +1530,7 @@ impl Db {
         since: i64,
         step: i64,
         group: Option<&str>,
-    ) -> Result<std::collections::BTreeMap<i64, (Vec<serde_json::Value>, serde_json::Value)>> {
+    ) -> Result<ByTaskSeries> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(
             "SELECT p.node_id, p.ts/?2, p.task_id, p.latency
@@ -1530,8 +1539,7 @@ impl Db {
               ORDER BY p.node_id, p.ts",
         )?;
         let mut rows = stmt.query(params![task_id, step, since, group])?;
-        let mut out: std::collections::BTreeMap<i64, (Vec<serde_json::Value>, HashMap<i64, (i64, i64)>)> =
-            Default::default();
+        let mut out: NodeTotals = Default::default();
         let mut node = -1i64;
         let mut bucket = -1i64;
         let mut open: Vec<(i64, Vec<i64>, i64)> = Vec::new();
