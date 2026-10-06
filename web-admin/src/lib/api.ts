@@ -71,6 +71,8 @@ export type Node = {
   ipv4_pin?: string
   ipv6_pin?: string
   remark?: string
+  /** 只在管理后台可见；任何公开响应里都不出现。 */
+  private_remark?: string
   /** Panel only. Empty for nodes created before the hub retained a copy. */
   token?: string
   /** Panel only. Whether going offline and returning are announced. */

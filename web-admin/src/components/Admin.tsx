@@ -414,6 +414,7 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
       group: form.group.trim(),
       public: form.public,
       remark: form.remark,
+      private_remark: form.private_remark,
       traffic_mode: form.traffic_mode,
       traffic_limit: Math.round(Number(limitGib) * GIB),
       traffic_reset_day: Math.min(31, Math.max(1, Math.round(Number(form.traffic_reset_day) || 1))),
@@ -490,8 +491,21 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
             <Field label="每月重置日" hint="1–31。本月流量按新周期重算，总流量不变">
               <Input type="number" min={1} max={31} value={form.traffic_reset_day} onChange={(e) => set("traffic_reset_day", Number(e.target.value))} />
             </Field>
-            <Field label="备注" hint="仅管理员可见；填了会显示在该节点的详情页（公开页只有你登录后才看得见）">
+            <Field
+              label="备注"
+              hint="管理员可见：登录后台后看公开页也会显示（匿名访客看不到任何备注）"
+            >
               <Input value={form.remark ?? ""} onChange={(e) => set("remark", e.target.value)} placeholder="商家、用途" />
+            </Field>
+            <Field
+              label="私有备注"
+              hint="仅在管理后台可见。公开页任何情况下都不显示，公开接口里连这个字段都没有"
+            >
+              <Input
+                value={form.private_remark ?? ""}
+                onChange={(e) => set("private_remark", e.target.value)}
+                placeholder="只给自己看的信息"
+              />
             </Field>
           </div>
           <details className="rounded-lg border bg-muted/30 px-3 py-2.5">
