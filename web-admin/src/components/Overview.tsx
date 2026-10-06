@@ -790,6 +790,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           </CardContent>
         </Card>
 
+        <a
+          href={outdated > 0 ? "/admin/update" : undefined}
+          className={`block h-full rounded-xl ${outdated > 0 ? "transition-colors hover:bg-muted/40" : ""}`}
+        >
         <Card>
           <CardContent>
             <div className="flex items-start justify-between gap-2">
@@ -808,8 +812,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </div>
           </CardContent>
         </Card>
+        </a>
 
         {/* 第 4 张：hub 自身。与第 3 张「agent 待升级」成对 —— 升级时两样都要看。 */}
+        <a
+          href={hubBehind ? "/admin/update" : undefined}
+          className={`block h-full rounded-xl ${hubBehind ? "transition-colors hover:bg-muted/40" : ""}`}
+        >
         <Card>
           <CardContent>
             <div className="flex items-start justify-between gap-2">
@@ -829,6 +838,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </div>
           </CardContent>
         </Card>
+        </a>
       </div>
 
       {/* 分组与自动刷新**同一行**：左边是"看什么"（页面级控件，影响一整页），右边是"多久看一次"。
