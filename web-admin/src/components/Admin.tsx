@@ -1919,6 +1919,20 @@ function Ping({ nodes }: { nodes: Node[] }) {
                         {probeErrors.filter((x) => x.task_id === t.id).length > 1 ? `（节点 ${e.node_id}）` : ""}
                       </p>
                     ))}
+                  {/* agent 报回来的 `ICMP needs CAP_NET_RAW, …` 对运维**没有可执行信息**：
+                      它说缺什么，没说怎么补。检测到这一条时补一句可照抄的命令 ——
+                      **不改 agent、不改语义**，只在展示层加一句。手册（notes/troubleshooting.md）
+                      第 1 条的修复段就是这段命令。 */}
+                  {probeErrors
+                    .filter((e) => e.task_id === t.id && e.reason.includes("CAP_NET_RAW"))
+                    .slice(0, 1)
+                    .map((e) => (
+                      <p key={`fix-${e.node_id}`} className="mt-0.5 text-xs text-muted-foreground">
+                        在 agent 主机上执行{" "}
+                        <code className="rounded bg-muted px-1 py-0.5">sysctl -w net.ipv4.ping_group_range="0 2147483647"</code>
+                        ，或给 agent 服务加 <code className="rounded bg-muted px-1 py-0.5">CAP_NET_RAW</code>；改完无需重启 agent。
+                      </p>
+                    ))}
                 </TableCell>
                 <TableCell className="tnum text-sm">
                   {t.target}
