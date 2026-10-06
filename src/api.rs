@@ -1618,6 +1618,52 @@ pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRisk
     }))
 }
 
+/// 一次拿到**一个探测任务**在窗口内的全部节点序列。
+///
+/// 与 `/nodes/{id}/metrics?series=ping` **同形**（每个节点仍是 `{ping, loss}`），只多一层节点键 ——
+/// 面板因此从一个请求拿到整张图，而不是"每台一个"（100 台 = 100 个请求；100 ms RTT 下实测
+/// 2 326 ms 对 698 ms，且随节点数线性增长）。
+///
+/// 数字与逐节点那条**完全一致**：db 层复用同一个 `close_bucket`、同一套 rank 排序与未取整的
+/// 窗口 loss，由 `ping_series_by_task_matches_the_per_node_path` 单测钉住。
+///
+/// **与那条一样公开**（主题用得到），所以也走同一个 `HISTORY_GATE` —— 这是条重查询，
+/// 没有闸就等于给匿名调用者开了一个放大器。
+#[derive(Deserialize)]
+pub struct PingSeriesQuery {
+    task: i64,
+    hours: Option<i64>,
+    points: Option<i64>,
+    /// 只看某个分组；不传即全部节点。空串归一成 None（与其它端点同一套规矩）。
+    group: Option<String>,
+}
+
+pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQuery>) -> Response {
+    let Ok(_permit) = HISTORY_GATE.try_acquire() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
+            .into_response();
+    };
+    let hours = q.hours.unwrap_or(24).clamp(1, app.db.retention_days() * 24);
+    let step = sample_step(hours, q.points);
+    let since = Utc::now().timestamp() - hours * 3_600;
+    // **Owned**：借用 `q.group` 活不过这一帧，而 `spawn_blocking` 的闭包要求 `'static`。
+    let group = q.group.filter(|g| !g.is_empty());
+    let task = q.task;
+    let built =
+        tokio::task::spawn_blocking(move || app.db.ping_series_by_task(task, since, step, group.as_deref()))
+            .await;
+    match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
+        Ok(by_node) => {
+            let nodes: serde_json::Map<String, Value> = by_node
+                .into_iter()
+                .map(|(id, (ping, loss))| (id.to_string(), json!({"ping": ping, "loss": loss})))
+                .collect();
+            Json(json!({ "hours": hours, "task": task, "nodes": nodes })).into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
     Json(json!({
         "hub": env!("CARGO_PKG_VERSION"),
