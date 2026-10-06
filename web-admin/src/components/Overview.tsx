@@ -792,7 +792,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
         <a
           href={outdated > 0 ? "/admin/update" : undefined}
-          className={`block h-full rounded-xl ${outdated > 0 ? "transition-colors hover:bg-muted/40" : ""}`}
+          className={`block h-full rounded-xl ${outdated > 0 ? "transition-shadow hover:ring-1 hover:ring-primary" : ""}`}
         >
         <Card>
           <CardContent>
@@ -817,7 +817,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         {/* 第 4 张：hub 自身。与第 3 张「agent 待升级」成对 —— 升级时两样都要看。 */}
         <a
           href={hubBehind ? "/admin/update" : undefined}
-          className={`block h-full rounded-xl ${hubBehind ? "transition-colors hover:bg-muted/40" : ""}`}
+          className={`block h-full rounded-xl ${hubBehind ? "transition-shadow hover:ring-1 hover:ring-primary" : ""}`}
         >
         <Card>
           <CardContent>
