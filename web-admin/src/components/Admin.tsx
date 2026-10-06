@@ -1681,13 +1681,23 @@ function Ping({ nodes }: { nodes: Node[] }) {
     if (ids.length === 0) return
     let alive = true
     type PingPoint = { task_id: number; ts: number; latency: number | null }
+    // 一个请求拿到**一个探测任务**在所有节点上的序列，而不是"每台一个"：
+    // 请求数从"节点数"降到"任务数"（100 台 1 个任务 → 1 个请求；此前是 100 个）。
+    //
+    // **`hours` 必须传**：这条端点不给 `hours` 时返回的是空窗口，而这里此前恰好没传 ——
+    // 也就是说这一页的图一直是空的（公开页那条传了 `hours`，所以它一直有图）。
+    // 24 是**实测过两条路径完全一致**的那组参数（逐点 JSON 全等）。
     Promise.all(
-      ids.map((id) =>
-        api<{ ping: PingPoint[]; loss?: Record<string, number> }>(`/nodes/${id}/metrics?series=ping`)
-          .catch(() => null)
-          .then((d) => [id, d] as const),
+      tasks.map((t) =>
+        api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
+          `/nodes/ping-series?task=${t.id}&hours=24`,
+        )
+          .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
+          .catch(() => []),
       ),
-    ).then((answers) => {
+    ).then((perTask) => {
+      // 与原来那套 `[id, {ping, loss}]` 完全同形 —— 下面的归约因此一行都不用改。
+      const answers = perTask.flat()
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
