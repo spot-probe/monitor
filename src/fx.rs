@@ -29,10 +29,6 @@ const RATES: &str = "fx_rates";
 /// 取回时间（Unix 秒），用来在页面上说"这是什么时候的汇率"。
 const FETCHED_AT: &str = "fx_fetched_at";
 /// 手工指定的「1 USD = ? CNY」；非空且为正时**完全取代**自动值。
-// 下面三个条目由**成本视图**消费（总览页最下方那一块），它还没落地 ——
-// 这一行与 `ping_records_hourly` 上那句 `#[allow(dead_code)]` 同因：先把读取侧写好，
-// 消费侧随后接上；否则改一处就要连着改两处。
-#[allow(dead_code)]
 const MANUAL: &str = "fx_cny_per_usd_manual";
 
 /// 启动后稍等再查，避开启动时那一堆事；之后每天一次。
@@ -88,7 +84,6 @@ pub async fn refresh(app: &App) {
 ///
 /// 返回 `(表, 取回时间戳, 是否手动)`。表以 USD 为基准；`None` 表示**一次都没取到过**
 /// —— 调用方必须把这个情况显示出来，而不是当成 1:1。
-#[allow(dead_code)]
 pub fn rates(app: &App) -> Option<(HashMap<String, f64>, i64, bool)> {
     if let Some(v) = app.db.get(MANUAL).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v > 0.0) {
         let mut m = HashMap::new();
@@ -105,7 +100,6 @@ pub fn rates(app: &App) -> Option<(HashMap<String, f64>, i64, bool)> {
 ///
 /// 纯函数，便于测试：`cny_per_unit(t, "USD") == t["CNY"]`，
 /// 而 `cny_per_unit(t, "EUR") == t["CNY"] / t["EUR"]`。
-#[allow(dead_code)]
 pub fn cny_per_unit(table: &HashMap<String, f64>, currency: &str) -> Option<f64> {
     let per_usd = table.get("CNY").copied().filter(|v| *v > 0.0)?;
     // `from=USD` 的响应**不含 USD 自己**（基准币被省略），所以要给它隐式的 1.0 ——

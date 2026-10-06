@@ -1666,6 +1666,33 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
     }
 }
 
+/// 成本视图要用的折算率：**在 hub 侧算好**每个币种「1 单位值多少 CNY」。
+///
+/// 不把原始汇率表丢给前端再让它自己算 —— 那样同一条公式会有两份实现，
+/// 早晚分叉（这一整天的教训都是"不许有第二个真相"）。
+pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
+    let Some((table, fetched_at, manual)) = crate::fx::rates(&app) else {
+        // 一次都没取到过：**明确说没有**，绝不回退成 1:1。
+        return Json(json!({ "per_unit": {}, "fetched_at": 0, "manual": false, "available": false }));
+    };
+    // **必须带上基准币种**：`from=USD` 的响应不含 `USD` 自己，若只遍历表里的键，
+    // `per_unit.USD` 就会缺席 —— 而那是最常见的币种，前端会拿到 undefined 而折不出来。
+    let mut currencies: Vec<String> = table.keys().cloned().collect();
+    if !currencies.iter().any(|c| c == "USD") {
+        currencies.push("USD".to_string());
+    }
+    let per_unit: serde_json::Map<String, Value> = currencies
+        .into_iter()
+        .filter_map(|c| crate::fx::cny_per_unit(&table, &c).map(|v| (c, json!(v))))
+        .collect();
+    Json(json!({
+        "per_unit": per_unit,
+        "fetched_at": fetched_at,
+        "manual": manual,
+        "available": true,
+    }))
+}
+
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
     Json(json!({
         "hub": env!("CARGO_PKG_VERSION"),

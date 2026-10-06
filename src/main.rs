@@ -534,6 +534,7 @@ async fn main() -> Result<()> {
         .route("/api/nodes/{id}/traffic", put(api::patch_traffic))
         .route("/api/overview/series", get(api::overview_series))
         .route("/api/nodes/at-risk", get(api::at_risk))
+        .route("/api/fx", get(api::fx))
         .route("/api/nodes/ping-series", get(api::ping_series))
         .route("/api/ping-tasks", get(api::ping_tasks).post(api::save_ping_task))
         .route("/api/ping-tasks/order", put(api::reorder_ping_tasks))
