@@ -375,6 +375,8 @@ fn node_view(
         view["country_pin"] = json!(node.country_pin);
         view["country_auto"] = json!(node.country);
         view["remark"] = json!(node.remark);
+        // **只在 `full`（管理员）时出现** —— 匿名访客的响应里连字段都没有（不是空串）。
+        view["private_remark"] = json!(node.private_remark);
         view["token"] = json!(node.token);
         view["notify"] = json!(node.notify);
     }
@@ -2852,7 +2854,13 @@ mod tests {
     fn node(app: &App, name: &str, public: bool) -> i64 {
         app.db
             .create_node(
-                &Node { name: name.into(), public, remark: "secret note".into(), ..Default::default() },
+                &Node {
+                    name: name.into(),
+                    public,
+                    remark: "secret note".into(),
+                    private_remark: "for me only".into(),
+                    ..Default::default()
+                },
                 &format!("token-of-{name}"),
             )
             .unwrap()
@@ -3067,7 +3075,7 @@ mod tests {
         assert_eq!(public.len(), 1, "a node marked private must not be listed");
         assert_eq!(public[0]["name"], "open");
         // Disclosing the token would let any visitor impersonate the node.
-        for hidden in ["ip", "remark", "hostname", "token"] {
+        for hidden in ["ip", "remark", "private_remark", "hostname", "token"] {
             assert!(public[0].get(hidden).is_none(), "{hidden} must not be public");
         }
         assert!(
@@ -3086,6 +3094,8 @@ mod tests {
         assert_eq!(admin.len(), 2);
         assert_eq!(admin[0]["ip"], "198.51.100.9");
         assert_eq!(admin[0]["remark"], "secret note");
+        assert!(public[0].get("private_remark").is_none(), "private_remark must not be public");
+        assert_eq!(admin[0]["private_remark"], "for me only");
     }
 
     #[tokio::test]

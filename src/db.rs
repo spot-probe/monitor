@@ -105,7 +105,11 @@ CREATE TABLE IF NOT EXISTS node (
   -- string rather than a table: the set is whatever the operator types, and the
   -- page's tabs are derived from the values in use. Quoted because GROUP is a
   -- keyword -- every reference to this column needs the quotes.
-  "group" TEXT NOT NULL DEFAULT ''
+  "group" TEXT NOT NULL DEFAULT '',
+  -- **只在管理后台可见**的备注。`remark` 是半公开的（管理员登录后看公开页也会显示），
+  -- 这一列则**任何**公开响应里都不出现 —— 见 `api.rs` 里 `if full` 那段与那条隐藏列表测试。
+  -- 放在最后：`ALTER TABLE ADD COLUMN` 只能追加，`SCHEMA` 的顺序要和迁移后的一致。
+  private_remark TEXT NOT NULL DEFAULT ''
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -238,7 +242,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -458,6 +462,10 @@ fn migrate_to_11(conn: &Connection) -> Result<()> {
 /// migration tests build a file with the current schema and then reduce it, so a step
 /// that assumed the column was absent would refuse to run there -- and a step that
 /// merely swallowed the error would never be shown to do anything at all.
+fn migrate_to_14(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", "private_remark TEXT NOT NULL DEFAULT ''")
+}
+
 fn migrate_to_13(conn: &Connection) -> Result<()> {
     let has_kind: i64 =
         conn.query_row("SELECT COUNT(*) FROM pragma_table_info('ping_task') WHERE name = 'kind'", [], |r| {
@@ -520,6 +528,7 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 13 {
         migrate_to_13(&tx)?;
+        migrate_to_14(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
@@ -566,6 +575,9 @@ pub struct Node {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub remark: String,
+    /// 只在管理后台可见；**任何**公开响应里都不出现。
+    #[serde(default)]
+    pub private_remark: String,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -659,6 +671,7 @@ pub struct NodePatch {
     #[serde(default, deserialize_with = "expiry_patch")]
     pub expires_at: Option<Option<String>>,
     pub remark: Option<String>,
+    pub private_remark: Option<String>,
     pub traffic_limit: Option<i64>,
     pub traffic_mode: Option<String>,
     pub traffic_reset_day: Option<u32>,
@@ -1096,8 +1109,9 @@ impl Db {
             // A new node belongs at the end. The caller sends sort 0, which would
             // tie with whatever the last reorder placed first.
             "INSERT INTO node (name, token, sort, public, price, currency, billing_cycle,
-                               expires_at, remark, traffic_limit, traffic_mode, traffic_reset_day, created_at, \"group\")
-             VALUES (?1,?2,(SELECT COALESCE(MAX(sort),-1)+1 FROM node),?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                               expires_at, remark, traffic_limit, traffic_mode, traffic_reset_day, created_at, \"group\",
+                               private_remark)
+             VALUES (?1,?2,(SELECT COALESCE(MAX(sort),-1)+1 FROM node),?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 n.name,
                 token,
@@ -1111,7 +1125,8 @@ impl Db {
                 n.traffic_mode,
                 n.traffic_reset_day,
                 Utc::now().timestamp(),
-                n.group
+                n.group,
+                n.private_remark
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -1156,7 +1171,8 @@ impl Db {
                              traffic_reset_day=COALESCE(?13,traffic_reset_day),
                              notify=COALESCE(?14,notify), \"group\"=COALESCE(?15,\"group\"),
                              country_pin=COALESCE(?16,country_pin),
-                             ipv4_pin=COALESCE(?17,ipv4_pin), ipv6_pin=COALESCE(?18,ipv6_pin)
+                             ipv4_pin=COALESCE(?17,ipv4_pin), ipv6_pin=COALESCE(?18,ipv6_pin),
+                             private_remark=COALESCE(?19,private_remark)
              WHERE id=?1",
             params![
                 id,
@@ -1176,7 +1192,8 @@ impl Db {
                 n.group,
                 n.country_pin,
                 n.ipv4_pin,
-                n.ipv6_pin
+                n.ipv6_pin,
+                n.private_remark
             ],
         )?;
         Ok(found > 0)
@@ -3066,6 +3083,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         billing_cycle: s("billing_cycle"),
         expires_at: r.get::<_, Option<String>>("expires_at").unwrap_or(None),
         remark: s("remark"),
+        private_remark: s("private_remark"),
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,
