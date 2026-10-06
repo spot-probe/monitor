@@ -3842,10 +3842,9 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
                 loss while the target answered in 8 ms). Upgrading the hub first does not
                 help -- the agent is what has to understand the new task. */}
             <p className="rounded-lg border border-warn/30 bg-warn/5 px-3 py-2.5 text-xs leading-relaxed">
-              <span className="font-medium">先升 agent，再升 hub。</span>
-              旧 agent 遇到它不认识的新探测方式时，不会报错 —— 它会悄悄改成 TCP 去跑，
-              结果是一条读数都没有，而且不报错，最难查。
-              <span className="font-medium">光升 hub 修不好</span>：任务最终由 agent 执行，得它认识才行。
+              <span className="font-medium">需先升 agent，再升 hub。</span>
+              旧版本 agent 遇到陌生探测方式时，不会报错，而由 TCP 去兜底 ——
+              读不到数据，且不报错。
             </p>
             <p className="text-xs leading-relaxed text-muted-foreground">
               以 root 在每台机器上执行一次。命令不含凭证、沿用机器上已有的设置，不会新建节点，也不会消耗注册窗口。
