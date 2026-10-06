@@ -528,6 +528,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     }
     if from < 13 {
         migrate_to_13(&tx)?;
+    }
+    // 各自一条守卫：migrate_to_14 一度被塞进上面那个 from < 13 块里 ——
+    // 于是 from == 13 的库（每一个升级上来的生产库）跳过它，却仍被末尾那行盖章到 14，
+    // 从此永久缺列。全新库的 SCHEMA 已带该列，add_column 会当作「重复列」忽略，
+    // 所以别的测试全绿也发现不了 —— 见 migrating_from_13_adds_the_private_remark_column。
+    if from < 14 {
         migrate_to_14(&tx)?;
     }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -4521,6 +4527,34 @@ mod tests {
     /// current schema and only pretend to be older, so they cannot show that the step
     /// does anything -- deleting `migrate_to_13` would leave them green. This one
     /// fails without it.
+    /// 升级路径的闸：一个「13 版」的库（缺 private_remark）迁移后必须有那一列、且戳到 14。
+    ///
+    /// 这条是踩出来的：migrate_to_14 曾被塞进 if from < 13 块里，而盖章在块外 ——
+    /// 于是 from == 13（升级上来的生产库）跳过迁移却被打上 14，永久缺列。
+    /// 全新库的 SCHEMA 本来就带那一列，add_column 会当作「重复列」忽略，别的测试发现不了。
+    #[test]
+    fn migrating_from_13_adds_the_private_remark_column() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE node DROP COLUMN private_remark", []).unwrap();
+        conn.execute("PRAGMA user_version = 13", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"private_remark".to_string()), "前提：列已删掉");
+        migrate(&conn, 13).unwrap();
+        assert!(cols(&conn).contains(&"private_remark".to_string()), "迁移后必须有该列");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
     #[test]
     fn a_file_without_the_kind_column_gains_it_as_tcp() {
         let db = db();
