@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { ArrowUpCircle, CalendarClock, CircleAlert } from "lucide-react"
+import { ArrowUpCircle, CalendarClock, CircleAlert, Search } from "lucide-react"
 
 import { api, behind } from "@/lib/api"
 import type { Node } from "@/lib/api"
@@ -7,6 +7,8 @@ import { bytes, monthUsage } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Input } from "@/components/ui/input"
 
 // `daysUntil` 与 `Expiry` 仍在 `Admin.tsx`（节点表也在用）。从那里 import 会形成**循环引用**，
 // 但两者都是函数声明 —— 声明会提升，且只在渲染时调用，所以这个环是安全的；比把它们复制一份好。
@@ -586,6 +588,15 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 趋势另说：它的数是在 hub 侧聚合的，所以还要把分组传给接口（见 useOverviewSeries）。
   const groups = [...new Set(allNodes.map((n) => n.group).filter(Boolean))].sort()
   const [group, setGroup] = useState("")
+  // 顶层视图。**故意不叫 `tab`**：趋势卡内部已经用 `tab`/`setTab` 表示"流量/带宽/资源"，
+  // 同名会撞车。选择记在 localStorage，和 `overview-auto` 同一个习惯。
+  const [page, setPage] = useState<"resource" | "cost">(() =>
+    localStorage.getItem("overview-page") === "cost" ? "cost" : "resource",
+  )
+  const pickPage = (p: "resource" | "cost") => {
+    setPage(p)
+    localStorage.setItem("overview-page", p)
+  }
   const nodes = group ? allNodes.filter((n) => n.group === group) : allNodes
 
   // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
@@ -791,54 +802,51 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </Card>
 
         <a
-          href={outdated > 0 ? "/admin/update" : undefined}
-          className={`block h-full rounded-xl ${outdated > 0 ? "transition-shadow hover:ring-1 hover:ring-primary" : ""}`}
+          href={outdated > 0 || hubBehind ? "/admin/update" : undefined}
+          className={`block h-full rounded-xl ${
+            outdated > 0 || hubBehind ? "transition-shadow hover:ring-1 hover:ring-primary" : ""
+          }`}
         >
-        <Card>
-          <CardContent>
-            <div className="flex items-start justify-between gap-2">
-              <div className="text-xs text-muted-foreground">待升级 agent</div>
-              <StatusPill tone={outdated > 0 ? "warn" : "ok"} text={outdated > 0 ? "有落后" : "正常"} />
-            </div>
-            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${outdated > 0 ? "" : ""}`}>
-              {outdated}
-              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
-            </div>
-            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
-              <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="text-muted-foreground">
-                最新 <span className="font-mono">{agentLatest ?? "—"}</span>
-              </span>
-            </div>
-          </CardContent>
-        </Card>
+          {/* agent 与 hub 合成**一张卡**：它们回答的是同一个问题（"我要不要去做升级这件事"），
+              分成两张时视觉上像两件事，实际点进去是同一个页面。
+              主数字给**合计**，逐个的数量放小字 —— 维护者指定的形式。
+              颜色保持中性（这一页早先刻意去掉了 KPI 数字上的红），只由右上角徽章带 tone。 */}
+          <Card>
+            <CardContent>
+              <div className="flex items-start justify-between gap-2">
+                <div className="text-xs text-muted-foreground">待升级</div>
+                <StatusPill
+                  tone={outdated > 0 || hubBehind ? "warn" : "ok"}
+                  text={outdated > 0 || hubBehind ? "有更新" : "都是最新"}
+                />
+              </div>
+              <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">
+                {outdated + (hubBehind ? 1 : 0)}
+                <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">项</span>
+              </div>
+              {/* 版号**并进同一行**，不另起一行：另起一行会让这张卡比邻卡高一行，
+                  整行网格跟着变高（维护者指出的问题）。而"都是最新"时那行版号本来就是噪音 ——
+                  所以只有**确实有更新**时才带上目标版本，平时这一行就是三行里的第三行。 */}
+              <div className="mt-2.5 flex items-center gap-1.5 text-xs">
+                <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate text-muted-foreground">
+                  agent <span className="tnum">{outdated}</span> · hub{" "}
+                  <span className="tnum">{hubBehind ? 1 : 0}</span>
+                  {(outdated > 0 || hubBehind) && (
+                    <>
+                      {" · "}
+                      <span className="font-mono">
+                        ↑{hubBehind && outdated === 0 ? hub || "—" : agentLatest ?? "—"}
+                      </span>
+                    </>
+                  )}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
         </a>
 
-        {/* 第 4 张：hub 自身。与第 3 张「agent 待升级」成对 —— 升级时两样都要看。 */}
-        <a
-          href={hubBehind ? "/admin/update" : undefined}
-          className={`block h-full rounded-xl ${hubBehind ? "transition-shadow hover:ring-1 hover:ring-primary" : ""}`}
-        >
-        <Card>
-          <CardContent>
-            <div className="flex items-start justify-between gap-2">
-              <div className="text-xs text-muted-foreground">待升级 hub</div>
-              <StatusPill tone={hubBehind ? "warn" : "ok"} text={hubBehind ? "有新版" : "最新"} />
-            </div>
-            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${hubBehind ? "" : ""}`}>
-              {hubBehind ? 1 : 0}
-              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">个</span>
-            </div>
-            <div className="mt-2.5 flex items-center gap-1.5 text-xs">
-              <ArrowUpCircle className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="text-muted-foreground">
-                当前 <span className="font-mono">{hub || "—"}</span>
-                {hubLatest && <span> · 最新 <span className="font-mono">{hubLatest}</span></span>}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-        </a>
+        
       </div>
 
       {/* 分组与自动刷新**同一行**：左边是"看什么"（页面级控件，影响一整页），右边是"多久看一次"。
@@ -882,6 +890,24 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
       </div>
 
+      {/* 顶层 tlb：**4 张公共卡与分组筛选之下**，把"资源"与"成本"分成两个视图。
+          资源那一边的内容一个字没改，只是被包进这个分支里。
+          复用页面既有的 `TRACK`/`pill`，与其它分段控件同一套语汇；为了和内层
+          （趋势卡里的"流量/带宽/资源"）区分，这里前面带一个「视图」标签。 */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <span className="text-muted-foreground">视图</span>
+        <span aria-hidden className="h-4 w-px bg-border" />
+        <div className={TRACK}>
+          {([["resource", "资源"], ["cost", "成本"]] as const).map(([k, label]) => (
+            <button key={k} type="button" onClick={() => pickPage(k)} aria-pressed={page === k} className={pill(page === k)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {page === "resource" ? (
+        <>
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
@@ -1204,7 +1230,320 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </CardContent>
       </Card>
       </div>
+
+        </>
+      ) : (
+        <CostBlock nodes={allNodes} group={group} />
+      )}
     </div>
   )
 }
 
+// ───────────────────────── 成本 ─────────────────────────
+
+/** 计费周期 → 月数。认不出的一律按 1 个月（宁可少算一项，也不要静默漏掉整台机器）。 */
+function cycleMonths(cycle: string): number {
+  switch ((cycle || "").toLowerCase()) {
+    case "quarterly": case "quarter": case "3m": return 3
+    case "semiannual": case "semi-annual": case "halfyear": case "half-yearly": case "6m": return 6
+    case "yearly": case "annual": case "annually": case "year": case "12m": return 12
+    default: return 1
+  }
+}
+
+const cny = (v: number) => (v >= 10000 ? `¥${(v / 10000).toFixed(2)} 万` : `¥${v.toFixed(v < 100 ? 2 : 0)}`)
+
+/** 一行成本。**两种缺失分得很清**：没填价格 → `none`；有价格但没汇率 → `norate`。 */
+type CostRow = { n: Node; monthly: number | null; why: "none" | "norate" | null }
+
+function costRow(n: Node, perUnit: Record<string, number>): CostRow {
+  if (!(n.price > 0)) return { n, monthly: null, why: "none" }
+  const rate = perUnit[n.currency]
+  if (!rate || rate <= 0) return { n, monthly: null, why: "norate" }
+  return { n, monthly: (n.price / cycleMonths(n.billing_cycle)) * rate, why: null }
+}
+
+/** 到期状态。用**本仓的语义 token**（`warn-fg` / `danger-fg`），不写死调色板 —— 深色模式才跟着走。 */
+function ExpiryBadge({ date }: { date: string | null }) {
+  const d = daysUntil(date)
+  if (d === null) return <span className="text-xs text-muted-foreground">∞</span>
+  const tone = d < 0 ? "bg-danger-fg/10 text-danger-fg" : d <= 7 ? "bg-warn-fg/10 text-warn-fg" : "bg-muted text-muted-foreground"
+  const label = d < 0 ? `已过期 ${-d} 天` : d === 0 ? "今天到期" : d <= 7 ? `${d} 天后到期` : (date ?? "")
+  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${tone}`}>{label}</span>
+}
+
+/**
+ * 成本块：KPI + 未来 12 个月 + 每台服务器。
+ *
+ * 分区、间距与组件选用照前端同事的方案（shadcn/ui 规范）；颜色一律走本仓 token ——
+ * 他给的 `bg-amber-500/10` 之类会写死调色板，深色模式下会破，这里换成 `warn-fg`。
+ *
+ * 两条来自实际使用的约束：
+ * - 表格默认只列前 12 行、其余收进对话框（100 台时把整页拉长是不能接受的）；
+ * - 月份的逐台明细是**常驻 callout**，不是浮在柱子上的卡片（不遮挡、不会在最左/最右顶出边界）。
+ */
+function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
+  const [fx, setFx] = useState<{ per_unit: Record<string, number>; fetched_at: number; manual: boolean; available: boolean } | null>(null)
+  const [sort, setSort] = useState<"monthly" | "expiry">("monthly")
+  const [allOpen, setAllOpen] = useState(false)
+  const [pick, setPick] = useState<string | null>(null)
+  const [only, setOnly] = useState<"priced" | "noprice" | "norate" | "all">("priced")
+  const [q, setQ] = useState("")
+
+  useEffect(() => {
+    let alive = true
+    api<{ per_unit: Record<string, number>; fetched_at: number; manual: boolean; available: boolean }>("/fx")
+      .then((d) => alive && setFx(d))
+      .catch(() => alive && setFx(null))
+    return () => { alive = false }
+  }, [])
+
+  const shown = group ? nodes.filter((n) => n.group === group) : nodes
+  const perUnit = fx?.per_unit ?? {}
+  const rows = shown.map((n) => costRow(n, perUnit))
+  const priced = rows.filter((r) => r.monthly !== null) as (CostRow & { monthly: number })[]
+  const unpriced = rows.length - priced.length
+  const norate = rows.filter((r) => r.why === "norate").length
+  const monthly = priced.reduce((a, r) => a + r.monthly, 0)
+
+  const now = new Date()
+  const months = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
+    return { key: `${d.getFullYear()}-${d.getMonth()}`, label: `${d.getMonth() + 1} 月`, total: 0, rows: [] as typeof priced }
+  })
+  const firstKey = months[0].key
+  for (const r of priced) {
+    const exp = r.n.expires_at ? new Date(r.n.expires_at) : null
+    const key = exp && !isNaN(exp.getTime()) ? `${exp.getFullYear()}-${exp.getMonth()}` : firstKey
+    const hit = months.find((m) => m.key === key) ?? months[0]
+    hit.total += r.monthly
+    hit.rows.push(r)
+  }
+  const peak = Math.max(1, ...months.map((m) => m.total))
+  const picked = months.find((m) => m.key === pick) ?? null
+
+  const filtered = rows.filter((r) => {
+    if (q && !`${r.n.name} ${r.n.group ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false
+    if (only === "priced") return r.monthly !== null
+    if (only === "noprice") return r.why === "none"
+    if (only === "norate") return r.why === "norate"
+    return true
+  })
+  const bySort = [...filtered].sort((a, b) =>
+    sort === "monthly" ? (b.monthly ?? -1) - (a.monthly ?? -1) : (daysUntil(a.n.expires_at) ?? 1e9) - (daysUntil(b.n.expires_at) ?? 1e9),
+  )
+  const top = bySort.slice(0, 12)
+
+  const byGroup = new Map<string, number>()
+  for (const r of priced) {
+    const g = r.n.group || "未分组"
+    byGroup.set(g, (byGroup.get(g) ?? 0) + r.monthly)
+  }
+  const tones = ["bg-primary", "bg-info-fg", "bg-warn-fg", "bg-success-fg", "bg-danger-fg", "bg-muted-foreground"]
+
+  const table = (list: CostRow[]) => (
+    <Table>
+      <TableHeader>
+        <TableRow className="border-border/60 hover:bg-transparent">
+          <TableHead className="w-[26%] text-xs font-medium">节点</TableHead>
+          <TableHead className="w-[12%] text-xs font-medium">分组</TableHead>
+          <TableHead className="w-[22%] text-xs font-medium">价格</TableHead>
+          <TableHead className="w-[13%] text-right text-xs font-medium">
+            <button type="button" className="hover:text-foreground" onClick={() => setSort("monthly")}>每月{sort === "monthly" ? " ↓" : ""}</button>
+          </TableHead>
+          <TableHead className="w-[13%] text-right text-xs font-medium">每年</TableHead>
+          <TableHead className="w-[14%] text-right text-xs font-medium">
+            <button type="button" className="hover:text-foreground" onClick={() => setSort("expiry")}>到期{sort === "expiry" ? " ↑" : ""}</button>
+          </TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {list.map((r) => (
+          <TableRow key={r.n.id} className="border-border/40">
+            <TableCell className="py-2 font-medium">{r.n.name}</TableCell>
+            <TableCell className="py-2">
+              {r.n.group ? <Badge variant="secondary" className="font-normal">{r.n.group}</Badge> : <span className="text-muted-foreground">—</span>}
+            </TableCell>
+            <TableCell className="py-2 font-mono text-xs text-muted-foreground">
+              {r.n.price > 0 ? `${r.n.price} ${r.n.currency} / ${r.n.billing_cycle}` : <Badge variant="outline" className="font-normal text-muted-foreground">未设置</Badge>}
+            </TableCell>
+            <TableCell className="py-2 text-right font-mono tabular-nums font-medium">
+              {r.monthly === null ? <span className="text-muted-foreground">—</span> : cny(r.monthly)}
+            </TableCell>
+            <TableCell className="py-2 text-right font-mono tabular-nums text-muted-foreground">
+              {r.monthly === null ? "—" : cny(r.monthly * 12)}
+            </TableCell>
+            <TableCell className="py-2 text-right"><ExpiryBadge date={r.n.expires_at} /></TableCell>
+          </TableRow>
+        ))}
+        {list.length === 0 && (
+          <TableRow><TableCell colSpan={6} className="py-6 text-center text-xs text-muted-foreground">没有符合条件的节点。</TableCell></TableRow>
+        )}
+      </TableBody>
+    </Table>
+  )
+
+  return (
+    // 它落在页面末尾那个两列网格里（日历在另一列），所以自己占满一整行。
+    <Card className="lg:col-span-2">
+      <CardHeader className="border-b border-border/60 pb-3">
+        <CardTitle className="text-sm">成本概览</CardTitle>
+        <CardAction>
+          <span className="text-xs text-muted-foreground">
+            {fx === null ? "汇率读取中…"
+              : !fx.available ? "未有汇率（不会按 1:1 估算）"
+              : fx.manual ? `手动汇率 · 1 USD = ${perUnit.USD?.toFixed(4)} CNY`
+              : `汇率 1 USD = ${perUnit.USD?.toFixed(4)} CNY · ${fx.fetched_at ? new Date(fx.fetched_at * 1000).toLocaleDateString("zh-CN") : "—"}`}
+          </span>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="space-y-5 pt-4">
+        {/* ① 三个指标各占一个浅色嵌板。第三格是"待补全"，用 Badge 标出来而不是让汉字挂在数字下面。 */}
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
+            <div className="text-xs text-muted-foreground">每月成本{group ? `（${group}）` : ""}</div>
+            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">{cny(monthly)}</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">按当前价格摊平</div>
+          </div>
+          <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
+            <div className="text-xs text-muted-foreground">折合每年</div>
+            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">{cny(monthly * 12)}</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">同上 × 12</div>
+          </div>
+          {/* 第三格与另两格**同骨架**（标签 / 主数字 / 一行小字）：`98 台` 里"台"按资源卡的写法弱化，
+              否则两行小字会把它的视觉中心压得与邻格错位。 */}
+          <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">待补全信息</span>
+              <Badge variant="outline" className="shrink-0 font-normal">{unpriced > 0 ? "需跟进" : "齐了"}</Badge>
+            </div>
+            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">
+              {unpriced}
+              <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">未填价格{norate > 0 ? ` / 缺汇率 ${norate}` : ""}，未计入合计</div>
+          </div>
+        </div>
+
+        {byGroup.size > 1 && (
+          <div className="space-y-1.5">
+            <div className="flex h-2 overflow-hidden rounded-full bg-muted">
+              {[...byGroup.entries()].map(([g, v], i) => (
+                <div key={g} className={tones[i % tones.length]} style={{ width: `${(v / monthly) * 100}%` }} />
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+              {[...byGroup.entries()].map(([g, v], i) => (
+                <span key={g} className="flex items-center gap-1">
+                  <span aria-hidden className={`size-2 rounded-[2px] ${tones[i % tones.length]}`} />
+                  {g} <span className="font-mono tabular-nums text-foreground">{cny(v)}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ② 图区：一个浅边框槽，柱子限宽、压高低噪；**没有数据的月份也画一条背景槽**，
+            否则"只有一根柱子、其余全白"看起来像加载失败。明细收成这张卡的内嵌 footer。 */}
+        <div className="overflow-hidden rounded-lg border border-border/60">
+          <div className="px-3 pt-3 text-xs text-muted-foreground">未来 12 个月摊平预测（按当前价格；到期的机器落在到期那个月）</div>
+          <div className="flex items-end gap-1 px-3 pt-3">
+            {months.map((m) => (
+              <button
+                key={m.key}
+                type="button"
+                onMouseEnter={() => setPick(m.key)}
+                onFocus={() => setPick(m.key)}
+                onClick={() => setPick(m.key === pick ? null : m.key)}
+                className="flex flex-1 flex-col items-center rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                aria-label={`${m.label}：${cny(m.total)}`}
+              >
+                <div className="relative flex h-[120px] w-full items-end justify-center">
+                  {/* 背景槽：本月的"容量"参考线，空月份也能看出这里有个槽位 */}
+                  <div aria-hidden className="absolute inset-x-0 bottom-0 mx-auto h-full w-full max-w-[28px] rounded-t-sm bg-muted/60" />
+                  <div
+                    className={`relative w-full max-w-[28px] rounded-t-sm transition-colors ${pick === m.key ? "bg-primary" : "bg-primary/60 hover:bg-primary/80"}`}
+                    style={{ height: `${Math.max(m.total > 0 ? 2 : 0, (m.total / peak) * 100)}%` }}
+                  />
+                </div>
+                <div className={`mt-1.5 text-[11px] ${pick === m.key ? "text-foreground" : "text-muted-foreground"}`}>{m.label}</div>
+              </button>
+            ))}
+          </div>
+          <div className="mt-3 flex items-start gap-2 border-t border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+            {picked ? (
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-foreground">{picked.label}</span>
+                  <span className="font-mono tabular-nums text-foreground">预计本月 {cny(picked.total)}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                  {picked.rows.length === 0 && <span>该月份暂无摊销成本。</span>}
+                  {picked.rows.map((r) => (
+                    <span key={r.n.id}>{r.n.name} <span className="font-mono tabular-nums text-foreground">{cny(r.monthly)}</span></span>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <span>把鼠标移到某个月（或点它）看这个月的逐台明细。</span>
+            )}
+          </div>
+        </div>
+
+        {/* ③ 工具条：等高胶囊 + 带放大镜的搜索框。 */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 分段控件**复用本页已有的 `TRACK` / `pill`**：过滤条与页面上其它分段控件同一套语汇，
+              不另起一套（那会与上面的资源卡颜色风格分家）。 */}
+          <div className={`${TRACK} flex-wrap`}>
+            {([
+              ["priced", `有价格 ${priced.length}`],
+              ["noprice", `未填价格 ${rows.filter((r) => r.why === "none").length}`],
+              ["norate", `缺汇率 ${norate}`],
+              ["all", `全部 ${rows.length}`],
+            ] as const).map(([k, label]) => (
+              <button key={k} type="button" onClick={() => setOnly(k)} className={`h-7 rounded-full px-2.5 text-xs ${pill(only === k)}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="ml-auto text-xs text-muted-foreground">
+            {filtered.length === rows.length ? `共 ${rows.length} 台` : `筛出 ${filtered.length} / ${rows.length} 台`}
+          </span>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="搜索节点或分组"
+              className="h-8 w-44 pl-7 text-xs"
+            />
+          </div>
+        </div>
+
+        {/* ④ 明细：标准 Table。 */}
+        <div className="rounded-lg border border-border/60">
+          <div className="px-3">{table(top)}</div>
+          {filtered.length > top.length && (
+            <button
+              type="button"
+              onClick={() => setAllOpen(true)}
+              className="w-full border-t border-border/60 py-2 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+            >
+              还有 {filtered.length - top.length} 台 —— 点开看全部
+            </button>
+          )}
+        </div>
+
+        <Dialog open={allOpen} onOpenChange={setAllOpen}>
+          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-sm">节点成本（{filtered.length} 台）</DialogTitle>
+            </DialogHeader>
+            <div className="rounded-lg border border-border/60 px-3">{table(bySort)}</div>
+          </DialogContent>
+        </Dialog>
+      </CardContent>
+    </Card>
+  )
+}
