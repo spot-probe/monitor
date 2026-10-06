@@ -100,9 +100,9 @@ const CHART_PAD = 18
 /// 颜色一律走 token（`ok-fg` / `warn-fg` / `danger-fg`），不写死调色板 —— 暗色主题才成立。
 function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; text: string }) {
   const cls = {
-    ok: "bg-ok-fg/12 text-ok-fg",
-    warn: "bg-warn-fg/15 text-warn-fg",
-    bad: "bg-danger-fg/12 text-danger-fg",
+    ok: "bg-muted text-muted-foreground",
+    warn: "bg-muted text-muted-foreground",
+    bad: "bg-muted text-muted-foreground",
     muted: "bg-muted text-muted-foreground",
   }[tone]
   return <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] leading-tight font-medium ${cls}`}>{text}</span>
@@ -755,11 +755,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
             <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              <span className={online > 0 ? "flex items-center gap-1.5 text-ok-fg" : "flex items-center gap-1.5 text-muted-foreground"}>
+              <span className={online > 0 ? "flex items-center gap-1.5 text-muted-foreground" : "flex items-center gap-1.5 text-muted-foreground"}>
                 <span className="size-1.5 rounded-full bg-current" />
                 <span className="tnum">{online}</span> 在线
               </span>
-              <span className={nodes.length - online > 0 ? "flex items-center gap-1.5 font-semibold text-danger-fg" : "flex items-center gap-1.5 text-muted-foreground"}>
+              <span className={nodes.length - online > 0 ? "flex items-center gap-1.5 text-muted-foreground" : "flex items-center gap-1.5 text-muted-foreground"}>
                 <span className="size-1.5 rounded-full bg-current" />
                 <span className="tnum">{nodes.length - online}</span> 离线
               </span>
@@ -773,13 +773,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <div className="text-xs text-muted-foreground">30 天内到期</div>
               <StatusPill tone={expired > 0 ? "bad" : expiring > 0 ? "warn" : "ok"} text={expired > 0 ? "已有过期" : expiring > 0 ? "需续费" : "无临期"} />
             </div>
-            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${expiring > 0 ? "text-warn-fg" : ""}`}>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${expiring > 0 ? "" : ""}`}>
               {expiring}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
             <div className="mt-2.5 flex items-center gap-1.5 text-xs">
               <CalendarClock className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className={expired > 0 ? "font-semibold text-danger-fg" : "text-muted-foreground"}>
+              <span className={expired > 0 ? "text-muted-foreground" : "text-muted-foreground"}>
                 已过期 <span className="tnum">{expired}</span> 台
               </span>
             </div>
@@ -792,7 +792,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <div className="text-xs text-muted-foreground">待升级 agent</div>
               <StatusPill tone={outdated > 0 ? "warn" : "ok"} text={outdated > 0 ? "有落后" : "正常"} />
             </div>
-            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${outdated > 0 ? "text-warn-fg" : ""}`}>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${outdated > 0 ? "" : ""}`}>
               {outdated}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
@@ -812,7 +812,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <div className="text-xs text-muted-foreground">待升级 hub</div>
               <StatusPill tone={hubBehind ? "warn" : "ok"} text={hubBehind ? "有新版" : "最新"} />
             </div>
-            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${hubBehind ? "text-warn-fg" : ""}`}>
+            <div className={`tnum mt-2 text-3xl leading-none font-semibold tracking-tight ${hubBehind ? "" : ""}`}>
               {hubBehind ? 1 : 0}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">个</span>
             </div>
@@ -1026,7 +1026,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   offline.map((d, idx) => (
                     <div key={d.node} className="flex items-center gap-3 py-0.5 text-sm">
                       <span className="min-w-0 flex-1 truncate font-medium">{d.node}</span>
-                      <span className={`tnum w-40 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                      <span className={`tnum w-40 shrink-0 text-right text-xs ${idx === 0 ? "font-medium" : "font-medium"}`}>
                         已离线 {span(nowSec - d.last_seen)}
                       </span>
                     </div>
@@ -1047,7 +1047,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     <div key={`${r.task}-${r.node}`} className="flex items-center gap-3 py-0.5 text-sm">
                       <span className="min-w-0 flex-1 truncate font-medium">{r.node}</span>
                       <span className="w-16 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
-                      <span className={`tnum w-24 shrink-0 text-right text-xs ${idx === 0 ? "font-semibold text-danger-fg" : "font-medium"}`}>
+                      <span className={`tnum w-24 shrink-0 text-right text-xs ${idx === 0 ? "font-medium" : "font-medium"}`}>
                         {riskTab === "latency" ? `平均 ${Math.round(r.value)} ms` : `丢包 ${(r.value * 100).toFixed(1)}%`}
                       </span>
                       <span className="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">{r.samples} 次</span>
