@@ -1527,12 +1527,12 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
             <div className="text-xs text-muted-foreground">每月成本{group ? `（${group}）` : ""}</div>
-            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">{cny(monthly)}</div>
+            <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">{cny(monthly)}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">按当前价格摊平</div>
           </div>
           <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
             <div className="text-xs text-muted-foreground">折合每年</div>
-            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">{cny(monthly * 12)}</div>
+            <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">{cny(monthly * 12)}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">同上 × 12</div>
           </div>
           {/* 第三格与另两格**同骨架**（标签 / 主数字 / 一行小字）：`98 台` 里"台"按资源卡的写法弱化，
@@ -1542,7 +1542,7 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
               <span className="text-xs text-muted-foreground">待补全信息</span>
               <Badge variant="outline" className="shrink-0 font-normal">{unpriced > 0 ? "需跟进" : "齐了"}</Badge>
             </div>
-            <div className="mt-1 font-mono text-2xl font-bold tabular-nums">
+            <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">
               {unpriced}
               <span className="ml-1 align-baseline text-xs font-normal text-muted-foreground">台</span>
             </div>
