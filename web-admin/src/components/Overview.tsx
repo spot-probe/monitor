@@ -627,6 +627,34 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 前端拿不到那种聚合），所以只取一次、切换榜不再发请求。
   type RiskRow = { task: string; node: string; value: number; samples: number }
   type Risk = { latency: RiskRow[]; loss: RiskRow[]; down: { node: string; last_seen: number }[] }
+  // 汇率：给第 4 张公共卡用。成本 tab 自己也会取一份，两个请求打同一个端点、结果一致 ——
+  // **关键是算法只在一处**：两边都用模块级的 `costRow()`，所以不会各算一套。
+  const [fx, setFx] = useState<{ per_unit: Record<string, number> } | null>(null)
+  useEffect(() => {
+    let stop = false
+    api<{ per_unit: Record<string, number> }>("/fx")
+      .then((d) => { if (!stop) setFx(d) })
+      .catch(() => { if (!stop) setFx(null) })
+    return () => { stop = true }
+  }, [])
+  const perUnitTop = fx?.per_unit ?? {}
+  // **口径（维护者定）**：这两个数只统计"**有到期日且未过期**"的机器 ——
+  // 没有到期日（∞）的没有"剩余"可言，已过期的也不在计费里。
+  // 注意因此它与成本 tab 的「每月成本（全部机器）」**是两个不同的问题**，不该相等。
+  // 缺汇率的机器一律跳过（绝不 1:1）。
+  const dated = allNodes.map((n) => ({ n, r: costRow(n, perUnitTop), d: daysUntil(n.expires_at) }))
+  const inScope = dated.filter((x) => x.r.monthly !== null && x.d !== null && x.d >= 0)
+  const monthlyNow = inScope.reduce((a, x) => a + (x.r.monthly ?? 0), 0)
+  // 剩余价值 = 价格 ÷ 周期天数 × 剩余天数（例：600/年、剩 180 天 → 600/365×180 = ¥295.89）
+  const residual = inScope.reduce((a, x) => {
+    const days = cycleDays(x.n.billing_cycle)
+    return a + (x.n.price / days) * (x.d as number) * (perUnitTop[x.n.currency] ?? 1)
+  }, 0)
+  const noExpiry = dated.filter((x) => x.d === null).length
+  // 名字不能叫 `expired`：上面「30 天内到期」那张卡已经用了这个变量。
+  const expiredCount = dated.filter((x) => x.d !== null && x.d < 0).length
+  const noRate = dated.filter((x) => x.r.monthly === null).length
+
   const [risk, setRisk] = useState<Risk | null>(null)
   const [riskTab, setRiskTab] = useState<"latency" | "loss" | "down">("latency")
   useEffect(() => {
@@ -845,6 +873,34 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </CardContent>
           </Card>
         </a>
+
+        {/* 第 4 张：当月开销与剩余价值。两个数都走 `costRow()`，与成本 tab 同源。
+            "剩余价值"是**估算**（假设当前计费周期的终点就是 `expires_at`），所以写明估算；
+            没有到期的机器与缺汇率的机器都不计入，旁边标出计入了多少台。 */}
+        {/* **三行同构**：与上面三张卡一样是「标签+徽章 / 主数字 / 一行小字」。
+            口径细节（排除了哪些）并进第三行尾部的 `title`，**不占第四行** ——
+            多一行会把这整行网格撑高，反过来把前三张拉出空白（维护者两次指出的问题）。 */}
+        <Card className="h-full">
+          <CardContent>
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-xs text-muted-foreground">未到期当月开销</div>
+              <StatusPill tone="ok" text="估算" />
+            </div>
+            <div className="tnum mt-2 text-3xl leading-none font-semibold tracking-tight">
+              {cny(monthlyNow)}
+            </div>
+            <div
+              className="mt-2.5 flex items-center gap-1.5 text-xs"
+              title={`已排除：无到期日 ${noExpiry} 台 · 已过期 ${expiredCount} 台${noRate > 0 ? ` · 缺汇率 ${noRate} 台` : ""}`}
+            >
+              <CalendarClock className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate text-muted-foreground">
+                剩余价值 <span className="tnum">{cny(residual)}</span>
+                <span className="ml-1">（{inScope.length} 台计入）</span>
+              </span>
+            </div>
+          </CardContent>
+        </Card>
 
         
       </div>
@@ -1242,6 +1298,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 // ───────────────────────── 成本 ─────────────────────────
 
 /** 计费周期 → 月数。认不出的一律按 1 个月（宁可少算一项，也不要静默漏掉整台机器）。 */
+/** 计费周期的**天数**，用于"剩余价值 = 价格 ÷ 周期天数 × 剩余天数"（维护者给的口径）。
+ *  与 `cycleMonths` 分开：那个用来摊平成"每月"，这个用来按天折算剩余。 */
+function cycleDays(cycle: string): number {
+  switch ((cycle || "").toLowerCase()) {
+    case "quarterly": case "quarter": case "3m": return 91
+    case "semiannual": case "semi-annual": case "halfyear": case "half-yearly": case "6m": return 182
+    case "yearly": case "annual": case "annually": case "year": case "12m": return 365
+    default: return 30
+  }
+}
+
 function cycleMonths(cycle: string): number {
   switch ((cycle || "").toLowerCase()) {
     case "quarterly": case "quarter": case "3m": return 3
