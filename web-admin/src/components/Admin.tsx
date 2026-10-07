@@ -2910,6 +2910,140 @@ function useSettings() {
   }
 }
 
+/// 站点图标：三处各自独立，可以只替换其中一处。
+///
+/// 预览直接用 `<img src="/site-icon/<slot>">` —— **未设置时那个地址会 302 到主题自带的那张**，
+/// 所以"预览里看到的就是当前生效的那张"，不需要额外状态。改过之后靠 `?v=` 换一个查询串，
+/// 让浏览器重新取（服务端那三条响应是 `no-cache`）。
+const ICON_SLOTS: { slot: string; label: string; scope: string; size: string; box: string }[] = [
+  {
+    slot: "tab",
+    label: "标签页图标",
+    scope: "浏览器标签页与书签栏",
+    size: "建议 32×32 或 64×64",
+    // 预览**长得像它真实出现的地方**：标签页那个位置是方的。
+    box: "h-12 w-12 rounded-lg",
+  },
+  {
+    slot: "apple",
+    label: "iOS 主屏图标",
+    scope: "添加到 iPhone / iPad 主屏之后",
+    size: "建议 180×180（系统以圆角遮罩显示）",
+    box: "h-12 w-12 rounded-2xl",
+  },
+  {
+    slot: "og",
+    label: "社交分享预览图",
+    scope: "把链接分享到聊天或社交平台时的卡片图",
+    size: "建议 1200×630",
+    // 分享卡片是**宽幅**，所以这里给它 16:9 —— 塞进方块里会看不出它是什么。
+    box: "w-32 aspect-video rounded-md",
+  },
+]
+
+function SiteIcons() {
+  const [nonce, setNonce] = useState(0)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [note, setNote] = useState<Record<string, string>>({})
+
+  const upload = async (slot: string, file: File) => {
+    setBusy(slot)
+    setNote((n) => ({ ...n, [slot]: "" }))
+    try {
+      const body = await file.arrayBuffer()
+      const res = await fetch(`/api/site-icon/${slot}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": file.type || "application/octet-stream" },
+        body,
+      })
+      if (!res.ok) {
+        // 服务端会给出具体原因（超限 / 不是 PNG/JPEG / 不收 SVG），照它显示。
+        // `await` 必须先取出来：放进 setNote 那个回调里就不是 async 上下文了。
+        const why = await res.text()
+        setNote((n) => ({ ...n, [slot]: why || `失败（HTTP ${res.status}）` }))
+      } else {
+        setNote((n) => ({ ...n, [slot]: "已替换" }))
+        setNonce((v) => v + 1)
+      }
+    } catch (e) {
+      setNote((n) => ({ ...n, [slot]: (e as Error).message }))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const reset = async (slot: string) => {
+    setBusy(slot)
+    try {
+      await fetch(`/api/site-icon/${slot}`, { method: "DELETE", credentials: "same-origin" })
+      setNote((n) => ({ ...n, [slot]: "已恢复默认" }))
+      setNonce((v) => v + 1)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <Card className="gap-6 p-6">
+      <div>
+        <h3 className="text-sm font-medium">站点图标</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          三处各自独立：可以只替换其中一处，其余仍是主题自带的那张。支持 PNG 与 JPEG，单张不超过 512 KB（不收 SVG）。
+        </p>
+      </div>
+      <div className="space-y-4">
+        {ICON_SLOTS.map(({ slot, label, scope, size, box }) => (
+          <div key={slot} className="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border/60 py-4 last:border-b-0">
+            <img
+              src={`/site-icon/${slot}?v=${nonce}`}
+              alt=""
+              className={`shrink-0 border bg-muted/30 object-contain p-1 ${box}`}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">{label}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                作用范围：{scope}。{size}。
+              </div>
+              {note[slot] && <div className="mt-1 text-xs text-muted-foreground">{note[slot]}</div>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs transition-colors hover:bg-muted/40 ${busy === slot ? "pointer-events-none opacity-60" : ""}`}>
+                <Upload className="size-3.5" />
+                {busy === slot ? "处理中…" : "选择文件"}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  className="hidden"
+                  disabled={busy === slot}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    e.target.value = ""
+                    if (f) void upload(slot, f)
+                  }}
+                />
+              </label>
+              {/* 用原生 title 而不是 Tooltip 组件：本仓的 tooltip 是 Radix 的，
+                  没包 provider 时会**静默不工作**（今天已经栽过几次"不报错的失效"）。 */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                disabled={busy === slot}
+                title="恢复为主题自带的那张"
+                onClick={() => void reset(slot)}
+              >
+                恢复默认
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+}
+
 function SettingsTab() {
   const { s, set, save, error, retry } = useSettings()
   if (!s) {
@@ -2923,6 +3057,7 @@ function SettingsTab() {
 
   return (
     <div className="space-y-4">
+      <SiteIcons />
       <Card className="gap-6 p-6">
       	{/* 单列，而不是两列：这几项的说明长短差得多，两列时右边被撑高、左边留一大片空白。
       	    说明放在输入框下方（这里的最长有两行），输入框本身限宽，免得在宽屏上拉成一条长线。 */}
