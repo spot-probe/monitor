@@ -568,6 +568,12 @@ async fn main() -> Result<()> {
             Router::new()
                 .route("/api/db/restore", post(api::db_restore))
                 .route("/api/themes", post(api::upload_theme))
+                // 站点图标也在这里：全局上限是 64 KB（"更大的就不是上报"），而一张
+                // 1200×630 的分享预览图本来就有一两百 KB —— 所以它必须和两条分片上传一样，
+                // 落在那一层**之后**。它复用同一层的 8 MB 传输上限，**业务上限 512 KB 仍在
+                // handler 里**（超了回 400 并带上说明，比一个光秃秃的 413 有用）。
+                .route("/site-icon/{slot}", get(api::site_icon))
+                .route("/api/site-icon/{slot}", put(api::put_site_icon).delete(api::delete_site_icon))
                 .layer(tower_http::limit::RequestBodyLimitLayer::new(api::MAX_CHUNK))
                 .with_state(app.clone()),
         )

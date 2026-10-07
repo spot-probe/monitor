@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
@@ -1691,6 +1692,96 @@ pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
         "manual": manual,
         "available": true,
     }))
+}
+
+/// 站点图标：**三处各自独立**（标签页 / iOS 主屏 / 社交分享预览），可以只替换其中一处。
+///
+/// 存 hex 而不是 base64 —— 本仓有 `hex`、**没有** base64，为此引一个依赖不值得。
+/// 上传收**原始字节**并用**魔数**判断类型（不信任 `Content-Type`，那是客户端随便写的）。
+/// **不收 SVG**：它是文本、没有魔数，而且 favicon 是匿名访客也会下载的文件。
+const ICON_SLOTS: [(&str, &str); 3] =
+    [("tab", "/favicon.svg"), ("apple", "/apple-touch-icon.png"), ("og", "/og.png")];
+const ICON_MAX: usize = 512 * 1024;
+
+fn icon_default(slot: &str) -> Option<&'static str> {
+    ICON_SLOTS.iter().find(|(s, _)| *s == slot).map(|(_, d)| *d)
+}
+
+/// 只认 PNG / JPEG 的魔数。
+fn sniff_image(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    None
+}
+
+/// 未设置时**302 到主题自带的那张** —— 于是"默认就是当前的"，而且永远不会 404
+/// （页面上只有一条图标链接，404 就等于"没有图标"，浏览器不会回头找别的）。
+pub async fn site_icon(State(app): State<Shared>, Path(slot): Path<String>) -> Response {
+    let Some(default) = icon_default(&slot) else {
+        return (StatusCode::NOT_FOUND, "no such slot").into_response();
+    };
+    let mime = app.db.get(&format!("icon_{slot}_mime"));
+    let hexbody = app.db.get(&format!("icon_{slot}_hex"));
+    let (Some(mime), Some(hexbody)) = (mime, hexbody).clone() else {
+        return (StatusCode::FOUND, [(header::LOCATION, default)]).into_response();
+    };
+    if mime.is_empty() || hexbody.is_empty() {
+        return (StatusCode::FOUND, [(header::LOCATION, default)]).into_response();
+    }
+    match hex::decode(&hexbody) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                // 图标是公开文件：明确不让浏览器猜类型。
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                // 换了图标要立刻生效，所以不做长缓存；版本靠页面上的 ?v= 带动。
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "stored icon is corrupt").into_response(),
+    }
+}
+
+/// 上传某处的图标。**Admin**（提取器必须在 body 之前，这是 axum 的规矩）。
+pub async fn put_site_icon(
+    _: Admin,
+    State(app): State<Shared>,
+    Path(slot): Path<String>,
+    body: Bytes,
+) -> Response {
+    if icon_default(&slot).is_none() {
+        return (StatusCode::NOT_FOUND, "no such slot").into_response();
+    }
+    if body.len() > ICON_MAX {
+        return (StatusCode::BAD_REQUEST, "图标过大（上限 512 KB）").into_response();
+    }
+    let Some(mime) = sniff_image(&body) else {
+        return (StatusCode::BAD_REQUEST, "只接受 PNG 或 JPEG（不收 SVG）").into_response();
+    };
+    if app.db.set(&format!("icon_{slot}_mime"), mime).is_err()
+        || app.db.set(&format!("icon_{slot}_hex"), &hex::encode(&body)).is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "存不进设置").into_response();
+    }
+    let _ = app.db.set(&format!("icon_{slot}_at"), &Utc::now().timestamp().to_string());
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// 恢复默认（即回到 302）。
+pub async fn delete_site_icon(_: Admin, State(app): State<Shared>, Path(slot): Path<String>) -> Response {
+    if icon_default(&slot).is_none() {
+        return (StatusCode::NOT_FOUND, "no such slot").into_response();
+    }
+    for k in ["mime", "hex", "at"] {
+        let _ = app.db.set(&format!("icon_{slot}_{k}"), "");
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
