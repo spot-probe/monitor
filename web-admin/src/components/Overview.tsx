@@ -1522,9 +1522,11 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
   )
 
   return (
-    // 它落在页面末尾那个两列网格里（日历在另一列），所以自己占满一整行。
-    <Card className="lg:col-span-2">
-      <CardHeader className="border-b border-border/60 pb-3">
+    // 三张卡，各回答一个问题（与"资源"那一屏同构）：总览 / 哪个月花钱 / 每台多少钱。
+    // 整块仍占满一整行（它落在页面末尾那个两列网格里）。
+    <div className="space-y-4 lg:col-span-2">
+      <Card>
+      <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
         <CardTitle className="text-sm">成本概览</CardTitle>
         <CardAction>
           <span className="text-xs text-muted-foreground">
@@ -1588,10 +1590,19 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
           </div>
         )}
 
-        {/* ② 图区：一个浅边框槽，柱子限宽、压高低噪；**没有数据的月份也画一条背景槽**，
-            否则"只有一根柱子、其余全白"看起来像加载失败。明细收成这张卡的内嵌 footer。 */}
-        <div className="overflow-hidden rounded-lg border border-border/60">
-          <div className="px-3 pt-3 text-xs text-muted-foreground">未来 12 个月摊平预测（按当前价格；到期的机器落在到期那个月）</div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
+          <CardTitle className="text-sm">
+            未来 12 个月摊平预测{" "}
+            <span className="text-xs font-normal text-muted-foreground">
+              （按当前价格；到期的机器落在到期那个月）
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+        <div className="overflow-hidden">
           <div className="flex items-end gap-1 px-3 pt-3">
             {months.map((m) => (
               <button
@@ -1636,6 +1647,13 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
           </div>
         </div>
 
+      </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
+          <CardTitle className="text-sm">服务器成本总览</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-4">
         {/* ③ 工具条：等高胶囊 + 带放大镜的搜索框。 */}
         <div className="flex flex-wrap items-center gap-2">
           {/* 分段控件**复用本页已有的 `TRACK` / `pill`**：过滤条与页面上其它分段控件同一套语汇，
@@ -1689,6 +1707,7 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
           </DialogContent>
         </Dialog>
       </CardContent>
-    </Card>
+      </Card>
+    </div>
   )
 }
