@@ -1459,12 +1459,25 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
   )
   const top = bySort.slice(0, 12)
 
-  const byGroup = new Map<string, number>()
+  // 分组占比：**金额降序取前 3**，其余合并成「其他」—— 色数因此固定（3 主色 + 1 中性），
+  // 图例不随分组数增长。这是 AWS/GCP 账单看板的标准做法（维护者的前端同事提的），
+  // 但它属于**成分图**，所以只用在占比条上；12 个月那根柱图回答的是"哪个月花钱"，不堆分组。
+  const byGroupAll = new Map<string, number>()
   for (const r of priced) {
     const g = r.n.group || "未分组"
-    byGroup.set(g, (byGroup.get(g) ?? 0) + r.monthly)
+    byGroupAll.set(g, (byGroupAll.get(g) ?? 0) + r.monthly)
   }
-  const tones = ["bg-primary", "bg-info-fg", "bg-warn-fg", "bg-success-fg", "bg-danger-fg", "bg-muted-foreground"]
+  const ranked3 = [...byGroupAll.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  const topByGroup = ranked3.slice(0, 3)
+  const restSum = ranked3.slice(3).reduce((a, [, v]) => a + v, 0)
+  const byGroup = new Map<string, number>(topByGroup)
+  if (restSum > 0) byGroup.set("其他", restSum)
+  // **只用三主色 + 一个中性**：中性专给「其他」（表示"这不是某一个具体分组"）。
+  // 中性用 token（`bg-muted-foreground`），不写死 `#94a3b8` —— 深色模式才跟着主题走。
+  // **同色三阶**：`bg-primary` / 60% / 30% —— 不借语义色（`bg-info-fg` 这类 token 本仓
+  // 并没有定义，Tailwind 对不存在的工具类**不报错、什么都不生成**，于是那一段会变成透明 —— 我踩过）。
+  // "同一色调由深到浅"也正好表达"份额由大到小"，比三种互不相关的颜色更贴合占比图。
+  const tones = ["bg-primary", "bg-primary/60", "bg-primary/30"]
 
   const table = (list: CostRow[]) => (
     <Table>
@@ -1550,17 +1563,24 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
           </div>
         </div>
 
+        {/* 与上下两块各留出更多空间：这一段与 KPI、与柱图挤在一起时会像同一块内容。 */}
         {byGroup.size > 1 && (
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 pt-3 pb-2">
+            <div className="text-xs text-muted-foreground">当月分组间开销比例</div>
             <div className="flex h-2 overflow-hidden rounded-full bg-muted">
               {[...byGroup.entries()].map(([g, v], i) => (
-                <div key={g} className={tones[i % tones.length]} style={{ width: `${(v / monthly) * 100}%` }} />
+                <div
+                  key={g}
+                  className={g === "其他" ? "bg-muted-foreground/40" : tones[i % tones.length]}
+                  style={{ width: `${(v / monthly) * 100}%` }}
+                  title={g === "其他" ? `其他：${cny(v)}（${ranked3.length - 3} 个分组）` : `${g}：${cny(v)}`}
+                />
               ))}
             </div>
             <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
               {[...byGroup.entries()].map(([g, v], i) => (
-                <span key={g} className="flex items-center gap-1">
-                  <span aria-hidden className={`size-2 rounded-[2px] ${tones[i % tones.length]}`} />
+                <span key={g} className="flex items-center gap-1" title={g === "其他" ? ranked3.slice(3).map(([n2, v2]) => `${n2} ${cny(v2)}`).join(" · ") : undefined}>
+                  <span aria-hidden className={`size-2 rounded-[2px] ${g === "其他" ? "bg-muted-foreground/40" : tones[i % tones.length]}`} />
                   {g} <span className="font-mono tabular-nums text-foreground">{cny(v)}</span>
                 </span>
               ))}
