@@ -1050,12 +1050,15 @@ export function daysUntil(date: string | null): number | null {
 /// ordinary date is secondary text, under a month turns amber, past it turns red. The
 /// colours are the theme's darker twins -- warn-fg is 5.02:1 and danger-fg 4.83:1 --
 /// because the amber and red fills do not carry as words on white.
-export function Expiry({ date }: { date: string | null }) {
+/// `stack`：日期与徽章**上下排**（节点表那一列要竖着排）；默认仍是左右一排，
+/// 所以总览页那处调用**一个字都不用改**。
+export function Expiry({ date, stack = false }: { date: string | null; stack?: boolean }) {
+  const wrap = stack ? "inline-flex flex-col items-end gap-0.5" : "inline-flex items-center gap-1.5"
   const days = daysUntil(date)
   if (days === null) return <span className="text-muted-foreground">{FOREVER}</span>
   if (days < 0) {
     return (
-      <span className="inline-flex items-center gap-1.5">
+      <span className={wrap}>
         <span className="tnum text-danger-fg">{date}</span>
         <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] leading-none text-danger-fg">
           已过期 {-days} 天
@@ -1065,7 +1068,7 @@ export function Expiry({ date }: { date: string | null }) {
   }
   if (days <= 30) {
     return (
-      <span className="inline-flex items-center gap-1.5">
+      <span className={wrap}>
         <span className="tnum text-warn-fg">{date}</span>
         <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] leading-none text-warn-fg">
           {days === 0 ? "今天到期" : `${days} 天后到期`}
@@ -1401,7 +1404,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                   {n.price > 0 ? money(n.price, n.currency) : "免费"}
                 </TableCell>
                 <TableCell className="tnum text-right text-sm">
-                  <Expiry date={n.expires_at} />
+                  <Expiry date={n.expires_at} stack />
                 </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
                   <div className="flex items-center justify-end gap-1">
