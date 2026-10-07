@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { ArrowUpCircle, CalendarClock, CircleAlert, Search } from "lucide-react"
+import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
 
 import { api, behind } from "@/lib/api"
 import type { Node } from "@/lib/api"
@@ -586,8 +586,18 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // **在入口处过滤一次**，下游（KPI / 事项 / 版本分布 / 日历）全部自动跟随 ——
   // 比在每个消费者里各写一次 filter 稳：那种写法迟早漏掉一处，变成"一半按分组、一半不按"。
   // 趋势另说：它的数是在 hub 侧聚合的，所以还要把分组传给接口（见 useOverviewSeries）。
-  const groups = [...new Set(allNodes.map((n) => n.group).filter(Boolean))].sort()
   const [group, setGroup] = useState("")
+  // 「更多」面板（分组太多时用）。**没有引入新依赖**：用本仓已有的 Dialog。
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [groupQ, setGroupQ] = useState("")
+  // 分组按**节点数降序**取前 3（字母序是任意的，节点多的才是常用的）。
+  // 选中的那个**必须始终可见** —— 若它不在前 3，就额外补一个（否则看不出正在筛什么）。
+  const groupCount = new Map<string, number>()
+  for (const n of allNodes) if (n.group) groupCount.set(n.group, (groupCount.get(n.group) ?? 0) + 1)
+  const ranked = [...groupCount.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([g]) => g)
+  const topGroups = ranked.slice(0, 3)
+  const overflow = ranked.length > 3
+  const chips = !overflow || topGroups.includes(group) ? topGroups : group ? [...topGroups.slice(0, 2), group] : topGroups
   // 顶层视图。**故意不叫 `tab`**：趋势卡内部已经用 `tab`/`setTab` 表示"流量/带宽/资源"，
   // 同名会撞车。选择记在 localStorage，和 `overview-auto` 同一个习惯。
   const [page, setPage] = useState<"resource" | "cost">(() =>
@@ -913,12 +923,26 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         <span className="text-muted-foreground">分组</span>
         <span aria-hidden className="h-4 w-px bg-border" />
-        <div className={`${TRACK} flex-wrap`}>
-          {[{ v: "", label: "全部" }, ...groups.map((gp) => ({ v: gp, label: gp }))].map((o) => (
-            <button key={o.v || "all"} type="button" onClick={() => setGroup(o.v)} aria-pressed={group === o.v} className={pill(group === o.v)}>
-              {o.label}
+        <div className={TRACK}>
+          <button type="button" onClick={() => setGroup("")} aria-pressed={group === ""} className={pill(group === "")}>
+            全部
+          </button>
+          {chips.map((g) => (
+            <button key={g} type="button" onClick={() => setGroup(g)} aria-pressed={group === g} className={pill(group === g)}>
+              {g}
             </button>
           ))}
+          {overflow && (
+            <button
+              type="button"
+              onClick={() => { setGroupQ(""); setMoreOpen(true) }}
+              aria-pressed={!topGroups.includes(group) && group !== ""}
+              className={`${pill(!topGroups.includes(group) && group !== "")} inline-flex items-center gap-0.5`}
+            >
+              更多
+              <ChevronDown className="size-3.5" />
+            </button>
+          )}
         </div>
         {group && (
           <span className="text-muted-foreground">
@@ -950,6 +974,40 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           资源那一边的内容一个字没改，只是被包进这个分支里。
           复用页面既有的 `TRACK`/`pill`，与其它分段控件同一套语汇；为了和内层
           （趋势卡里的"流量/带宽/资源"）区分，这里前面带一个「视图」标签。 */}
+      {/* 「更多」面板：分组太多时用它。**用本仓已有的 Dialog**（没有引入 command/popover 依赖），
+          带搜索、按节点数降序、每组标出台数 —— 点选即关闭。 */}
+      <Dialog open={moreOpen} onOpenChange={setMoreOpen}>
+        <DialogContent className="max-h-[70vh] max-w-md overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-sm">选择分组</DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={groupQ}
+            onChange={(e) => setGroupQ(e.target.value)}
+            placeholder="搜索分组"
+            className="h-8 text-xs"
+          />
+          <div className="mt-1 flex flex-col">
+            {[{ g: "", c: allNodes.length }, ...ranked.map((g) => ({ g, c: groupCount.get(g) ?? 0 }))]
+              .filter((x) => (groupQ ? x.g.toLowerCase().includes(groupQ.toLowerCase()) : true))
+              .map(({ g, c }) => (
+                <button
+                  key={g || "all"}
+                  type="button"
+                  onClick={() => { setGroup(g); setMoreOpen(false) }}
+                  className={`flex items-center justify-between rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted ${
+                    group === g ? "font-medium text-primary" : ""
+                  }`}
+                >
+                  <span>{g || "全部"}</span>
+                  <span className="tnum text-xs text-muted-foreground">{c} 台</span>
+                </button>
+              ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         <span className="text-muted-foreground">视图</span>
         <span aria-hidden className="h-4 w-px bg-border" />
