@@ -378,6 +378,9 @@ fn node_view(
         view["remark"] = json!(node.remark);
         // **只在 `full`（管理员）时出现** —— 匿名访客的响应里连字段都没有（不是空串）。
         view["private_remark"] = json!(node.private_remark);
+        // 「这台机器是否允许被 hub 远程升级」属于**安全姿态**，与备注同层：只给管理员看。
+        // 面板据此显示「可远程升级 / 仅手动升级」—— 三个月后一眼看清哪几台开着。
+        view["allow_remote_upgrade"] = json!(node.allow_remote_upgrade);
         view["token"] = json!(node.token);
         view["notify"] = json!(node.notify);
     }

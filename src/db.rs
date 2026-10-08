@@ -109,7 +109,10 @@ CREATE TABLE IF NOT EXISTS node (
   -- **只在管理后台可见**的备注。`remark` 是半公开的（管理员登录后看公开页也会显示），
   -- 这一列则**任何**公开响应里都不出现 —— 见 `api.rs` 里 `if full` 那段与那条隐藏列表测试。
   -- 放在最后：`ALTER TABLE ADD COLUMN` 只能追加，`SCHEMA` 的顺序要和迁移后的一致。
-  private_remark TEXT NOT NULL DEFAULT ''
+  private_remark TEXT NOT NULL DEFAULT '',
+  -- agent 是否允许被 hub 远程升级（它在 hello 里如实上报；老 agent 不上报 → 0 ✓）。
+  -- **只能由这台机器自己打开**：hub 不给写这个列的能力，升级必须由本机重跑安装命令。
+  allow_remote_upgrade INTEGER NOT NULL DEFAULT 0
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -242,7 +245,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -462,6 +465,10 @@ fn migrate_to_11(conn: &Connection) -> Result<()> {
 /// migration tests build a file with the current schema and then reduce it, so a step
 /// that assumed the column was absent would refuse to run there -- and a step that
 /// merely swallowed the error would never be shown to do anything at all.
+fn migrate_to_15(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", "allow_remote_upgrade INTEGER NOT NULL DEFAULT 0")
+}
+
 fn migrate_to_14(conn: &Connection) -> Result<()> {
     add_column(conn, "node", "private_remark TEXT NOT NULL DEFAULT ''")
 }
@@ -536,6 +543,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 14 {
         migrate_to_14(&tx)?;
     }
+    if from < 15 {
+        migrate_to_15(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -584,6 +594,9 @@ pub struct Node {
     /// 只在管理后台可见；**任何**公开响应里都不出现。
     #[serde(default)]
     pub private_remark: String,
+    /// agent 是否允许被远程升级。**只能由那台机器自己打开**，hub 只读不写。
+    #[serde(default)]
+    pub allow_remote_upgrade: bool,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -1309,7 +1322,10 @@ impl Db {
                              country_prev_ip=CASE WHEN country_ip=?16 OR country='' THEN country_prev_ip
                                                   ELSE country_ip END,
                              country_prev=CASE WHEN country_ip=?16 OR country='' THEN country_prev
-                                               ELSE country END
+                                               ELSE country END,
+                             -- 追加在最后：已有 16 个编号一个都不动（同 1.9.12 那次的做法）。
+                             -- 老 agent 不发这个字段 → false → 落库 0 = 「仅手动升级」✓
+                             allow_remote_upgrade=?17
              WHERE id=?1",
             params![
                 id,
@@ -1327,7 +1343,8 @@ impl Db {
                 ip,
                 s("ipv4"),
                 s("ipv6"),
-                source
+                source,
+                i64::from(f.get("allow_remote_upgrade").and_then(|v| v.as_bool()).unwrap_or(false))
             ],
         )?;
         let blank: bool = conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?;
@@ -3090,6 +3107,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         expires_at: r.get::<_, Option<String>>("expires_at").unwrap_or(None),
         remark: s("remark"),
         private_remark: s("private_remark"),
+        allow_remote_upgrade: n("allow_remote_upgrade") != 0,
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,
@@ -4532,6 +4550,36 @@ mod tests {
     /// 这条是踩出来的：migrate_to_14 曾被塞进 if from < 13 块里，而盖章在块外 ——
     /// 于是 from == 13（升级上来的生产库）跳过迁移却被打上 14，永久缺列。
     /// 全新库的 SCHEMA 本来就带那一列，add_column 会当作「重复列」忽略，别的测试发现不了。
+    /// **升级路径的闸（1.9.12 的教训照搬）**：一个"14 版"的库（缺 allow_remote_upgrade）迁移后
+    /// 必须有那一列、且戳到 15。全新库的 SCHEMA 本来就带它，`add_column` 会当「重复列」忽略，
+    /// 所以只有这种"从上一版升上来"的测试才碰得到真正的升级路径。
+    #[test]
+    fn migrating_from_14_adds_the_allow_remote_upgrade_column() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE node DROP COLUMN allow_remote_upgrade", []).unwrap();
+        conn.execute("PRAGMA user_version = 14", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"allow_remote_upgrade".to_string()), "前提：列已删掉");
+        migrate(&conn, 14).unwrap();
+        assert!(cols(&conn).contains(&"allow_remote_upgrade".to_string()), "迁移后必须有该列");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // 缺省必须是 0（"仅手动升级"）—— 老 agent 不上报这个字段，绝不能让它们**默认变成可远程升级**。
+        let n: i64 =
+            conn.query_row("SELECT allow_remote_upgrade FROM node LIMIT 1", [], |r| r.get(0)).unwrap_or(0);
+        assert_eq!(n, 0, "缺省必须是关");
+    }
+
     #[test]
     fn migrating_from_13_adds_the_private_remark_column() {
         let db = Db::open(":memory:").unwrap();
