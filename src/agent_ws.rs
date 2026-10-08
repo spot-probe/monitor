@@ -45,8 +45,10 @@ static SESSION: AtomicU64 = AtomicU64::new(0);
 pub struct Agent {
     /// Distinguishes one session on a node from the next; see [`release`].
     pub session: u64,
-    /// Outbound channel, used to push probe assignments.
-    pub tx: mpsc::Sender<String>,
+    /// Outbound channel: probe assignments as JSON text, upgrade payloads as binary frames.
+    /// It carries `Message` rather than `String` because a signed binary has to travel the
+    /// same authenticated socket -- the agent deliberately has no HTTP client of its own.
+    pub tx: mpsc::Sender<Message>,
     /// The latest report, or `Null` between connecting and the first one.
     pub metrics: serde_json::Value,
     pub last_seen: i64,
@@ -70,7 +72,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(session: u64, tx: mpsc::Sender<String>) -> Self {
+    pub fn new(session: u64, tx: mpsc::Sender<Message>) -> Self {
         Self {
             session,
             tx,
@@ -221,7 +223,7 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<String>(16);
+    let (tx, mut rx) = mpsc::channel::<Message>(16);
     let session = SESSION.fetch_add(1, Ordering::Relaxed);
     // Online from the handshake rather than the first report: a panel reporting
     // otherwise for a whole interval would describe the hub's bookkeeping rather
@@ -244,7 +246,7 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
     let outcome = loop {
         tokio::select! {
             outbound = rx.recv() => match outbound {
-                Some(text) => socket.send(Message::Text(text.into())).await?,
+                Some(m) => socket.send(m).await?,
                 None => break Ok(()),
             },
             // A machine that leaves the network without closing its socket would
@@ -593,7 +595,7 @@ fn ping_tasks_message(app: &App, node_id: i64) -> String {
 /// Pushes the current probe list to every connected agent, so a panel edit takes
 /// effect without waiting for a reconnect.
 pub fn push_ping_tasks(app: &App) {
-    let connected: Vec<(i64, mpsc::Sender<String>)> = app
+    let connected: Vec<(i64, mpsc::Sender<Message>)> = app
         .agents
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -605,7 +607,7 @@ pub fn push_ping_tasks(app: &App) {
         // that has stopped reading its socket. It is dropped within SILENCE and
         // reconnects onto the current list; what must not happen is the panel
         // reporting a push that never occurred.
-        if sender.try_send(ping_tasks_message(app, node_id)).is_err() {
+        if sender.try_send(Message::Text(ping_tasks_message(app, node_id).into())).is_err() {
             warn!("node {node_id} is not draining its queue; it gets the new probe list when it reconnects");
         }
     }
@@ -628,7 +630,7 @@ mod tests {
 
     /// A connected agent, the precondition for filing any report: the session
     /// holds the node's live state.
-    fn connect(app: &App) -> (i64, mpsc::Receiver<String>) {
+    fn connect(app: &App) -> (i64, mpsc::Receiver<Message>) {
         let id = node(app);
         let (tx, rx) = mpsc::channel(4);
         app.agents.write().unwrap().insert(id, Agent::new(1, tx));
