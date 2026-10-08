@@ -73,6 +73,8 @@ export type Node = {
   remark?: string
   /** 只在管理后台可见；任何公开响应里都不出现。 */
   private_remark?: string
+  /** agent 是否允许被 hub 远程升级。**只能在那台机器上打开**（重跑安装命令）。 */
+  allow_remote_upgrade?: boolean
   /** Panel only. Empty for nodes created before the hub retained a copy. */
   token?: string
   /** Panel only. Whether going offline and returning are announced. */

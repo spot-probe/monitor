@@ -1363,6 +1363,18 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     <span className={n.online ? "text-ok-fg" : "text-muted-foreground"}>{n.online ? "在线" : "离线"}</span>
                   </span>
                   {!n.public && <Badge variant="outline" className="ml-1 font-normal">不公开</Badge>}
+                  {/* **只在打开时**标出来：默认关，所以"没有这个牌子"就等于"仅手动升级"。
+                      用**字**而不是像上面 agent 旧版那样用一个点（1387 行）—— 那个点是"扫一眼数字"，
+                      而这是一个**安全姿态**，必须能一眼审计；点要悬停才能读懂，太弱。 */}
+                  {n.allow_remote_upgrade && (
+                    <Badge
+                      variant="outline"
+                      className="ml-1 font-normal"
+                      title="这台机器允许 hub 远程升级它的 agent；只能在该机器上重跑安装命令来关闭"
+                    >
+                      可远程升级
+                    </Badge>
+                  )}
                   {/* Under the badge, not inside it: the column is a tenth of
                       the table and the three do not share one line. */}
                   {!n.online && n.last_seen > 0 && Date.now() / 1000 - n.last_seen >= 60 && (
