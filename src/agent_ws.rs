@@ -36,6 +36,19 @@ static SESSION: AtomicU64 = AtomicU64::new(0);
 /// One connected agent. Held in memory only, and rebuilt within one report
 /// interval of a hub restart.
 ///
+/// 一次远程升级的结论，由 agent 回报（`upgrade.report`）。
+///
+/// **只存内存**：升级只在节点在线时发生，所以在会话里存着就够用，也不必为它加一列。
+/// **但这个边界到第四期会失效**：那时 agent 会**替换自己并重启重连**，"已替换"这条结论
+/// 会随会话消失 —— 到那一步它必须落库。现在不提前加列，是因为加了也没人写、没人读。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpgradeStatus {
+    pub ok: bool,
+    pub reason: String,
+    pub version: String,
+    pub at: i64,
+}
+
 /// A single map, because "the node is online" and "the node has current figures"
 /// are the same fact. Split across two, they required manual synchronisation at
 /// every call site and diverged: the connection was recorded at the handshake
@@ -69,6 +82,8 @@ pub struct Agent {
     pub mark: Option<(Instant, i64, i64)>,
     /// Running mean of the minute in progress, for the same reason.
     minute: Minute,
+    /// 最近一次远程升级的结论（A 期：agent 只验签、不替换）。见 [`UpgradeStatus`] 的边界说明。
+    pub upgrade: Option<UpgradeStatus>,
 }
 
 impl Agent {
@@ -85,6 +100,7 @@ impl Agent {
             last_minute: Utc::now().timestamp() / 60,
             mark: None,
             minute: Minute::default(),
+            upgrade: None,
         }
     }
 }
@@ -328,6 +344,31 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             return Ok(owed.then_some(source));
         }
         "report" => report(app, node_id, rpc.params)?,
+        "upgrade.report" => {
+            // 这是 agent 对一次升级的**结论**，不是原始数据：长度与可见字符都按对待
+            // 其它不设防字段的同一套规矩处理（它们来自一台不被担保的机器）。
+            let clean = |k: &str| {
+                rpc.params
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(200)
+                    .collect::<String>()
+            };
+            let status = UpgradeStatus {
+                ok: rpc.params.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                reason: clean("reason"),
+                version: clean("version"),
+                at: Utc::now().timestamp(),
+            };
+            // 刻意同时打日志：面板上那是"某一刻的状态"，而日志留得住先后顺序。
+            info!("node {node_id} upgrade report: ok={} {}", status.ok, status.reason);
+            if let Some(agent) = app.agents.write().unwrap_or_else(|e| e.into_inner()).get_mut(&node_id) {
+                agent.upgrade = Some(status);
+            }
+        }
         "ping.result" => {
             let task_id = rpc.params.get("task_id").and_then(|v| v.as_i64()).unwrap_or(0);
             // A missing reading is not a reading of -1: `close_bucket` counts
