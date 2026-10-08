@@ -188,7 +188,15 @@ async fn install_script() -> Response {
 /// This URL is fetched on an anonymous request, so setting it redirects that
 /// path. It remains within the bounds `agent_binary` already enforces: four
 /// concurrent transfers, a 120-second timeout, and a streamed body.
-fn release_url(app: &App, arch: &str) -> String {
+/// 最新发布版的签名文件：同一个 URL 加后缀（`.minisig` 就在资产旁边）。
+///
+/// `releases/latest` **只解析已发布的版本** —— 所以 CI 那个草稿里的未签名产物
+/// 不会被任何节点取到。这正是"先发草稿、维护者本机签名后再转正"能成立的前提。
+pub fn release_signature_url(app: &App, arch: &str) -> String {
+    format!("{}.minisig", release_binary_url(app, arch))
+}
+
+pub fn release_binary_url(app: &App, arch: &str) -> String {
     proxied(
         app,
         format!(
@@ -290,7 +298,7 @@ async fn agent_binary(State(app): State<Shared>, Path(arch): Path<String>) -> Re
     let Ok(permit) = RELAY_GATE.try_acquire() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many downloads in flight, try again").into_response();
     };
-    let url = release_url(&app, &arch);
+    let url = release_binary_url(&app, &arch);
     // The default client timeout is sized for API calls, not a 1.8 MB download.
     let fetched = app.http.get(&url).timeout(std::time::Duration::from_secs(120)).send().await;
     match fetched {
@@ -543,6 +551,8 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{id}", delete(api::delete_session))
         .route("/api/settings", get(api::settings).put(api::save_settings))
         .route("/api/version", get(api::version))
+        // 让一台已连接的节点升级自己（Admin；A 期 agent 只验签、不替换）。
+        .route("/api/nodes/{id}/upgrade", post(api::upgrade_node))
         .route("/api/notify/test", post(notify::test))
         .route("/api/themes", get(api::themes))
         .route("/api/themes/{short}", delete(api::delete_theme))
@@ -1083,17 +1093,17 @@ mod tests {
     #[test]
     fn a_github_proxy_prefixes_the_release_url_and_an_empty_one_does_not() {
         let app = app("");
-        let direct = release_url(&app, "x86_64");
+        let direct = release_binary_url(&app, "x86_64");
         assert!(direct.starts_with("https://github.com/spot-probe/agent/releases/"), "{direct}");
 
         for set in ["https://ghfast.top", "https://ghfast.top/", "  https://ghfast.top/  "] {
             app.db.set("github_proxy", set).unwrap();
-            assert_eq!(release_url(&app, "x86_64"), format!("https://ghfast.top/{direct}"), "{set:?}");
+            assert_eq!(release_binary_url(&app, "x86_64"), format!("https://ghfast.top/{direct}"), "{set:?}");
         }
         // Cleared in the panel, which stores an empty string rather than removing
         // the row.
         app.db.set("github_proxy", "").unwrap();
-        assert_eq!(release_url(&app, "x86_64"), direct);
+        assert_eq!(release_binary_url(&app, "x86_64"), direct);
     }
 
     #[test]

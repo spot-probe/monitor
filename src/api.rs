@@ -1697,6 +1697,83 @@ pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
     }))
 }
 
+/// 让一台**已连接**的节点把自己升级到最新发布版（A 期：agent 只验签，**不替换自己**）。
+///
+/// 走的是那条**已认证的 WS** —— agent 刻意没有自己的 HTTP 客户端，所以二进制只能从这里下去。
+/// 数据来源与 `/agent/{arch}` 中继完全一样（同一个 `release_url`，同一个 GitHub 代理），
+/// 于是"hub 能装节点"与"hub 能升级节点"见到的是同一份字节。
+///
+/// **这一段只做"把公告与字节推下去"**：结论由 agent 回报（`upgrade.report`）。
+pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
+    // 版本从 hub 每天读一次的那个 Check 来（面板上"有新版本"用的也是它）。
+    let Some(version) = crate::agent_release::state(&app).latest else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "hub 还没读到最新 agent 版本").into_response();
+    };
+    // 节点必须在线上：升级是在一条活着的连接上推的。
+    let tx = {
+        let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
+        match agents.get(&id) {
+            Some(a) => a.tx.clone(),
+            None => return (StatusCode::CONFLICT, "该节点当前不在线").into_response(),
+        }
+    };
+    // 一次取整块的代价受同一个闸门约束：这是要出 GitHub、约 1.8 MB 的操作。
+    let Ok(_permit) = crate::RELAY_GATE.try_acquire() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "同时进行的下载过多，请稍后再试").into_response();
+    };
+    let arch = {
+        let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
+        match agents.get(&id).and_then(|a| a.metrics.get("arch")).and_then(|v| v.as_str()) {
+            Some("aarch64") => "aarch64",
+            Some("x86_64") | Some("x86_64 ") => "x86_64",
+            // 回落到节点自己报的字符串里找，找不到就按 x86_64（下面 sign/二进制取不到会报错）。
+            _ => {
+                let s = agents.get(&id).map(|a| a.metrics.to_string()).unwrap_or_default();
+                if s.contains("aarch64") {
+                    "aarch64"
+                } else {
+                    "x86_64"
+                }
+            }
+        }
+    };
+    let (bin_url, sig_url) =
+        (crate::release_binary_url(&app, arch), crate::release_signature_url(&app, arch));
+    // 缓冲而不是流式：整块必须在内存里才能切帧推下去。这与 relay 那条注释的结论一致
+    // （1.73 MiB 对 MemoryMax=256M 来说缓冲是廉价的），而且这里由 RELAY_GATE 限着并发。
+    let fetch = async {
+        let sig = app.http.get(&sig_url).send().await?.error_for_status()?.text().await?;
+        let bin = app.http.get(&bin_url).send().await?.error_for_status()?.bytes().await?;
+        anyhow::Ok((sig, bin))
+    };
+    let (sig, bin) = match fetch.await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("取发布物失败：{e}")).into_response(),
+    };
+    if sig.trim().is_empty() || bin.is_empty() {
+        return (StatusCode::BAD_GATEWAY, "发布物或签名为空").into_response();
+    }
+    // 公告必须**先**发：agent 要靠它知道该收多少字节（二进制帧在它那边原本是被忽略的）。
+    let announce = json!({
+        "jsonrpc": "2.0",
+        "method": "upgrade.verify",
+        "params": { "version": version, "sig": sig, "size": bin.len() },
+    });
+    if let Err(e) = tx.send(axum::extract::ws::Message::Text(announce.to_string().into())).await {
+        return (StatusCode::CONFLICT, format!("节点已断开：{e}")).into_response();
+    }
+    // 32 KiB 一块：agent 把 max_frame_size 设成 64 KiB（`MAX_MESSAGE`），留一半余量。
+    // 这里用 send().await 而不是 try_send()：队列只有 16 格，而 1.8 MB 有五十多块 ——
+    // 接收端就是那条会话循环，它会一边收一边把帧写到 socket 上。
+    for chunk in bin.chunks(32 * 1024) {
+        let m = axum::extract::ws::Message::Binary(chunk.to_vec().into());
+        if let Err(e) = tx.send(m).await {
+            return (StatusCode::CONFLICT, format!("推送到一半断了：{e}")).into_response();
+        }
+    }
+    Json(json!({ "pushed": true, "version": version, "bytes": bin.len() })).into_response()
+}
+
 /// 站点图标：**三处各自独立**（标签页 / iOS 主屏 / 社交分享预览），可以只替换其中一处。
 ///
 /// 存 hex 而不是 base64 —— 本仓有 `hex`、**没有** base64，为此引一个依赖不值得。
