@@ -1920,7 +1920,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number; loss: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -1965,7 +1965,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
     // in `tasks` read them, and setting state synchronously here would cost a render.
     if (ids.length === 0) return
     let alive = true
-    type PingPoint = { task_id: number; ts: number; latency: number | null }
+    // `loss` 只在**这一桶有丢包时**才存在（hub 那边是 `if lost > 0` 才写）——
+    // 所以读的人必须把"缺失"当 0，否则那些格子会变成空洞，而不是绿色。
+    type PingPoint = { task_id: number; ts: number; latency: number | null; loss?: number }
     // 一个请求拿到**一个探测任务**在所有节点上的序列，而不是"每台一个"：
     // 请求数从"节点数"降到"任务数"（100 台 1 个任务 → 1 个请求；此前是 100 个）。
     //
@@ -1985,6 +1987,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
       const answers = perTask.flat()
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
+        // 逐桶丢包：每个任务一张 (ts → 最差那台的百分比) 的表。上面解析每一行时填，
+        // 下面拼 pct 时读。放在这里而不是循环里，是因为它要跨行累积。
+        const lossOf = new Map<number, Map<number, number>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
 		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
 		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; points: { ts: number; latency: number }[] }>>()
@@ -2000,6 +2005,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
       for (const [nid, d] of answers) {
         if (!d) continue
         for (const p of d.ping ?? []) {
+          // 丢包必须在下面那句 continue **之前**取：丢包的那一次没有 latency，
+          // 会被跳过 —— 而那恰恰是丢包率 100% 的桶。漏掉它，最该红的格子会显示 0。
+          // 聚合取**最差那台**，与列表那一行同一语义（平均会把一台的丢包摊平，
+          // 而那正是这张图"看不见 73%"的原因）。
+          if (typeof p.loss === "number") {
+            const m = lossOf.get(p.task_id) ?? new Map<number, number>()
+            m.set(p.ts, Math.max(m.get(p.ts) ?? 0, p.loss))
+            lossOf.set(p.task_id, m)
+          }
           if (p.latency === null || p.latency === undefined) continue
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
@@ -2024,7 +2038,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			// 分位数：把同一时刻所有节点的样本排序后取。前端算得出来 —— 所以这件事不需要新接口。
 			const pct = ordered.map(([ts, samples]) => {
 				const s = [...samples].sort((x, y) => x - y)
-				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99) }
+				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99), loss: lossOf.get(taskId)?.get(ts) ?? 0 }
 			})
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
