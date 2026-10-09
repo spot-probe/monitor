@@ -46,7 +46,10 @@ while [ $# -gt 0 ]; do
 	# 机队共用的那条批量命令带上**，所以下面像 --interval/--iface 一样从旧 unit 读回并保留，
 	# 另给一个显式关闭的参数 —— 只保留而不能关闭的话，这个开关就永远关不掉了。
 	--allow-remote-upgrade) ALLOW_UPGRADE=1; shift ;;
-	--no-allow-remote-upgrade) ALLOW_UPGRADE=0; ALLOW_UPGRADE_SET=1; shift ;;
+	# 关闭写**空**而不是 "0"：下面三处用的是 ${ALLOW_UPGRADE:+…}，它只判"变量有没有设置"，
+	# 于是 "0" 会被当成"开了" —— 那会让 --no-allow-remote-upgrade **关不掉**（参数被加回去、
+	# ReadWritePaths 也照样写出来）。空 = 关，非空 = 开，三处就全对了。
+	--no-allow-remote-upgrade) ALLOW_UPGRADE=""; ALLOW_UPGRADE_SET=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
 	--upgrade) UPGRADE=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -450,6 +453,18 @@ LOG_BASE=$(( $(wc -l <"$LOG_FILE" 2>/dev/null || echo 0) + 1 ))
 report_started "$LOG_BASE" "$LOG_FILE"
 	exit 0
 fi
+
+# 打开远程升级时，把**二进制所在目录**交给服务用户。
+#
+# 为什么需要：`apply.rs` 刻意把暂存文件放在二进制旁边（同一个文件系统，最后的 rename 才是
+# 原子的；而 PrivateTmp=yes 又让 /tmp 不可用）。unit 里的 ProtectSystem=strict 让 /opt 只读
+# —— 那个已经由 ReadWritePaths= 解决；但目录本身归 root，服务用户只有 r-x，于是**建不了文件**：
+# 实测报错 "写 /opt/monitor/monitor-agent.new: Permission denied (os error 13)"。
+#
+# **rename 只需要目录的写权限**，所以只改目录，二进制仍归 root（最小改动）。
+# 安全上不提权：agent 本来就以这个用户运行，这条唯一多给它的能力是"能替换自己的二进制"，
+# 而那正是这个功能的定义 —— 且只在打开开关的机器上给。
+[ -n "${ALLOW_UPGRADE:-}" ] && chown monitor-agent "$(dirname "$BIN")"
 
 cat >"$UNIT_FILE" <<UNIT
 [Unit]
