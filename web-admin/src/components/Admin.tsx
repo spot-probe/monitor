@@ -784,7 +784,8 @@ function UpgradeResult({ node }: { node: Node }) {
         className={`mt-1 flex items-center gap-1 text-xs ${bad ? "text-danger-fg" : "text-ok-fg"}`}
       >
         {bad ? <CircleAlert className="size-3.5 shrink-0" /> : <CircleCheck className="size-3.5 shrink-0" />}
-        {upgradeSummary(up.reason)}
+        {/* 成功时说**结果**（升到哪个版本），不要说"失败" —— 摘要映射只对失败那一路有意义。 */}
+        {bad ? upgradeSummary(up.reason) : up.version ? `已升级到 ${up.version}` : "已生效"}
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-lg" onOpenAutoFocus={(e) => e.preventDefault()}>
