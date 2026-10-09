@@ -1878,17 +1878,42 @@ pub async fn delete_site_icon(_: Admin, State(app): State<Shared>, Path(slot): P
 }
 
 pub async fn version(_: Admin, State(app): State<Shared>) -> Json<Value> {
-    Json(json!({
+    Json(versions_json(&app).await)
+}
+
+/// 面板要的那几个版本号。抽出来是为了让 [`check_updates`] 能把**刷新后的同一份**直接还回去 ——
+/// 两个端点答的必须是同一个问题、同一份来源。
+async fn versions_json(app: &App) -> Value {
+    json!({
         "hub": env!("CARGO_PKG_VERSION"),
         // Empty where GitHub could not be reached, which the panel renders as no
         // update rather than as an error: a hub on a network that cannot reach
         // github.com is a supported deployment, not a fault to report.
-        "hub_latest": hub_latest(&app).await.unwrap_or_default(),
-        "agent_latest": crate::agent_release::latest_now(&app).await.unwrap_or_default(),
+        "hub_latest": hub_latest(app).await.unwrap_or_default(),
+        "agent_latest": crate::agent_release::latest_now(app).await.unwrap_or_default(),
         // Whether the navigation marks an update. It governs the mark alone: the
         // lookup runs either way, so the update page still answers when opened.
         "notice": app.db.get("update_notice").as_deref() != Some("off"),
-    }))
+    })
+}
+
+/// 手动触发一次更新检测（Admin），并把刷新后的版本号直接还回去。
+///
+/// **为什么需要它**：两条检查各有各的缓存 —— agent 那个 6 小时算新鲜（`agent_release::FRESH`），
+/// hub 那个用 `RELEASES_FRESH`。于是"刚发完版就打开更新页"看到的很可能是旧标签，
+/// 而**重启 hub 是唯一能立刻刷新的办法**（重启把 `read_at` 归零）。这个端点就是那个重启的
+/// 手动版本：把 hub 那一侧的 `read_at` 归零（`fresh_enough` 要求它非零，所以下次必然真去查），
+/// 再强制刷新 agent 那一侧。
+///
+/// 刷新失败**不是错误**：读不到 GitHub 是受支持的部署方式（面板本来就把它渲染成"没有更新"
+/// 而不是报错），所以这里照常返回版本对象，只是里面那个字段为空。
+pub async fn check_updates(_: Admin, State(app): State<Shared>) -> Json<Value> {
+    {
+        let mut cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner());
+        cached.read_at = 0;
+    }
+    crate::agent_release::refresh(&app).await;
+    Json(versions_json(&app).await)
 }
 
 /// The tag this hub's repository last published, from the cache while it is still
