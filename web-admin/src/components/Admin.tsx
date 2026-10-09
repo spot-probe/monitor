@@ -800,6 +800,10 @@ function UpgradeResult({ node }: { node: Node }) {
             <DialogDescription>{bad ? "这次下发没有执行完，原因如下。" : "这台机器已处理完这次下发。"}</DialogDescription>
           </DialogHeader>
           <p className="text-sm break-all">{up.reason}</p>
+          <p className="text-xs text-muted-foreground">
+            若反复失败：先在那台机器上重跑一次安装命令。它会重写 unit 与目录权限 ——
+            而这两样正是这类报错（只读文件系统、权限不足）的根源。
+          </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => copy(up.reason)}>
               复制原因
@@ -822,6 +826,20 @@ function UpgradeButton({ node }: { node: Node }) {
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   if (!node.allow_remote_upgrade) return null
+  // 离线时下发送不到它（端点会回 409）—— 别让人按了才知道。灰掉并写明原因。
+  if (!node.online) {
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled
+        title="该节点不在线 —— 下发送不到它（端点会回 409）"
+        aria-label="远程升级（节点不在线）"
+      >
+        <ArrowUpCircle />
+      </Button>
+    )
+  }
 
   async function push() {
     setBusy(true)
@@ -1321,6 +1339,9 @@ function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) 
       setLine(`正在下发 ${i + 1}/${todo.length}：${n.name}`)
       try {
         await api(`/nodes/${n.id}/upgrade`, { method: "POST" })
+        // **每推一台就刷新一次**：于是表里的版本列与对话框那行 `正在下发 i/N` 同步往前走 ——
+        // 否则要等整批跑完才更新，中间那段时间表看起来像没动。
+        onDone()
       } catch (e) {
         setFail({ name: n.name, why: (e as Error).message })
         setLine("")
