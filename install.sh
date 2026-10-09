@@ -42,6 +42,11 @@ while [ $# -gt 0 ]; do
 	--iface) IFACE="$2"; IFACE_SET=1; shift 2 ;;
 	--interval) INTERVAL="$2"; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
+	# 打开"允许 hub 远程升级这台机器上的 agent"。**与 --insecure 不同，它不该被
+	# 机队共用的那条批量命令带上**，所以下面像 --interval/--iface 一样从旧 unit 读回并保留，
+	# 另给一个显式关闭的参数 —— 只保留而不能关闭的话，这个开关就永远关不掉了。
+	--allow-remote-upgrade) ALLOW_UPGRADE=1; shift ;;
+	--no-allow-remote-upgrade) ALLOW_UPGRADE=0; ALLOW_UPGRADE_SET=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
 	--upgrade) UPGRADE=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -92,14 +97,26 @@ fi
 # as one test rather than `A && B || C`, which reads as the same thing but is not:
 # the third command runs whenever the second fails, including when the first did.
 if [ -z "$SERVER" ] || { [ -z "$TOKEN" ] && [ -z "$REGISTER" ]; }; then
-	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure]" >&2
-	echo "       install.sh --upgrade [--iface LIST] [--interval SECONDS]" >&2
+	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure] [--allow-remote-upgrade]" >&2
+	echo "       install.sh --upgrade [--iface LIST] [--interval SECONDS] [--allow-remote-upgrade | --no-allow-remote-upgrade]" >&2
 	echo "       install.sh --uninstall" >&2
 	exit 2
 fi
 # A setting of this machine, kept by a rerun without the flag for the reason
 # given for --iface below: the batch command carries none. It is read back from
 # the service definition the last install wrote; a first install takes 1.
+# 是否允许被远程升级：**这台机器的决定**，与机队共用的批量命令无关，所以与 --interval
+# 完全同一套做法 —— 没给参数就从上次写的 unit 里读回；给了就以此为准（含显式关闭）。
+if [ -z "${ALLOW_UPGRADE_SET:-}" ]; then
+	KEPT=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
+		-e 's/^ExecStart=.*--allow-remote-upgrade.*/1/p' \
+		-e 's/^command_args=".*--allow-remote-upgrade.*/1/p' | tail -n 1)
+	if [ -n "$KEPT" ]; then
+		ALLOW_UPGRADE=1
+		echo "keeping --allow-remote-upgrade from the previous install"
+	fi
+fi
+
 if [ -z "$INTERVAL" ]; then
 	INTERVAL=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
 		-e 's/^ExecStart=.* --interval \([0-9][0-9]*\).*/\1/p' \
@@ -402,7 +419,7 @@ if [ "$INIT" = openrc ]; then
 #!/sbin/openrc-run
 description="monitor agent"
 command="$BIN"
-command_args="--interval $INTERVAL${INSECURE:+ --insecure}"
+command_args="--interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}"
 supervisor="supervise-daemon"
 respawn_delay=5
 output_log="$LOG_FILE"
@@ -443,7 +460,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$ENV_FILE
-ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}
+ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}
 Restart=always
 RestartSec=5
 # A fixed user rather than DynamicUser=: when the mount namespace cannot be
