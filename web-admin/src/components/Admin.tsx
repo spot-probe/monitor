@@ -4039,6 +4039,7 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
   agentLatest: string | null
 }) {
   const [saving, setSaving] = useState(false)
+  const [checking, setChecking] = useState<"hub" | "agent" | null>(null)
   if (!versions) {
   	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
   	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
@@ -4068,6 +4069,22 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
     }
   }
 
+  // 手动触发一次检测。两条检查各有各的缓存 —— agent 那个 6 小时算新鲜，hub 那个用
+  // RELEASES_FRESH —— 所以"刚发完版就打开这一页"看到的很可能还是旧标签，
+  // 而**重启 hub 原来就是唯一能立刻刷新的办法**。这个按钮就是那个重启的手动版本。
+  async function checkNow(what: "hub" | "agent") {
+    setChecking(what)
+    try {
+      await api(`/version/refresh/${what}`, { method: "POST" })
+      reload()
+      toast.success("已重新检查")
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setChecking(null)
+    }
+  }
+
   return (
     <div className="space-y-4">
       {unreachable && (
@@ -4082,6 +4099,18 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-medium">hub</h3>
           <div className="flex items-center gap-3">
+            {/* 放在 hub 这张卡上：它刷新的是**两条**检查（hub 与 agent 的缓存一起清）✓ */}
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={checking !== null}
+              title="立刻去 GitHub 读一次 hub 的最新版本，不等缓存过期（效果与重启 hub 相同）"
+              onClick={() => void checkNow("hub")}
+            >
+              <RefreshCw className={checking === "hub" ? "animate-spin" : ""} />
+              {checking === "hub" ? "检查中…" : "立即检查"}
+            </Button>
             <VersionPair current={versions.hub} latest={versions.hub_latest} />
             {behind(versions.hub, versions.hub_latest) && (
               <Button size="sm" variant="link" asChild>
@@ -4098,13 +4127,26 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
       <Card className="gap-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-medium">agent</h3>
-          <span className="text-xs text-muted-foreground">
-            {agentLatest
-              ? outdated.length
-                ? <>最新 v{agentLatest} · <span className="font-medium text-foreground">{outdated.length} 台待升级</span></>
-                : `全部已是最新 v${agentLatest}`
-              : "查不到版本"}
-          </span>
+          <div className="flex items-center gap-3">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={checking !== null}
+              title="立刻去 GitHub 读一次 agent 的最新版本，不等缓存过期（效果与重启 hub 相同）"
+              onClick={() => void checkNow("agent")}
+            >
+              <RefreshCw className={checking === "agent" ? "animate-spin" : ""} />
+              {checking === "agent" ? "检查中…" : "立即检查"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {agentLatest
+                ? outdated.length
+                  ? <>最新 v{agentLatest} · <span className="font-medium text-foreground">{outdated.length} 台待升级</span></>
+                  : `全部已是最新 v${agentLatest}`
+                : "查不到版本"}
+            </span>
+          </div>
         </div>
         {needsAgents && (
           <>

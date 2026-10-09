@@ -552,7 +552,7 @@ async fn main() -> Result<()> {
         .route("/api/settings", get(api::settings).put(api::save_settings))
         .route("/api/version", get(api::version))
         // 手动触发一次更新检测（Admin）：否则只能等缓存过期或重启 hub。
-        .route("/api/version/refresh", post(api::check_updates))
+        .route("/api/version/refresh/{what}", post(api::check_updates))
         // 让一台已连接的节点升级自己（Admin；A 期 agent 只验签、不替换）。
         .route("/api/nodes/{id}/upgrade", post(api::upgrade_node))
         .route("/api/notify/test", post(notify::test))

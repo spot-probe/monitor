@@ -1897,7 +1897,10 @@ async fn versions_json(app: &App) -> Value {
     })
 }
 
-/// 手动触发一次更新检测（Admin），并把刷新后的版本号直接还回去。
+/// 手动触发一次更新检测（Admin，按目标），并把刷新后的版本号直接还回去。
+///
+/// **两个目标分开**：面板上 hub 与 agent 是两张卡，各挂一个按钮 —— 这样"这个按钮管什么"
+/// 由位置本身说清，而不是靠一个横跨两者的按钮 + 一段说明去解释。
 ///
 /// **为什么需要它**：两条检查各有各的缓存 —— agent 那个 6 小时算新鲜（`agent_release::FRESH`），
 /// hub 那个用 `RELEASES_FRESH`。于是"刚发完版就打开更新页"看到的很可能是旧标签，
@@ -1907,13 +1910,18 @@ async fn versions_json(app: &App) -> Value {
 ///
 /// 刷新失败**不是错误**：读不到 GitHub 是受支持的部署方式（面板本来就把它渲染成"没有更新"
 /// 而不是报错），所以这里照常返回版本对象，只是里面那个字段为空。
-pub async fn check_updates(_: Admin, State(app): State<Shared>) -> Json<Value> {
-    {
-        let mut cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner());
-        cached.read_at = 0;
+pub async fn check_updates(_: Admin, State(app): State<Shared>, Path(what): Path<String>) -> Response {
+    match what.as_str() {
+        // 只查 hub：把 read_at 归零 —— `fresh_enough` 要求它非零，所以下面这次读必然真去 GitHub。
+        "hub" => {
+            let mut cached = app.hub_release.lock().unwrap_or_else(|e| e.into_inner());
+            cached.read_at = 0;
+        }
+        // 只查 agent：强制刷新它那一侧的缓存。
+        "agent" => crate::agent_release::refresh(&app).await,
+        other => return (StatusCode::NOT_FOUND, format!("unknown target: {other}")).into_response(),
     }
-    crate::agent_release::refresh(&app).await;
-    Json(versions_json(&app).await)
+    Json(versions_json(&app).await).into_response()
 }
 
 /// The tag this hub's repository last published, from the cache while it is still
