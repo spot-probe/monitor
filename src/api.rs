@@ -1709,6 +1709,14 @@ pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
 /// **这一段只做"把公告与字节推下去"**：结论由 agent 回报（`upgrade.report`）。
 pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
     // 版本从 hub 每天读一次的那个 Check 来（面板上"有新版本"用的也是它）。
+    //
+    // **但"刚发完新版就按按钮"是很自然的动作**：那时缓存里还是旧版本，hub 会把旧的推下去，
+    // 而 agent 会**正确地**拒掉它（反回滚 ✓）—— 操作者却看到一条看不懂的"被拒"。所以缓存
+    // 过期时先刷新一次：这是人手触发的动作，一次 API 调用远比一条假失败便宜。
+    const FRESH: i64 = 300;
+    if Utc::now().timestamp() - crate::agent_release::state(&app).checked_at > FRESH {
+        crate::agent_release::refresh(&app).await;
+    }
     let Some(version) = crate::agent_release::state(&app).latest else {
         return (StatusCode::SERVICE_UNAVAILABLE, "hub 还没读到最新 agent 版本").into_response();
     };

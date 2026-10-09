@@ -777,28 +777,41 @@ function UpgradeButton({ node }: { node: Node }) {
     }
   }
 
-  if (confirming) {
-    return (
-      <>
-        <Button variant="ghost" size="sm" className="h-8 text-xs" disabled={busy} onClick={() => void push()}>
-          {busy ? "推送中…" : "确认升级"}
-        </Button>
-        <Button variant="ghost" size="sm" className="h-8 text-xs" disabled={busy} onClick={() => setConfirming(false)}>
-          取消
-        </Button>
-      </>
-    )
-  }
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      title="让这台机器升级到最新 agent（它会先验签；结果回报在「版本」那一列）"
-      aria-label="远程升级"
-      onClick={() => setConfirming(true)}
-    >
-      <ArrowUpCircle />
-    </Button>
+    <>
+      <Button
+        variant="ghost"
+        size="icon"
+        title="让这台机器升级到最新 agent（它会先验签；结果回报在「版本」那一列）"
+        aria-label="远程升级"
+        onClick={() => setConfirming(true)}
+      >
+        <ArrowUpCircle />
+      </Button>
+      {/* 确认用 **Dialog** 而不是在同一格里展开两个按钮：那样会撑宽操作列、把整行重排
+          （实测过一次 ✓）。对话框不动那一行，还放得下这段风险说明 —— 而这句话
+          "它会替换那台机器上的二进制" 正是操作者做决定前该看见的。 */}
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent className="sm:max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>让 {node.name} 升级到最新 agent？</DialogTitle>
+            <DialogDescription>
+              hub 会把最新发布版的二进制推给它，它**先验签**（公钥编译在 agent 里）。
+              验过才会替换自身的二进制并重启；<strong>180 秒</strong>内连不回 hub 就自动回滚到当前这一版。
+              结论会显示在「版本」那一列。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirming(false)} disabled={busy}>
+              取消
+            </Button>
+            <Button onClick={() => void push()} disabled={busy}>
+              {busy ? "推送中…" : "确认升级"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
