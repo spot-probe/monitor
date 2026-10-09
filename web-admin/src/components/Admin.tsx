@@ -1289,6 +1289,87 @@ function DragHandle({ onStart, onEnd, onKey, disabled, title, label }: {
   )
 }
 
+/// 批量下发升级：**依次**送，**失败即停**。
+///
+/// **为什么依次而不是并发**：一键让 N 台机器重启这件事，出一次问题就该停在原地 ——
+/// 剩下的还是好的，而你可以先查那一台。（hub 的下载闸门本来只允许 4 个并发，但真正的
+/// 理由是"可解释性"：并发时你很难说清"停在哪一台"。）
+///
+/// **为什么失败即停**（维护者拍的 ✓）：继续升只会把问题铺开，而每台都有 180 秒的回滚窗口
+/// —— 停下来看一眼要便宜得多。
+///
+/// 只挑**开着开关、确实落后、而且在线**的：不在线的推不过去（端点会回 409），
+/// 没开开关的更不该被碰（那台机器只能手动升）。
+function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [line, setLine] = useState("")
+  const [fail, setFail] = useState<{ name: string; why: string } | null>(null)
+  const todo = nodes.filter((n) => n.allow_remote_upgrade && n.agent_old && n.online)
+  if (todo.length === 0) return null
+
+  async function run() {
+    setBusy(true)
+    setFail(null)
+    for (const [i, n] of todo.entries()) {
+      setLine(`正在下发 ${i + 1}/${todo.length}：${n.name}`)
+      try {
+        await api(`/nodes/${n.id}/upgrade`, { method: "POST" })
+      } catch (e) {
+        setFail({ name: n.name, why: (e as Error).message })
+        setLine("")
+        setBusy(false)
+        onDone()
+        return
+      }
+    }
+    setLine(`已依次下发给 ${todo.length} 台 —— 每次的结论都落在「版本」那一列`)
+    setBusy(false)
+    onDone()
+  }
+
+  return (
+    <>
+      <Button variant="outline" onClick={() => { setFail(null); setLine(""); setOpen(true) }} title="给所有开着远程升级、且版本落后的在线节点依次下发">
+        <ArrowUpCircle /> 批量升级 {todo.length} 台
+      </Button>
+      <Dialog open={open} onOpenChange={(v) => !busy && setOpen(v)}>
+        <DialogContent className="sm:max-w-lg" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>依次升级 {todo.length} 台？</DialogTitle>
+            <DialogDescription>
+              一台一台下发，**任何一台失败就停下来** —— 剩下的不动，你可以先查那一台。
+              每台都会先验签，验过才替换自身的二进制并重启；<strong>180 秒</strong>内连不回 hub 就自动回滚。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-48 space-y-1 overflow-auto text-xs">
+            {todo.map((n) => (
+              <div key={n.id} className="flex items-center justify-between gap-2">
+                <span className="truncate">{n.name}</span>
+                <span className="tnum text-muted-foreground">{n.agent_version || "未上报"}</span>
+              </div>
+            ))}
+          </div>
+          {line && <p className="text-xs text-muted-foreground">{line}</p>}
+          {fail && (
+            <p className="text-xs text-danger-fg">
+              停在第 <strong>{fail.name}</strong>：{fail.why}（其余未动）
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>
+              关闭
+            </Button>
+            <Button disabled={busy} onClick={() => void run()}>
+              {busy ? "下发中…" : "开始依次升级"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
 function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdown, agentLatest }: {
   nodes: Node[]
   refresh: () => void
@@ -1385,6 +1466,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
           )}
         {/* An open window is visible from the list itself, so nobody has to
             remember they left one open. */}
+        <BatchUpgrade nodes={nodes} onDone={refresh} />
         <Button variant="outline" disabled={!canProvision} onClick={() => setRegistering(true)}>
           <Server /> 批量添加{reg.left > 0 && ` · ${Math.ceil(reg.left / 60)} 分`}
         </Button>
