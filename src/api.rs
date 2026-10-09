@@ -1760,7 +1760,9 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
     let announce = json!({
         "jsonrpc": "2.0",
         "method": "upgrade.verify",
-        "params": { "version": version, "sig": sig, "size": bin.len() },
+        // **`apply: true` = "验过就换上去"**。agent 那边另有两道门（本机开关 + 签名校验），
+        // 所以这一个字段只是"hub 的意图"，不是"许可能力" —— 缺了它 agent 就只验不换。
+        "params": { "version": version, "sig": sig, "size": bin.len(), "apply": true },
     });
     if let Err(e) = tx.send(axum::extract::ws::Message::Text(announce.to_string().into())).await {
         return (StatusCode::CONFLICT, format!("节点已断开：{e}")).into_response();
