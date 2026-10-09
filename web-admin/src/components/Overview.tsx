@@ -1106,7 +1106,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               {agentBuckets.map((b) => (
                 <a
                   key={b.key}
-                  href={b.key === "old" && b.count > 0 ? "/admin/update" : undefined}
+                  // 「落后」这一行点进去是**节点页、并且已经筛好"只看待升级"** ——
+                  // 因为下一步多半就是动手（批量升级按钮在那一页），而不是再读一遍说明。
+                  // 原来指向更新页：那里只是把同样的信息再讲一次。
+                  href={b.key === "old" && b.count > 0 ? "/admin/nodes?outdated=1" : undefined}
                   className="flex items-baseline justify-between gap-3 rounded text-xs transition-colors hover:bg-muted/40"
                 >
                   <span className="flex items-center gap-1.5 text-muted-foreground">

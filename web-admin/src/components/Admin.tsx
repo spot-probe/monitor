@@ -1419,7 +1419,11 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
   const [query, setQuery] = useState("")
 	// 只看 agent 需要升级的节点。与「未分组」那条筛选项同样的取舍：没有可筛的东西时
 	// 不出现，否则工具栏上会多一个按下去什么也不改变的按钮。
-	const [onlyOutdated, setOnlyOutdated] = useState(false)
+	// 初值读一次 URL：总览页「Agent 版本分布」的"落后"那一行会带 `?outdated=1` 跳过来，
+    // 于是"看到落后 3 台"→"看到是哪 3 台"是一步而不是两步。
+    const [onlyOutdated, setOnlyOutdated] = useState(
+      () => new URLSearchParams(window.location.search).get("outdated") === "1",
+    )
   const [group, setGroup] = useState("all")
   const drag = useDragOrder(nodes.map((node) => node.id), "/nodes/order", refresh)
   const byId = new Map(nodes.map((node) => [node.id, node]))
