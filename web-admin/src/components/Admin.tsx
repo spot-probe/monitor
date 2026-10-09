@@ -775,6 +775,12 @@ function UpgradeResult({ node }: { node: Node }) {
   const up = node.upgrade
   if (!up) return null
   const bad = !up.ok
+  // **成功只是一句回执**：半小时后就撤掉 —— 版本列本身已经说明了状态，而这行字只是
+  // "你刚才那次操作成了"的一句话。**失败要留着**：那是一件需要你处理的事（重跑安装命令、
+  // 查机器权限…），不该在你没看见之前自己消失。两者都跟着会话走，所以 agent 重连或
+  // hub 重启会让它消失 —— 那时版本列仍然是准的。
+  // （`useState` 在上面，早返回改的是"要不要画"，不改变 hook 的调用次数 ✓）
+  if (up.ok && Math.floor(Date.now() / 1000) - up.at > 30 * 60) return null
   return (
     <>
       <button
