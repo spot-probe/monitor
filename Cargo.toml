@@ -1,6 +1,6 @@
 [package]
 name = "monitor-hub"
-version = "1.9.19"
+version = "1.9.20"
 edition = "2021"
 license = "MIT"
 description = "Lightweight server monitoring hub"
