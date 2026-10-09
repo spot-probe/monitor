@@ -472,6 +472,13 @@ User=monitor-agent
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
 ProtectSystem=strict
+# 远程升级要**在二进制旁边**写一个暂存文件（同一个文件系统 → 最后的 rename 才是原子的；
+# PrivateTmp=yes 让 /tmp 也不可用，所以不能写那儿）。而 ProtectSystem=strict 把 /opt 变成只读，
+# 于是那一步会以 EROFS 失败 —— 实测到的报错就是它。
+#
+# 所以**只在打开这个开关时**给那个目录开一个写口：没开的机器保持严格只读，
+# 也就是说**能力与写权限由同一个开关控制**，而这个开关只有本机能改（hub 读得到、写不了）。
+${ALLOW_UPGRADE:+ReadWritePaths=$(dirname "$BIN")}
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
