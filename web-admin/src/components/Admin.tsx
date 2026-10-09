@@ -1838,39 +1838,76 @@ function pctl(sorted: number[], p: number): number {
 /// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
 /// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
 function BandChart({ points, height = 150 }: {
-  points: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[]
+  // 分位数**可以为 null**：一个桶如果 100% 丢包，它没有有效样本 —— 那种桶**必须在轴上**
+  // （否则"这段彻底不通"会表现成一块与"没数据"无法区分的空白 ✗），而线在那里**断开**
+  // 才是诚实的画法：跨过去连两头，等于把"这里断了"画成"这里平稳" ✗。
+  points: {
+    ts: number
+    p25: number | null
+    p50: number | null
+    p75: number | null
+    p90: number | null
+    p99: number | null
+  }[]
   height?: number
 }) {
   if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
   const t0 = Math.min(...points.map((p) => p.ts))
   const t1 = Math.max(...points.map((p) => p.ts))
-  const hi = Math.max(1, ...points.map((p) => p.p99)) * 1.08
+  const hi = Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
   const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
-  const line = (f: (q: (typeof points)[number]) => number) =>
-    points.map((q) => `${x(q.ts).toFixed(1)},${y(f(q)).toFixed(1)}`).join(" ")
-  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形。
-  const band = `${points.map((q) => `${x(q.ts).toFixed(1)},${y(q.p75).toFixed(1)}`).join(" ")} ${[...points]
-    .reverse()
-    .map((q) => `${x(q.ts).toFixed(1)},${y(q.p25).toFixed(1)}`)
-    .join(" ")}`
+  // **按缺口分段**：连续有值的点各自成段，段与段之间不连线。
+  const segs: (typeof points)[] = []
+  let run: typeof points = []
+  for (const q of points) {
+    if (q.p25 === null || q.p50 === null || q.p75 === null || q.p90 === null || q.p99 === null) {
+      if (run.length) segs.push(run)
+      run = []
+    } else {
+      run.push(q)
+    }
+  }
+  if (run.length) segs.push(run)
+  const path = (s: typeof points, f: (q: (typeof points)[number]) => number | null) =>
+    s.map((q) => `${x(q.ts).toFixed(1)},${y(Number(f(q))).toFixed(1)}`).join(" ")
+  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形（每段一条）。
+  const band = (s: typeof points) =>
+    `${path(s, (q) => q.p75)} ${[...s]
+      .reverse()
+      .map((q) => `${x(q.ts).toFixed(1)},${y(Number(q.p25)).toFixed(1)}`)
+      .join(" ")}`
+  // 末尾那个数值标签：取**最后一个有值**的点，否则会写到一个空桶上。
+  const last = [...points].reverse().find((q) => q.p50 !== null)
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-      <polygon points={band} className="fill-primary/15" />
-      <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
-      <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
-      <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。图例已写明哪条是 P50，所以这里
-          只写数字。线是锯齿状的，标签放哪一段都会压上去 —— 于是给它垫一层与图底同色的底片。 */}
-      <rect x={w - 52} y={y(points[points.length - 1].p50) - 15} width={50} height={14} rx="3" className="fill-muted" />
-      <text x={w - 4} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
-        {points[points.length - 1].p50} ms
-      </text>
+      {segs.map((s, i) => (
+        <polygon key={`band-${i}`} points={band(s)} className="fill-primary/15" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p99-${i}`} points={path(s, (q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p90-${i}`} points={path(s, (q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p50-${i}`} points={path(s, (q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      ))}
+      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。线是锯齿状的，标签放哪一段都会
+          压上去 —— 于是给它垫一层与图底同色的底片。 */}
+      {last && (
+        <>
+          <rect x={w - 52} y={y(last.p50 as number) - 15} width={50} height={14} rx="3" className="fill-muted" />
+          <text x={w - 4} y={y(last.p50 as number) - 4} fontSize="10" textAnchor="end" className="fill-primary">
+            {last.p50} ms
+          </text>
+        </>
+      )}
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -1952,7 +1989,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -2085,7 +2122,13 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			// 让那张图支持"断线"是另一件独立的活（见 notes/ping-outage-invisible.md）。
 			// 而**色条**用 `lossAxis`（下面），它覆盖**全部桶** —— 于是"这段彻底不通"
 			// 至少在色条上一眼可见，不再是一块与"没数据"无法区分的空白。
-			const pct = ordered.map(([ts, samples]) => {
+			// `pct` 覆盖**全部桶**（`tsOf`），没有有效样本的桶分位数给 `null` ——
+			// `BandChart` 会按缺口分段：线在那里断开、面积也断，而"这段不通"因此**看得见**。
+			const pct = [...(tsOf.get(taskId) ?? [])].sort((a, b) => a - b).map((ts) => {
+				const samples = perTs.get(ts)
+				if (!samples || samples.length === 0) {
+					return { ts, p25: null, p50: null, p75: null, p90: null, p99: null, loss: lossOf.get(taskId)?.get(ts) ?? 0 }
+				}
 				const s = [...samples].sort((x, y) => x - y)
 				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99), loss: lossOf.get(taskId)?.get(ts) ?? 0 }
 			})
