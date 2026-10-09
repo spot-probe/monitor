@@ -1790,6 +1790,38 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
+/// 丢包条：与上面那张延迟图**共用时间轴**的一行窄格子，颜色 = 那一桶的丢包率（**最差那台**）。
+///
+/// 它与延迟图是**两条独立的信息**：延迟图答"什么时候慢"，这一条答"什么时候丢"，
+/// 而两者常常同时发生（拥堵 → 重传 → 丢包）。**分开画正是为了不牺牲任何一维** ——
+/// 把丢包编码进延迟图的颜色里，两样都会读不准。
+///
+/// 只用**一条色阶**（同色相深浅表程度）：0 接近底色、100 是危险色。整数百分比要能分开
+/// 1% 与 0% —— 那正是这张条存在的理由之一（列表里那个 73% 以前在图上完全看不见）。
+function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
+  if (points.length === 0) return null
+  const tone = (l: number) =>
+    l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
+  const worst = Math.max(...points.map((p) => p.loss))
+  return (
+    <div className="mt-2">
+      <div className="flex h-2 w-full gap-px overflow-hidden rounded-sm">
+        {points.map((p) => (
+          <span
+            key={p.ts}
+            className={`flex-1 ${tone(p.loss)}`}
+            title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
+          />
+        ))}
+      </div>
+      <p className="mt-0.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>丢包（每一格 = 一个时间桶，取该桶里最差的那台）</span>
+        <span className="tnum">最高 {worst}%</span>
+      </p>
+    </div>
+  )
+}
+
 /// 分位数（输入需已排序）。区间带取 P25–P75，线取 P50 / P90 / P99。
 function pctl(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0
@@ -2521,6 +2553,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						</div>
       						<div className="rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
+				<LossStrip points={pct} />
 			</div>
       					</section>
       				)}
