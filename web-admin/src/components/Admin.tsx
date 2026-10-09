@@ -2569,12 +2569,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
       					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
-      							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
-      								<span className="text-primary">— P50 中位数</span>
-      								<span className="text-warn-fg/70">— P90</span>
-      								<span className="text-warn-fg">— P99（最慢的那批）</span>
-      								<span className="text-primary/60">▉ 中间一半的节点（P25–P75）</span>
-      							</div>
       						</div>
       						<div className="rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
