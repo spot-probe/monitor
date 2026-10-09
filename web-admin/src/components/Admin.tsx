@@ -739,10 +739,13 @@ function BillingForm({ node, onClose, onSaved }: {
 // Built here rather than fetched: the node list already carries the token, so
 // viewing an install command is a read rather than an action. Reissuing one to
 // display it would take the running agent offline.
-function installCommand(site: string, token: string, seconds: number) {
+function installCommand(site: string, token: string, seconds: number, allowRemoteUpgrade = false) {
   site = provisioningSite(site)
   if (!site) return ""
   const args = [`--server ${site}`, `--token ${token}`, `--interval ${seconds}`]
+  // **默认不带**：不勾选时生成的命令与从前**逐字相同**，而且 install.sh 也认这个参数
+  // （它会把开关写进 unit 的 ExecStart，并在 --upgrade 时读回保留 —— 否则会被静默抹掉）。
+  if (allowRemoteUpgrade) args.push("--allow-remote-upgrade")
   return `curl -fsSL ${site}/install.sh | sh -s -- ${args.join(" ")}`
 }
 
@@ -964,9 +967,11 @@ function InstallDialog({ node, site, onClose, onRotated }: {
   const [interval, setInterval] = useState("1")
   const [rotating, setRotating] = useState(false)
   const [confirmRotate, setConfirmRotate] = useState(false)
+  // **默认不勾**：不勾时生成的命令与从前逐字相同，机器也保持"仅手动升级"。
+  const [allowUpgrade, setAllowUpgrade] = useState(false)
 
   const seconds = Math.min(3600, Math.max(1, Math.round(Number(interval) || 1)))
-  const command = token ? installCommand(site, token, seconds) : ""
+  const command = token ? installCommand(site, token, seconds, allowUpgrade) : ""
 
   async function rotate() {
     setRotating(true)
@@ -995,6 +1000,24 @@ function InstallDialog({ node, site, onClose, onRotated }: {
         <div className="space-y-5">
           <Field label="上报间隔（秒）" hint="1–3600，默认 1 秒">
             <Input type="number" min={1} max={3600} value={interval} onChange={(e) => setInterval(e.target.value)} />
+          </Field>
+          {/* **本机决定**、且 hub 改不了：开关写进 unit 的 ExecStart，只有在这台机器上重跑
+              安装命令才能改（带 --no-allow-remote-upgrade 可关）。默认不勾。
+              注意它与"上报间隔"不同：那个是机队共用的批量命令该带的，这个是**安全姿态**，
+              所以不做批量默认，只在单台纳管时由人明确选择。 */}
+          <Field
+            label="允许远程升级"
+            hint="勾选后 hub 可以在这台机器上替换 agent 二进制（仍需通过签名校验）；不勾则只能 SSH 重跑安装命令升级。"
+          >
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="size-4 accent-primary"
+                checked={allowUpgrade}
+                onChange={(e) => setAllowUpgrade(e.target.checked)}
+              />
+              在这台机器上开启（命令里会加上 --allow-remote-upgrade）
+            </label>
           </Field>
           <div className="space-y-2">
             <Label className="text-sm font-medium">安装命令</Label>
