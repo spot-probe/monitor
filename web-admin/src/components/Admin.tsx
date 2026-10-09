@@ -2051,12 +2051,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
             m.set(p.ts, Math.max(m.get(p.ts) ?? 0, p.loss))
             lossOf.set(p.task_id, m)
           }
-          if (p.latency === null || p.latency === undefined) continue
+          // **必须在下面这句 continue 之前**：100% 丢包的桶 latency 是 null，会被跳过，
+          // 而它正是运维最需要看见的那种桶。先前我把它插在了 continue **之后** ——
+          // 于是"全部桶"其实还是"有样本的桶"，色条依然只有 14 格（维护者数出来的 ✓）。
           {
             const set = tsOf.get(p.task_id) ?? new Set<number>()
             set.add(p.ts)
             tsOf.set(p.task_id, set)
           }
+          if (p.latency === null || p.latency === undefined) continue
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
 				// 同一节点、同一任务的样本累加（延迟求和与次数分开存，最后再除）。
