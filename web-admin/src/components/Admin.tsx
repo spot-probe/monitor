@@ -753,6 +753,55 @@ function installCommand(site: string, token: string, seconds: number, allowRemot
 // within the window it opened, and each machine exchanges it for a token of its
 // own, so unlike an install command this text is no one's credential and can be
 // used directly in a loop.
+/// 让一台节点升级自己。**只在它开着「允许远程升级」时出现** —— 没有那个标记时，
+/// 这台机器只能 SSH 重跑安装命令升级，给它一个按不动的按钮只是噪音。
+///
+/// 确认做成**按钮自身的两步**而不是弹窗：这个动作有后果（会换掉那台机器上的二进制），
+/// 所以必须明确确认；但一个只问一句话的弹窗不值当，而两步确认在同一个位置，
+/// 想反悔也容易（"取消"就在旁边）。
+function UpgradeButton({ node }: { node: Node }) {
+  const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  if (!node.allow_remote_upgrade) return null
+
+  async function push() {
+    setBusy(true)
+    try {
+      const r = await api<{ version: string; bytes: number }>(`/nodes/${node.id}/upgrade`, { method: "POST" })
+      toast.success(`已推给 ${node.name}：v${r.version}（${r.bytes} 字节），等它回报校验结果`)
+      setConfirming(false)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (confirming) {
+    return (
+      <>
+        <Button variant="ghost" size="sm" className="h-8 text-xs" disabled={busy} onClick={() => void push()}>
+          {busy ? "推送中…" : "确认升级"}
+        </Button>
+        <Button variant="ghost" size="sm" className="h-8 text-xs" disabled={busy} onClick={() => setConfirming(false)}>
+          取消
+        </Button>
+      </>
+    )
+  }
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      title="让这台机器升级到最新 agent（它会先验签；结果回报在「版本」那一列）"
+      aria-label="远程升级"
+      onClick={() => setConfirming(true)}
+    >
+      <ArrowUpCircle />
+    </Button>
+  )
+}
+
 function registerCommand(site: string, key: string) {
   site = provisioningSite(site)
   if (!site) return ""
@@ -1461,6 +1510,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                   <Button variant="ghost" size="icon" onClick={() => setEditing(n)} title="编辑节点" aria-label="编辑节点">
                     <Pencil />
                   </Button>
+                  <UpgradeButton node={n} />
                   <Button variant="ghost" size="icon" onClick={() => setBilling(n)} title="续费设置" aria-label="续费设置">
                     <CalendarClock />
                   </Button>
