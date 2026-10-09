@@ -75,6 +75,8 @@ export type Node = {
   private_remark?: string
   /** agent 是否允许被 hub 远程升级。**只能在那台机器上打开**（重跑安装命令）。 */
   allow_remote_upgrade?: boolean
+  /** 最近一次远程升级的结论（agent 回报）。只在节点在线时有 —— 升级只可能在在线时发生。 */
+  upgrade?: { ok: boolean; reason: string; version: string; at: number } | null
   /** Panel only. Empty for nodes created before the hub retained a copy. */
   token?: string
   /** Panel only. Whether going offline and returning are announced. */

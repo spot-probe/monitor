@@ -1395,6 +1395,18 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     release, which is also what an offline hub gets. */}
                 <TableCell className="tnum text-sm">
                   {n.agent_version || <span className="text-muted-foreground">—</span>}
+                  {/* 最近一次远程升级的结论。用**字**而不是点：这是"做过一件有后果的事"的结果，
+                      而且原因是唯一能告诉你"为什么没成"的东西，不该藏在悬停里。 */}
+                  {n.upgrade && (
+                    <div
+                      className={`mt-1 text-xs ${n.upgrade.ok ? "text-ok-fg" : "text-danger-fg"}`}
+                      title={n.upgrade.reason}
+                    >
+                      {n.upgrade.ok ? "已在 " : "被拒："}
+                      {n.upgrade.ok ? "该机验签通过（未替换）" : ""}
+                      {n.upgrade.ok ? "" : n.upgrade.reason}
+                    </div>
+                  )}
                   {n.agent_old && (
                     <span
                       className="ml-1.5 inline-block size-1.5 shrink-0 rounded-full bg-warn align-middle"
