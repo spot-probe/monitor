@@ -1952,7 +1952,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number; loss: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -2022,6 +2022,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
         // 逐桶丢包：每个任务一张 (ts → 最差那台的百分比) 的表。上面解析每一行时填，
         // 下面拼 pct 时读。放在这里而不是循环里，是因为它要跨行累积。
         const lossOf = new Map<number, Map<number, number>>()
+        // **桶的时间轴必须在下面那句 `continue` 之前收集**：100% 丢包的桶 `latency` 是
+        // `null`，会被跳过 —— 而它是运维最需要看见的那种桶（"这段彻底不通"）。
+        // 从前桶在 continue 之后才建，于是那些桶在图上**根本不存在** ✗ —— 不是画成 0，
+        // 是缺席，而缺席与"没有数据"长得一样。
+        const tsOf = new Map<number, Set<number>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
 		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
 		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; points: { ts: number; latency: number }[] }>>()
@@ -2047,6 +2052,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
             lossOf.set(p.task_id, m)
           }
           if (p.latency === null || p.latency === undefined) continue
+          {
+            const set = tsOf.get(p.task_id) ?? new Set<number>()
+            set.add(p.ts)
+            tsOf.set(p.task_id, set)
+          }
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
 				// 同一节点、同一任务的样本累加（延迟求和与次数分开存，最后再除）。
@@ -2068,10 +2078,21 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
 			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
 			// 分位数：把同一时刻所有节点的样本排序后取。前端算得出来 —— 所以这件事不需要新接口。
+			// `pct` **只含有有效样本的桶**：手绘的 `BandChart` 对分位数做算术，给不了 null。
+			// 让那张图支持"断线"是另一件独立的活（见 notes/ping-outage-invisible.md）。
+			// 而**色条**用 `lossAxis`（下面），它覆盖**全部桶** —— 于是"这段彻底不通"
+			// 至少在色条上一眼可见，不再是一块与"没数据"无法区分的空白。
 			const pct = ordered.map(([ts, samples]) => {
 				const s = [...samples].sort((x, y) => x - y)
 				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99), loss: lossOf.get(taskId)?.get(ts) ?? 0 }
 			})
+        // 色条的轴：**全部桶**（`tsOf`），每格带上那一桶的 loss（缺失当 0）。
+        // 100% 丢包的桶没有样本、不在 `pct` 里，但它**必须**在色条里有格子 —— 否则
+        // "彻底不通"与"没数据"长得一样。
+        const lossAxis = [...(tsOf.get(taskId) ?? [])]
+          .sort((a, b) => a - b)
+          .map((ts) => ({ ts, loss: lossOf.get(taskId)?.get(ts) ?? 0 }))
+
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
@@ -2080,6 +2101,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 					series,
 					points,
 					pct,
+					lossAxis,
         }
       }
 		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
@@ -2553,7 +2575,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						</div>
       						<div className="rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
-				<LossStrip points={pct} />
+				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 			</div>
       					</section>
       				)}
