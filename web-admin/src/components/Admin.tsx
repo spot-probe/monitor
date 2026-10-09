@@ -775,6 +775,12 @@ function UpgradeResult({ node }: { node: Node }) {
   const up = node.upgrade
   if (!up) return null
   const bad = !up.ok
+  // **成功只是一句回执**：半小时后就撤掉 —— 版本列本身已经说明了状态，而这行字只是
+  // "你刚才那次操作成了"的一句话。**失败要留着**：那是一件需要你处理的事（重跑安装命令、
+  // 查机器权限…），不该在你没看见之前自己消失。两者都跟着会话走，所以 agent 重连或
+  // hub 重启会让它消失 —— 那时版本列仍然是准的。
+  // （`useState` 在上面，早返回改的是"要不要画"，不改变 hook 的调用次数 ✓）
+  if (up.ok && Math.floor(Date.now() / 1000) - up.at > 30 * 60) return null
   return (
     <>
       <button
@@ -794,6 +800,10 @@ function UpgradeResult({ node }: { node: Node }) {
             <DialogDescription>{bad ? "这次下发没有执行完，原因如下。" : "这台机器已处理完这次下发。"}</DialogDescription>
           </DialogHeader>
           <p className="text-sm break-all">{up.reason}</p>
+          <p className="text-xs text-muted-foreground">
+            若反复失败：先在那台机器上重跑一次安装命令。它会重写 unit 与目录权限 ——
+            而这两样正是这类报错（只读文件系统、权限不足）的根源。
+          </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => copy(up.reason)}>
               复制原因
@@ -816,6 +826,20 @@ function UpgradeButton({ node }: { node: Node }) {
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   if (!node.allow_remote_upgrade) return null
+  // 离线时下发送不到它（端点会回 409）—— 别让人按了才知道。灰掉并写明原因。
+  if (!node.online) {
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled
+        title="该节点不在线 —— 下发送不到它（端点会回 409）"
+        aria-label="远程升级（节点不在线）"
+      >
+        <ArrowUpCircle />
+      </Button>
+    )
+  }
 
   async function push() {
     setBusy(true)
@@ -1315,6 +1339,9 @@ function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) 
       setLine(`正在下发 ${i + 1}/${todo.length}：${n.name}`)
       try {
         await api(`/nodes/${n.id}/upgrade`, { method: "POST" })
+        // **每推一台就刷新一次**：于是表里的版本列与对话框那行 `正在下发 i/N` 同步往前走 ——
+        // 否则要等整批跑完才更新，中间那段时间表看起来像没动。
+        onDone()
       } catch (e) {
         setFail({ name: n.name, why: (e as Error).message })
         setLine("")
@@ -1392,7 +1419,11 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
   const [query, setQuery] = useState("")
 	// 只看 agent 需要升级的节点。与「未分组」那条筛选项同样的取舍：没有可筛的东西时
 	// 不出现，否则工具栏上会多一个按下去什么也不改变的按钮。
-	const [onlyOutdated, setOnlyOutdated] = useState(false)
+	// 初值读一次 URL：总览页「Agent 版本分布」的"落后"那一行会带 `?outdated=1` 跳过来，
+    // 于是"看到落后 3 台"→"看到是哪 3 台"是一步而不是两步。
+    const [onlyOutdated, setOnlyOutdated] = useState(
+      () => new URLSearchParams(window.location.search).get("outdated") === "1",
+    )
   const [group, setGroup] = useState("all")
   const drag = useDragOrder(nodes.map((node) => node.id), "/nodes/order", refresh)
   const byId = new Map(nodes.map((node) => [node.id, node]))
