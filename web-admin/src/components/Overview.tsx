@@ -713,7 +713,26 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 所以「未上报」必须单独一段，不能并进「落后」。
   const agentBuckets = [
     { key: "latest", label: "最新版", version: agentLatest ?? "", count: nodes.filter((n) => !n.agent_old && (n.agent_version ?? "") !== "").length, color: "bg-ok-fg" },
-    { key: "old", label: "落后", version: "", count: nodes.filter((n) => n.agent_old).length, color: "bg-warn-fg" },
+    {
+      key: "old",
+      label: "落后",
+      // **带上台数与具体版本**，而不是只给一个总数：核对"要升几台、升到哪个"时，
+      // 光有总数还得去节点页数。**不写成区间**（1.1.3~1.1.5）：区间会读成"这三版都有人用"，
+      // 而实际可能只有 1.1.3 与 1.1.5。按台数从多到少，超过三个版本就省略，写明还有几个。
+      version: (() => {
+        const by = new Map<string, number>()
+        for (const n of nodes) {
+          if (!n.agent_old) continue
+          const v = n.agent_version || "未上报"
+          by.set(v, (by.get(v) ?? 0) + 1)
+        }
+        const sorted = [...by].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        const head = sorted.slice(0, 3).map(([v, c]) => `${v} ×${c}`).join(" · ")
+        return sorted.length > 3 ? `${head} 等 ${sorted.length} 个版本` : head
+      })(),
+      count: nodes.filter((n) => n.agent_old).length,
+      color: "bg-warn-fg",
+    },
     { key: "none", label: "未上报", version: "", count: nodes.filter((n) => (n.agent_version ?? "") === "").length, color: "bg-muted-foreground/40" },
   ]
 

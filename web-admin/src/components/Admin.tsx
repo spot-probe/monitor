@@ -753,6 +753,58 @@ function installCommand(site: string, token: string, seconds: number, allowRemot
 // within the window it opened, and each machine exchanges it for a token of its
 // own, so unlike an install command this text is no one's credential and can be
 // used directly in a loop.
+/// 回报那句话太长 —— 实测会把「版本」那一列撑宽（一行红字顶出半列）。所以列里只留
+/// **一个四字摘要**，完整原因点开看，而且**可以复制**（贴工单要用它）。
+///
+/// 摘要**不是新造的信息**：它按关键字从原文映射而来，而**原文一字不删**，就在对话框里
+/// 与两份日志里（agent 的 stderr、hub 的日志）。这几轮真机上最有价值的产出恰恰是那句话
+/// —— `EROFS` 指向 `ProtectSystem=`、`EACCES` 指向属主 —— 所以它不该只活在悬停里。
+function upgradeSummary(reason: string): string {
+  if (reason.includes("Read-only file system")) return "只读文件系统"
+  if (reason.includes("Permission denied")) return "目录无写权限"
+  if (reason.includes("签名不匹配") || reason.includes("签名校验失败")) return "验签失败"
+  if (reason.includes("未开启远程升级")) return "开关未开"
+  if (reason.includes("非加密连接")) return "连接不安全"
+  if (reason.includes("不比当前新")) return "版本不比当前新"
+  if (reason.includes("暂存")) return "暂存失败"
+  return "升级失败"
+}
+
+function UpgradeResult({ node }: { node: Node }) {
+  const [open, setOpen] = useState(false)
+  const up = node.upgrade
+  if (!up) return null
+  const bad = !up.ok
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title={up.reason}
+        className={`mt-1 flex items-center gap-1 text-xs ${bad ? "text-danger-fg" : "text-ok-fg"}`}
+      >
+        {bad ? <CircleAlert className="size-3.5 shrink-0" /> : <CircleCheck className="size-3.5 shrink-0" />}
+        {upgradeSummary(up.reason)}
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-lg" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>{node.name} 的升级结果</DialogTitle>
+            <DialogDescription>{bad ? "这次下发没有执行完，原因如下。" : "这台机器已处理完这次下发。"}</DialogDescription>
+          </DialogHeader>
+          <p className="text-sm break-all">{up.reason}</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => copy(up.reason)}>
+              复制原因
+            </Button>
+            <Button onClick={() => setOpen(false)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
 /// 让一台节点升级自己。**只在它开着「允许远程升级」时出现** —— 没有那个标记时，
 /// 这台机器只能 SSH 重跑安装命令升级，给它一个按不动的按钮只是噪音。
 ///
@@ -1480,18 +1532,10 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     release, which is also what an offline hub gets. */}
                 <TableCell className="tnum text-sm">
                   {n.agent_version || <span className="text-muted-foreground">—</span>}
-                  {/* 最近一次远程升级的结论。用**字**而不是点：这是"做过一件有后果的事"的结果，
-                      而且原因是唯一能告诉你"为什么没成"的东西，不该藏在悬停里。 */}
-                  {n.upgrade && (
-                    <div
-                      className={`mt-1 text-xs ${n.upgrade.ok ? "text-ok-fg" : "text-danger-fg"}`}
-                      title={n.upgrade.reason}
-                    >
-                      {n.upgrade.ok ? "已在 " : "被拒："}
-                      {n.upgrade.ok ? "该机验签通过（未替换）" : ""}
-                      {n.upgrade.ok ? "" : n.upgrade.reason}
-                    </div>
-                  )}
+                  {/* 最近一次远程升级的结论：**图标 + 四字摘要**，完整原因点开看（可复制）。
+                      原来把整句红字铺在这儿，实测会把这一列撑宽半列 —— 和升级确认那个
+                      "撑宽整行"是同一类毛病。 */}
+                  <UpgradeResult node={n} />
                   {n.agent_old && (
                     <span
                       className="ml-1.5 inline-block size-1.5 shrink-0 rounded-full bg-warn align-middle"
