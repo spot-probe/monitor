@@ -1888,6 +1888,16 @@ impl Db {
         }
         let today = Local::now().date_naive().to_string();
         if day_start != today {
+            // **日切：先把刚过去的那一天存进快照，再重置** ✓ —— 顺序不能反 ✗：
+            // 反了就把"新一天"当成"昨天"写进去 ✓，而那一天还没过完 ✓。
+            // 此刻 `day_rx/day_tx` 是刚结束那天的总量 ✓、`day_start` 是那一天本身 ✓
+            //（节点离线跨过午夜也没关系 ✓：它下次上报时才走到这里，日期仍是那一天 ✓）。
+            // 用 `OR REPLACE` 而不是裸 INSERT：万一同一节点在同一瞬间被处理两次 ✓，
+            // 重复的快照会让**周报翻倍** ✗ —— 而那种错在报表上几乎看不出来 ✓。
+            conn.execute(
+                "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx) VALUES (?1, ?2, ?3, ?4)",
+                params![node_id, day_start, day_rx, day_tx],
+            )?;
             day_rx = d_rx;
             day_tx = d_tx;
         }
