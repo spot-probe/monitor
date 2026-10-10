@@ -1829,6 +1829,20 @@ impl Db {
             .collect())
     }
 
+    /// 每台节点的**月度额度**（0 = 不限 ✓，与 `node.traffic_limit` 同一约定 ✓）。
+    ///
+    /// 报告的"超限 / 将超限"要它 ✓ —— 额度是**月度**的 ✓，所以判断看的是"本月已用"
+    /// 而不是这个周期的量 ✓（见 `report::body` 的说明 ✓）。
+    pub fn traffic_limits(&self) -> std::collections::HashMap<i64, i64> {
+        let conn = self.conn();
+        let Ok(mut stmt) = conn.prepare_cached("SELECT id, traffic_limit FROM node") else {
+            return Default::default();
+        };
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
     /// 从按天快照表求和：某个日期区间内**每台节点**的上下行合计，按总量从多到少 ✓。
     ///
     /// 区间**含首不含尾**（`from <= date < to` ✓）—— 与 [`Period::last_full`] 返回的四个日期

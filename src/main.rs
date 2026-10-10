@@ -13,6 +13,7 @@ mod frontend;
 mod fx;
 mod notify;
 mod report;
+mod report_watch;
 mod theme;
 
 use std::collections::HashMap;
@@ -508,6 +509,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(notify::deliver(app.clone(), inbox));
+    tokio::spawn(report_watch::watch(app.clone()));
     tokio::spawn(notify::watch(app.clone()));
     // The hub embeds a theme, so a fresh install needs no network. That copy is
     // frozen at build time, though, and this is what tells the operator a newer
