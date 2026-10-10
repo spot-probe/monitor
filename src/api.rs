@@ -292,6 +292,15 @@ fn node_view(
     let live = |key: &str, stored: i64| {
         current.and_then(|a| a.metrics.get(key).and_then(serde_json::Value::as_i64)).unwrap_or(stored)
     };
+    // 在线风险（第三方 ✓，**默认关** ⇒ 未开时这里是空 ✓）。
+    // **只读字段** ✓✓ —— 绝不在这里查数据库 ✗：`node_view` 对**每台节点 × 每次快照重建**都要跑 ✓
+    //（快照每秒重建 ✓），一次多余的查询会被放大成"每秒每台一次" ✓。
+    // 算在这个宏**外面** ✓（宏里放不下带 `let` 的块 ✗），真正塞进 JSON 用下面的**下标赋值** ✓
+    //（大宏已接近递归上限 ✗ —— 往里加字段会报 "recursion limit reached" ✓，今天撞过 ✓；
+    //  而仓库早有这个写法 ✓，下面的 `country_pin` 就是 ✓）。
+    let risk = crate::agent_ws::country_source(&node.ip, &node.ipv4, &node.ipv6)
+        .and_then(|addr| node.risk(&addr.to_string()));
+
     let mut view = json!({
         "id": node.id,
         "name": node.name,
@@ -361,6 +370,7 @@ fn node_view(
             "to": uptime.to,
         },
     });
+    view["risk"] = json!(risk);
     // An allowlist rather than a denylist: the agent ships from its own
     // repository, so a field added there would otherwise reach anonymous visitors
     // the day it is released. No address, hostname or note may ever do so.
