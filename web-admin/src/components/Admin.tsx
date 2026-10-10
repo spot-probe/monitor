@@ -1790,6 +1790,38 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
+/// 丢包条：与上面那张延迟图**共用时间轴**的一行窄格子，颜色 = 那一桶的丢包率（**最差那台**）。
+///
+/// 它与延迟图是**两条独立的信息**：延迟图答"什么时候慢"，这一条答"什么时候丢"，
+/// 而两者常常同时发生（拥堵 → 重传 → 丢包）。**分开画正是为了不牺牲任何一维** ——
+/// 把丢包编码进延迟图的颜色里，两样都会读不准。
+///
+/// 只用**一条色阶**（同色相深浅表程度）：0 接近底色、100 是危险色。整数百分比要能分开
+/// 1% 与 0% —— 那正是这张条存在的理由之一（列表里那个 73% 以前在图上完全看不见）。
+function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
+  if (points.length === 0) return null
+  const tone = (l: number) =>
+    l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
+  const worst = Math.max(...points.map((p) => p.loss))
+  return (
+    <div className="mt-2">
+      <div className="flex h-2 w-full gap-px overflow-hidden rounded-sm">
+        {points.map((p) => (
+          <span
+            key={p.ts}
+            className={`flex-1 ${tone(p.loss)}`}
+            title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
+          />
+        ))}
+      </div>
+      <p className="mt-0.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>丢包（每一格 = 一个时间桶，取该桶里最差的那台）</span>
+        <span className="tnum">最高 {worst}%</span>
+      </p>
+    </div>
+  )
+}
+
 /// 分位数（输入需已排序）。区间带取 P25–P75，线取 P50 / P90 / P99。
 function pctl(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0
@@ -1806,39 +1838,76 @@ function pctl(sorted: number[], p: number): number {
 /// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
 /// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
 function BandChart({ points, height = 150 }: {
-  points: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[]
+  // 分位数**可以为 null**：一个桶如果 100% 丢包，它没有有效样本 —— 那种桶**必须在轴上**
+  // （否则"这段彻底不通"会表现成一块与"没数据"无法区分的空白 ✗），而线在那里**断开**
+  // 才是诚实的画法：跨过去连两头，等于把"这里断了"画成"这里平稳" ✗。
+  points: {
+    ts: number
+    p25: number | null
+    p50: number | null
+    p75: number | null
+    p90: number | null
+    p99: number | null
+  }[]
   height?: number
 }) {
   if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
   const t0 = Math.min(...points.map((p) => p.ts))
   const t1 = Math.max(...points.map((p) => p.ts))
-  const hi = Math.max(1, ...points.map((p) => p.p99)) * 1.08
+  const hi = Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
   const y = (v: number) => pad + (1 - v / hi) * (height - pad * 2)
-  const line = (f: (q: (typeof points)[number]) => number) =>
-    points.map((q) => `${x(q.ts).toFixed(1)},${y(f(q)).toFixed(1)}`).join(" ")
-  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形。
-  const band = `${points.map((q) => `${x(q.ts).toFixed(1)},${y(q.p75).toFixed(1)}`).join(" ")} ${[...points]
-    .reverse()
-    .map((q) => `${x(q.ts).toFixed(1)},${y(q.p25).toFixed(1)}`)
-    .join(" ")}`
+  // **按缺口分段**：连续有值的点各自成段，段与段之间不连线。
+  const segs: (typeof points)[] = []
+  let run: typeof points = []
+  for (const q of points) {
+    if (q.p25 === null || q.p50 === null || q.p75 === null || q.p90 === null || q.p99 === null) {
+      if (run.length) segs.push(run)
+      run = []
+    } else {
+      run.push(q)
+    }
+  }
+  if (run.length) segs.push(run)
+  const path = (s: typeof points, f: (q: (typeof points)[number]) => number | null) =>
+    s.map((q) => `${x(q.ts).toFixed(1)},${y(Number(f(q))).toFixed(1)}`).join(" ")
+  // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形（每段一条）。
+  const band = (s: typeof points) =>
+    `${path(s, (q) => q.p75)} ${[...s]
+      .reverse()
+      .map((q) => `${x(q.ts).toFixed(1)},${y(Number(q.p25)).toFixed(1)}`)
+      .join(" ")}`
+  // 末尾那个数值标签：取**最后一个有值**的点，否则会写到一个空桶上。
+  const last = [...points].reverse().find((q) => q.p50 !== null)
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-      <polygon points={band} className="fill-primary/15" />
-      <polyline points={line((q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
-      <polyline points={line((q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
-      <polyline points={line((q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。图例已写明哪条是 P50，所以这里
-          只写数字。线是锯齿状的，标签放哪一段都会压上去 —— 于是给它垫一层与图底同色的底片。 */}
-      <rect x={w - 52} y={y(points[points.length - 1].p50) - 15} width={50} height={14} rx="3" className="fill-muted" />
-      <text x={w - 4} y={y(points[points.length - 1].p50) - 4} fontSize="10" textAnchor="end" className="fill-primary">
-        {points[points.length - 1].p50} ms
-      </text>
+      {segs.map((s, i) => (
+        <polygon key={`band-${i}`} points={band(s)} className="fill-primary/15" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p99-${i}`} points={path(s, (q) => q.p99)} fill="none" stroke="currentColor" className="text-warn-fg" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p90-${i}`} points={path(s, (q) => q.p90)} fill="none" stroke="currentColor" className="text-warn-fg/50" strokeWidth="1.25" vectorEffect="non-scaling-stroke" />
+      ))}
+      {segs.map((s, i) => (
+        <polyline key={`p50-${i}`} points={path(s, (q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      ))}
+      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。线是锯齿状的，标签放哪一段都会
+          压上去 —— 于是给它垫一层与图底同色的底片。 */}
+      {last && (
+        <>
+          <rect x={w - 52} y={y(last.p50 as number) - 15} width={50} height={14} rx="3" className="fill-muted" />
+          <text x={w - 4} y={y(last.p50 as number) - 4} fontSize="10" textAnchor="end" className="fill-primary">
+            {last.p50} ms
+          </text>
+        </>
+      )}
       <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
       <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -1914,13 +1983,21 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // first fetch is still in flight and tells the operator there are no probes. Themes and
   // Sessions already guard this with a null; here a flag is enough and touches less.
   const [loaded, setLoaded] = useState(false)
+  // 图上看的是多久：1 小时 / 6 小时 / 24 小时 / 7 天。
+  // 为什么需要它：x 轴**固定铺满整个窗口**，所以"长窗口 + 短事件"会把那件事压成几个像素
+  // （维护者在 24 小时窗口里看到的那团锯齿就是它）。热力图治的是"一眼看全景"，
+  // 这个选择器治的是"把近处放大" —— 两者不冲突。
+  // **名字不能叫 `span`** ✗：对话框里有一个局部 `const span = …`（直方图的分桶宽度），
+  // 它会**遮住**这个名字 —— 于是 `span === h` 拿分桶宽度去比 1/6/24/168，永远为假，
+  // 四个选项**没有一个高亮** ✗（维护者查了元素 class 才看出来 ✓）。
+  const [winHours, setSpan] = useState(24)
 	// 首次请求失败时的原因。`load()` 原来把错误整个吞掉（`.catch(() => {})`），于是页面
 	// 显示「没有监控」——和「没能取到数据」长得一模一样，而这两件事需要完全不同的动作。
 	const [error, setError] = useState("")
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number; p50: number; p75: number; p90: number; p99: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -1965,7 +2042,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
     // in `tasks` read them, and setting state synchronously here would cost a render.
     if (ids.length === 0) return
     let alive = true
-    type PingPoint = { task_id: number; ts: number; latency: number | null }
+    // `loss` 只在**这一桶有丢包时**才存在（hub 那边是 `if lost > 0` 才写）——
+    // 所以读的人必须把"缺失"当 0，否则那些格子会变成空洞，而不是绿色。
+    type PingPoint = { task_id: number; ts: number; latency: number | null; loss?: number }
     // 一个请求拿到**一个探测任务**在所有节点上的序列，而不是"每台一个"：
     // 请求数从"节点数"降到"任务数"（100 台 1 个任务 → 1 个请求；此前是 100 个）。
     //
@@ -1975,7 +2054,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
     Promise.all(
       tasks.map((t) =>
         api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
-          `/nodes/ping-series?task=${t.id}&hours=24`,
+          `/nodes/ping-series?task=${t.id}&hours=${winHours}`,
         )
           .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
           .catch(() => []),
@@ -1985,6 +2064,14 @@ function Ping({ nodes }: { nodes: Node[] }) {
       const answers = perTask.flat()
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
+        // 逐桶丢包：每个任务一张 (ts → 最差那台的百分比) 的表。上面解析每一行时填，
+        // 下面拼 pct 时读。放在这里而不是循环里，是因为它要跨行累积。
+        const lossOf = new Map<number, Map<number, number>>()
+        // **桶的时间轴必须在下面那句 `continue` 之前收集**：100% 丢包的桶 `latency` 是
+        // `null`，会被跳过 —— 而它是运维最需要看见的那种桶（"这段彻底不通"）。
+        // 从前桶在 continue 之后才建，于是那些桶在图上**根本不存在** ✗ —— 不是画成 0，
+        // 是缺席，而缺席与"没有数据"长得一样。
+        const tsOf = new Map<number, Set<number>>()
 		// task → node → 该节点的累计（延迟求和/次数、丢包）。与上面用于画线的 buckets 并行，
 		// 因为画线要把各节点混在一起，而这里要的就是「别混」。
 		const byNode = new Map<number, Map<number, { sum: number; n: number; loss: number | null; points: { ts: number; latency: number }[] }>>()
@@ -2000,6 +2087,23 @@ function Ping({ nodes }: { nodes: Node[] }) {
       for (const [nid, d] of answers) {
         if (!d) continue
         for (const p of d.ping ?? []) {
+          // 丢包必须在下面那句 continue **之前**取：丢包的那一次没有 latency，
+          // 会被跳过 —— 而那恰恰是丢包率 100% 的桶。漏掉它，最该红的格子会显示 0。
+          // 聚合取**最差那台**，与列表那一行同一语义（平均会把一台的丢包摊平，
+          // 而那正是这张图"看不见 73%"的原因）。
+          if (typeof p.loss === "number") {
+            const m = lossOf.get(p.task_id) ?? new Map<number, number>()
+            m.set(p.ts, Math.max(m.get(p.ts) ?? 0, p.loss))
+            lossOf.set(p.task_id, m)
+          }
+          // **必须在下面这句 continue 之前**：100% 丢包的桶 latency 是 null，会被跳过，
+          // 而它正是运维最需要看见的那种桶。先前我把它插在了 continue **之后** ——
+          // 于是"全部桶"其实还是"有样本的桶"，色条依然只有 14 格（维护者数出来的 ✓）。
+          {
+            const set = tsOf.get(p.task_id) ?? new Set<number>()
+            set.add(p.ts)
+            tsOf.set(p.task_id, set)
+          }
           if (p.latency === null || p.latency === undefined) continue
           const perTask = buckets.get(p.task_id) ?? new Map<number, number[]>()
           perTask.set(p.ts, [...(perTask.get(p.ts) ?? []), p.latency])
@@ -2022,10 +2126,27 @@ function Ping({ nodes }: { nodes: Node[] }) {
 			// 合并线的点也带时间：卡片里那条折线要画在真实的时间轴上。
 			const points = ordered.map(([ts], k) => ({ ts, latency: series[k] }))
 			// 分位数：把同一时刻所有节点的样本排序后取。前端算得出来 —— 所以这件事不需要新接口。
-			const pct = ordered.map(([ts, samples]) => {
+			// `pct` **只含有有效样本的桶**：手绘的 `BandChart` 对分位数做算术，给不了 null。
+			// 让那张图支持"断线"是另一件独立的活（见 notes/ping-outage-invisible.md）。
+			// 而**色条**用 `lossAxis`（下面），它覆盖**全部桶** —— 于是"这段彻底不通"
+			// 至少在色条上一眼可见，不再是一块与"没数据"无法区分的空白。
+			// `pct` 覆盖**全部桶**（`tsOf`），没有有效样本的桶分位数给 `null` ——
+			// `BandChart` 会按缺口分段：线在那里断开、面积也断，而"这段不通"因此**看得见**。
+			const pct = [...(tsOf.get(taskId) ?? [])].sort((a, b) => a - b).map((ts) => {
+				const samples = perTs.get(ts)
+				if (!samples || samples.length === 0) {
+					return { ts, p25: null, p50: null, p75: null, p90: null, p99: null, loss: lossOf.get(taskId)?.get(ts) ?? 0 }
+				}
 				const s = [...samples].sort((x, y) => x - y)
-				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99) }
+				return { ts, p25: pctl(s, 0.25), p50: pctl(s, 0.5), p75: pctl(s, 0.75), p90: pctl(s, 0.9), p99: pctl(s, 0.99), loss: lossOf.get(taskId)?.get(ts) ?? 0 }
 			})
+        // 色条的轴：**全部桶**（`tsOf`），每格带上那一桶的 loss（缺失当 0）。
+        // 100% 丢包的桶没有样本、不在 `pct` 里，但它**必须**在色条里有格子 —— 否则
+        // "彻底不通"与"没数据"长得一样。
+        const lossAxis = [...(tsOf.get(taskId) ?? [])]
+          .sort((a, b) => a - b)
+          .map((ts) => ({ ts, loss: lossOf.get(taskId)?.get(ts) ?? 0 }))
+
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
           // The worst node, not the average: a probe losing packets on one machine is
@@ -2034,6 +2155,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 					series,
 					points,
 					pct,
+					lossAxis,
         }
       }
 		// 逐节点汇总：最差在前（丢包多的在前，其次延迟高的），因为这一栏存在的意义就是回答
@@ -2050,7 +2172,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
     return () => {
       alive = false
     }
-  }, [tasks])
+  }, [tasks, winHours])
   useEffect(() => { load() }, [])
 
   async function save() {
@@ -2497,16 +2619,27 @@ function Ping({ nodes }: { nodes: Node[] }) {
       				{pct.length > 1 && (
       					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
-      							<div className="flex flex-wrap items-baseline gap-x-3 text-xs">
-      								<span className="text-primary">— P50 中位数</span>
-      								<span className="text-warn-fg/70">— P90</span>
-      								<span className="text-warn-fg">— P99（最慢的那批）</span>
-      								<span className="text-primary/60">▉ 中间一半的节点（P25–P75）</span>
+      							      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
+      							{/* 窗口选择：x 轴**固定铺满整个窗口**，所以"长窗口 + 短事件"会把那件事压成几个像素
+      							    （维护者在 24 小时窗口里看到的那团锯齿就是它）。热力图治的是"一眼看全景"，两者不冲突。 */}
+      							<div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5">
+      							  {[1, 6, 24, 168].map((h) => (
+      							    <button
+      							      key={h}
+      							      type="button"
+      							      onClick={() => setSpan(h)}
+      							      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+        winHours === h ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+      }`}
+      							    >
+      							      {h < 24 ? `${h} 小时` : h === 24 ? "24 小时" : "7 天"}
+      							    </button>
+      							  ))}
       							</div>
       						</div>
-      						<div className="rounded-lg bg-muted p-3">
+      						<div className="mt-3 rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
+				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 			</div>
       					</section>
       				)}
