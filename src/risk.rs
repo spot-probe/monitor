@@ -14,11 +14,6 @@
 //! 地区上 [HK] 与 [CN] **并存** ✓。**分歧本身就是最有信息量的信号** ✓✓，
 //! 平均掉它等于把唯一有用的东西删了 ✓。
 
-// ⚠️ **整块还没接线** ✗：请求、额度缓存与开关是下一步的事 ✓，所以现在只有测试在调用 ✓
-// ⇒ clippy 会报一串 dead_code ✗。这是**欠账**，不是设计 ✓ —— 接上后这行 allow 必须删掉 ✓
-//（`geo.rs` / `report.rs` 顶部那行都是这么加的、也都是这么删的 ✓）。
-#![allow(dead_code)]
-
 /// 一次在线查询的结论 ✓ —— **逐源并列** ✓，不合成 ✓。
 #[derive(Default, Clone, PartialEq, Debug, serde::Serialize)]
 pub struct Risk {

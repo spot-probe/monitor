@@ -537,7 +537,19 @@ fn assess(app: Shared, node_id: i64, source: String) {
         // 日子按 **UTC** 取 ✓ —— 这一层只用来"每天一次"去重 ✓，
         // 与报告那种"按东八区切"的口径无关 ✓（跨零点前后各查一次，无害 ✓）。
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let _ = crate::risk::check(&app, &source, &day).await;
+        if let Some(r) = crate::risk::check(&app, &source, &day).await {
+            if let Err(e) = app.db.save_risk_for_node(node_id, Some(&r), &source) {
+                warn!("node {node_id}: storing IP risk failed: {e:#}");
+            }
+        }
+        // ⚠️ `None` 时**什么都不写** ✗ —— 刻意如此 ✓：
+        // 开关关着 / 没配 key 时，上一次的结论**不该被抹掉** ✓（它仍然是"上次查到的事实" ✓，
+        // 只是不再刷新 ✓ —— 抹掉就等于"从来没查过" ✓，那是另一件事 ✓）。
+        //
+        // ⚠️ **已知未做的区分** ✗：`check` 目前把"没去查"与"查了但没查到"合成了一个 `None` ✓，
+        // 所以后者也走这条"不写"的路 ✓（结果是：真查空时旧结论会留着 ✓）。
+        // 要分开就把返回值做成三态 ✓（没查 / 查到 / 查空 ✓）—— 留给以后 ✓，
+        // 记在这里免得被当成"已经处理好了" ✗。
     });
 }
 
