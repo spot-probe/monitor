@@ -2730,7 +2730,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				    左列是标签泳道、右列是时间泳道，图 / 矩阵 / 色条各占其行 ✓。
 				    前一版三块各包各的 flex、各自算宽度 ⇒ 维护者量出差了一个 `w-24` ✗。
 				    这里**没有任何宽度计算** ✓，所以不可能再错位 ✓。 */}
-				<div className="grid grid-cols-[6rem_1fr] items-center gap-x-2 gap-y-0.5">
+				{/* 标签列**按内容定宽** ✓：最宽的标签是 `200–209 ms`（≈58px ✓），所以 4.5rem(72px)
+				    足够容纳 + 与图留一点空隙 ✓ —— 而原先的 6rem 白留了约 30px ✗，那 30px 给图更值 ✓。 */}
+				<div className="grid grid-cols-[4.5rem_1fr] items-center gap-x-2 gap-y-0.5">
 					{/* 纵轴泳道：上界 / 0 —— 高度与内边距**跟图一致** ✓（150 与 14 都是 `BandChart`
 					    的默认值 ✓），于是两个数字与图里的网格线在同一条水平线上 ✓。 */}
 					<div className="flex h-[150px] flex-col justify-between py-[14px] text-right text-[9px] leading-none text-muted-foreground">
