@@ -41,6 +41,12 @@ fn delta(cur: i64, prev: i64) -> Option<f64> {
     Some((cur - prev) as f64 * 100.0 / prev as f64)
 }
 
+/// 明细最多列这么多台 ✓ —— **Telegram 单条上限 4096 字符** ✗：100 台节点约 4KB，
+/// 会被**直接拒掉** ✓，而发送路径不截断 ✓ ⇒ 报告丢失、且没人知道 ✓。
+/// Top 20 加头部约 1.6KB ✓，稳稳在限内 ✓。要全量明细的正确做法是**附一个链接/文件** ✗，
+/// 不是把上千行硬塞进一条消息 ✓。
+const TOP_N: usize = 20;
+
 /// 报告标题：`【流量日报】2026-03-14 · UTC+8` ✓（周期名与日期一眼可见 ✓）。
 pub fn title(period: Period, from: &str, to: &str, tz: &str) -> String {
     let name = match period {
@@ -78,7 +84,10 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
         return out;
     }
     let prev_of = |name: &str| prev.iter().find(|p| p.0 == name).map(|p| p.1 + p.2);
-    for r in rows {
+    // 明细只列前 `TOP_N` 台 ✓（`rows` 已按总量降序 ✓，所以这就是 Top N ✓）。
+    // 注意**上面那段合计仍然按全部 rows 算** ✓ —— 明细被截断不该让总量变小 ✗。
+    let shown = rows.len().min(TOP_N);
+    for r in &rows[..shown] {
         let total = r.rx + r.tx;
         let cmp = match prev_of(&r.name) {
             Some(p) => match delta(total, p) {
@@ -101,6 +110,12 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
             String::new()
         };
         out.push_str(&format!("  {:<16} {:>9}{}{}\n", r.name, human(total), cmp, warn));
+    }
+    if rows.len() > shown {
+        // 被截掉的那些**必须报出数量与合计** ✓ —— 否则报告看起来像"整个周期只有这 20 台在跑" ✗，
+        // 而那种误解比少几行明细严重得多 ✓。
+        let rest: i64 = rows[shown..].iter().map(|r| r.rx + r.tx).sum();
+        out.push_str(&format!("  …还有 {} 台 · 合计 {}\n", rows.len() - shown, human(rest)));
     }
     out
 }
@@ -133,6 +148,28 @@ mod tests {
             "不限额度不写额度行：{}",
             t
         );
+    }
+
+    /// **Top 20**：不足 20 台全列 ✓；超过时只列 20 台 + 一行「还有 N 台 · 合计 X」✓，
+    /// 而**合计那一行仍按全部台数算** ✓（明细被截断不该让总量变小 ✗）。
+    #[test]
+    fn the_detail_stops_at_twenty_but_the_total_does_not() {
+        let gb = 1024i64 * 1024 * 1024;
+        let mk = |n: usize| -> Vec<Row> {
+            (0..n)
+                .map(|i| row(&format!("node{i:03}"), gb, gb, 0, 0)) // 每台 2GB ✓
+                .collect()
+        };
+        // 不足 20 台：全部列出 ✓，**没有**那行汇总 ✓。
+        let few = body(&mk(5), &[]);
+        assert!(few.contains("node004"), "全部列出：{}", few);
+        assert!(!few.contains("还有"), "不足 20 台不该有汇总行：{}", few);
+        // 30 台：列 20 台 ✓、汇总行写"还有 10 台"✓，合计按 30 台 = 60GB ✓。
+        let many = body(&mk(30), &[]);
+        assert!(many.contains("node019"), "第 20 台要在：{}", many);
+        assert!(!many.contains("node020"), "第 21 台不该在：{}", many);
+        assert!(many.contains("…还有 10 台 · 合计 20.0 GB"), "汇总行：{}", many);
+        assert!(many.contains("合计  上行 30.0 GB · 下行 30.0 GB · 总计 60.0 GB"), "总量按全部算：{}", many);
     }
 
     /// 上期为 0（或没有上期）时**不写百分比** ✓，但要说明原因 ✓ —— 不能悄悄省略 ✗。
