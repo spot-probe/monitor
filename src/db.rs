@@ -3508,6 +3508,36 @@ fn close_bucket(out: &mut Vec<serde_json::Value>, open: &mut Vec<(i64, Vec<i64>,
     }
 }
 
+impl Node {
+    /// 这批质量结论**是否属于当前地址** ✓✓ —— 属于才返回 ✓，否则 `None`（= 未知 ✓）。
+    ///
+    /// **这是 `q_ip` 存在的全部理由** ✗：一台机器换了出口之后，旧地理继续被当成"当前事实"
+    /// 就是错的 ✓；而判断只做**一处** ✓（这里 ✓）—— 若让面板与主题各判一次，
+    /// 早晚会有一处忘了判 ✓，症状是"某个页面显示了过期地理" ✓，极难发现 ✓。
+    ///
+    /// `source` 是**现在**该查的地址 ✓（`agent_ws::country_source` 从 `ip`/`ipv4`/`ipv6` 挑的那个 ✓）——
+    /// 调用方拿它来比 ✓，而不是自己再挑一遍 ✗（同一件事只该有一处实现 ✓）。
+    // 调用它的是**下一步**：节点视图把结论交给面板与主题（那里才有"现在该查的地址" ✓）。
+    // 在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
+    #[allow(dead_code)]
+    pub fn quality(&self, source: &str) -> Option<crate::geo::Quality> {
+        let ip = self.q_ip.as_deref().filter(|ip| !ip.is_empty())?;
+        if ip != source {
+            return None; // 换过地址（或还没查过这个地址）⇒ 旧结论一律当未知 ✓
+        }
+        Some(crate::geo::Quality {
+            country: self.q_country.clone(),
+            city: self.q_city.clone(),
+            subdivision: self.q_subdivision.clone(),
+            latitude: self.q_latitude,
+            longitude: self.q_longitude,
+            time_zone: self.q_time_zone.clone(),
+            asn: self.q_asn,
+            org: self.q_org.clone(),
+        })
+    }
+}
+
 fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
     let s = |i: &str| r.get::<_, String>(i).unwrap_or_default();
     let n = |i: &str| r.get::<_, i64>(i).unwrap_or(0);
@@ -5118,6 +5148,27 @@ mod tests {
         // 这件事在报告里失真 ✓）。
         let had = db.traffic_sums("2020-01-01", "2020-01-02");
         assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    /// 过期判断：**结论属于当前地址才作数** ✓✓ —— 这一条是"换出口后不显示旧地理"的保证 ✓。
+    #[test]
+    fn quality_only_counts_for_the_address_it_was_looked_up_from() {
+        // 还没查过（`q_ip` 为空 ✓）⇒ 未知 ✓
+        let mut n = Node::default();
+        assert_eq!(n.quality("203.0.113.9"), None, "没查过就是未知");
+        // 查过、且地址相符 ✓ ⇒ 结论作数 ✓
+        n.q_ip = Some("203.0.113.9".into());
+        n.q_country = Some("HK".into());
+        n.q_asn = Some(906);
+        n.q_org = Some("DMIT".into());
+        let q = n.quality("203.0.113.9").expect("地址相符就该作数");
+        assert_eq!(q.country.as_deref(), Some("HK"));
+        assert_eq!(q.asn, Some(906));
+        // **换了地址** ✗ ⇒ 旧结论一律当未知 ✓（这正是它存在的理由 ✓）
+        assert_eq!(n.quality("198.51.100.4"), None, "换过地址 ⇒ 旧结论不作数");
+        // 空串与"没有"是同一件事 ✓（列默认值是 '' ✓，别把它当成一个真实地址 ✓）
+        n.q_ip = Some(String::new());
+        assert_eq!(n.quality(""), None, "空地址不算查过");
     }
 
     /// 落库：有值就写值 ✓、**没有就写 NULL 而不是空串** ✓✓ —— 后者会被读成"这个国家是空的" ✓。
