@@ -1799,9 +1799,12 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
 /// - **纵轴写真实毫秒区间**（`136–146 ms`），不写 `P10–P25` 这种统计名 —— 运维读的是毫秒 ✓；
 /// - **颜色只按本图内的峰值归一** ✓：同一张图里深浅可比，**跨图不可比**（窗口与桶宽都不同 ✗）；
 /// - 丢包**不在这里** ✗ —— 它没有延迟、落不进任何区间 ✓，由下面那条色条负责 ✓。
-function HeatMatrix({ edges, buckets }: {
+function HeatMatrix({ edges, buckets, slowest }: {
   edges: number[]
   buckets: { ts: number; counts: number[]; lost: number }[]
+  /// 这一格里**最慢的那台**（由面板已有的逐节点点算出来 ✓ —— 不必再向 hub 要一次 ✓）。
+  /// 聚合最大的风险就是"一台坏机器被另外三台摊平" ✗，所以悬停必须能说出是谁 ✓。
+  slowest?: Map<number, { name: string; ms: number }>
 }) {
   if (edges.length < 2 || buckets.length === 0) return null
   const bands = edges.length - 1
@@ -1823,7 +1826,9 @@ function HeatMatrix({ edges, buckets }: {
                 <span
                   key={b.ts}
                   className={`h-2.5 flex-1 rounded-[1px] ${tone(b.counts[i])}`}
-                  title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次`}
+                  title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次${
+                    slowest?.get(b.ts) ? ` · 最慢 ${slowest.get(b.ts)!.name} ${slowest.get(b.ts)!.ms} ms` : ""
+                  }`}
                 />
               ))}
             </div>
@@ -2653,6 +2658,17 @@ function Ping({ nodes }: { nodes: Node[] }) {
 
       			{(() => {
       		const all = perNode[openTask.id] ?? []
+		// 每一格里**最慢的那台** ✓ —— 用面板已有的逐节点点算 ✓（不再向 hub 要一次 ✓）。
+		// 这一步是悬停能不能回答"是全网慢，还是一台慢"的关键 ✓：聚合会把一台的尖峰摊平 ✗。
+		const slowest = new Map<number, { name: string; ms: number }>()
+		for (const p of all) {
+			const name = nodes.find((n) => n.id === p.node)?.name ?? `节点 ${p.node}`
+			for (const q of p.points) {
+				if (q.latency === null) continue
+				const cur = slowest.get(q.ts)
+				if (!cur || q.latency > cur.ms) slowest.set(q.ts, { name, ms: q.latency })
+			}
+		}
       		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
       		// 分位数切点只算一次：直方图与明细筛选共用同一套桶，点柱子才会得到相符的行。
       		const avgSorted = all.map((p) => p.avg ?? 0).sort((x, y) => x - y)
@@ -2704,7 +2720,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				{/* 矩阵在上、色条在下，**逐列对齐** ✓（两边都是 flex-1 的格子 ✓）——
 				    于是"拥堵堆在哪几条带"与"哪几格丢包"能一眼对上 ✓。 */}
 				{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
-					<HeatMatrix edges={heat.edges} buckets={heat.buckets} />
+					<HeatMatrix edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
 				)}
 				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 			</div>
