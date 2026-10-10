@@ -703,6 +703,28 @@ pub struct Node {
     /// it appears on the status page beside the node's name.
     #[serde(default)]
     pub country: String,
+    /// 节点质量（IP 结论 ✓）：由 hub 用本地库查出 ✓，**不是 agent 上报的** ✗。
+    /// 全部可空 ✓ —— "未知"与"香港"是两件事 ✓；
+    /// 而 `q_ip` 记的是"这批结论查的是哪个地址" ✓（与当前地址不符 ⇒ 读作未知 ✓，见 `Node` 的构造处 ✓）。
+    #[serde(default)]
+    pub q_country: Option<String>,
+    #[serde(default)]
+    pub q_city: Option<String>,
+    #[serde(default)]
+    pub q_subdivision: Option<String>,
+    #[serde(default)]
+    pub q_latitude: Option<f64>,
+    #[serde(default)]
+    pub q_longitude: Option<f64>,
+    #[serde(default)]
+    pub q_time_zone: Option<String>,
+    #[serde(default)]
+    pub q_asn: Option<u32>,
+    #[serde(default)]
+    pub q_org: Option<String>,
+    /// 这批结论**查的是哪个地址** ✓ —— 与当前查询地址不符时，上面八项应当读作未知 ✓。
+    #[serde(default)]
+    pub q_ip: Option<String>,
     /// Set in the panel: two uppercase letters, or empty for the looked-up
     /// `country`. What the status page shows is this when present.
     #[serde(default)]
@@ -3520,6 +3542,17 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         ipv4: s("ipv4"),
         ipv6: s("ipv6"),
         country: s("country"),
+        // 节点质量（IP 结论 ✓）。`Option` 读法与上面的 `expires_at` 同一形状 ✓；
+        // 这些列**没进 SELECT 时**会读成 `None` ✓ —— 那正好是"未知" ✓（不会静默给出错的值 ✓）。
+        q_country: r.get::<_, Option<String>>("q_country").unwrap_or(None),
+        q_city: r.get::<_, Option<String>>("q_city").unwrap_or(None),
+        q_subdivision: r.get::<_, Option<String>>("q_subdivision").unwrap_or(None),
+        q_latitude: r.get::<_, Option<f64>>("q_latitude").unwrap_or(None),
+        q_longitude: r.get::<_, Option<f64>>("q_longitude").unwrap_or(None),
+        q_time_zone: r.get::<_, Option<String>>("q_time_zone").unwrap_or(None),
+        q_asn: r.get::<_, Option<i64>>("q_asn").unwrap_or(None).map(|x| x as u32),
+        q_org: r.get::<_, Option<String>>("q_org").unwrap_or(None),
+        q_ip: r.get::<_, Option<String>>("q_ip").unwrap_or(None),
         country_pin: s("country_pin"),
         ipv4_pin: s("ipv4_pin"),
         ipv6_pin: s("ipv6_pin"),
