@@ -160,6 +160,20 @@ CREATE TABLE IF NOT EXISTS traffic (
     PRIMARY KEY (node_id, date)
   );
 
+  -- 在线风险库的**每日缓存** ✓✓：每个 (ip, 来源) 每天只查一次 ✓。
+  -- **不做这张表的话**：100 台节点 × 每小时一次 × 几家 = 一天上万次 ✓，
+  -- 免费额度当天见底 ✓ —— 而**症状只是所有字段变空、没有任何报错** ✗✗
+  -- （与"一次网络抖动不能把好库写坏"同一类：代价在别处、动静在这里 ✓）。
+  -- `payload` 存的是**原样响应** ✓：解析留给读的时候 ✓ —— 于是解析规则改了我们不必重查 ✓，
+  -- 也就能拿真实响应去核对字段名 ✓（`risk::parse_*` 是纯函数 ✓，正为此 ✓）。
+  CREATE TABLE IF NOT EXISTS risk_day (
+    ip       TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    day      TEXT NOT NULL,
+    payload  TEXT NOT NULL,
+    PRIMARY KEY (ip, provider, day)
+  );
+
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
@@ -274,7 +288,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -607,6 +621,19 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
             // `add_column` 是 3 个参数 ✓ —— 列名与类型在**同一个字符串**里 ✓（见它自己的用法 ✓）。
             add_column(&tx, "node", &format!("{col} {ty}"))?;
         }
+    }
+
+    // 18：在线风险库的每日缓存 ✓（见 SCHEMA 里那张表的说明 ✓）。
+    if from < 18 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS risk_day (
+               ip       TEXT NOT NULL,
+               provider TEXT NOT NULL,
+               day      TEXT NOT NULL,
+               payload  TEXT NOT NULL,
+               PRIMARY KEY (ip, provider, day)
+             );",
+        )?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -5268,6 +5295,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(notnull, 0, "八个质量列都必须可空");
+    }
+
+    /// **升级路径的闸**：一个"17 版"的库（没有 risk_day）迁移后必须有它、且戳到 18 ✓。
+    /// 主键那三列也断言 ✓ —— 少了主键，同一 (ip, 来源, 天) 会写出多行 ✓，
+    /// 于是"每天只查一次"就失效了 ✓，而那是这一块**唯一挡住额度爆掉**的东西 ✗✗。
+    #[test]
+    fn migrating_from_17_adds_the_risk_day_cache() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("DROP TABLE risk_day", []).unwrap();
+        conn.execute("PRAGMA user_version = 17", []).unwrap();
+        let has = |c: &rusqlite::Connection| -> bool {
+            c.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='risk_day'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        };
+        assert!(!has(&conn), "前提：表已删掉");
+        migrate(&conn, 17).unwrap();
+        assert!(has(&conn), "迁移后必须有 risk_day");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(risk_day)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["ip", "provider", "day", "payload"], "列与顺序都要对");
     }
 
     #[test]
