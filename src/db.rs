@@ -124,7 +124,13 @@ CREATE TABLE IF NOT EXISTS node (
   q_time_zone   TEXT,
   q_asn         INTEGER,
   q_org         TEXT,
-  q_ip          TEXT
+  q_ip          TEXT,
+  -- 在线风险库的结论（第三方 ✓，**默认关** ⇒ 未开时为空 ✓）。
+  -- 与 `q_*` 分工不同 ✗：`risk_day` 存**原样响应**（留给"重新解析" ✓），
+  -- 这两列存"**这台机器当前的结论**"（面板要的就是它 ✓）。
+  -- `risk_ip` 与 `q_ip` **同一条规矩** ✓✓：换过出口后旧结论不作数 ✓（否则会显示过期结论 ✓）。
+  risk          TEXT,
+  risk_ip       TEXT
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -288,7 +294,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -634,6 +640,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
                PRIMARY KEY (ip, provider, day)
              );",
         )?;
+    }
+
+    // 19：在线风险库的结论 ✓（两列，见 SCHEMA 里的说明 ✓）。
+    if from < 19 {
+        add_column(&tx, "node", "risk TEXT")?;
+        add_column(&tx, "node", "risk_ip TEXT")?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -5347,6 +5359,43 @@ mod tests {
     /// **升级路径的闸**：一个"17 版"的库（没有 risk_day）迁移后必须有它、且戳到 18 ✓。
     /// 主键那三列也断言 ✓ —— 少了主键，同一 (ip, 来源, 天) 会写出多行 ✓，
     /// 于是"每天只查一次"就失效了 ✓，而那是这一块**唯一挡住额度爆掉**的东西 ✗✗。
+    /// **升级路径的闸**：一个"18 版"的库迁移后必须有两列、且戳到 19 ✓。
+    /// 顺便断言"两列都可空" ✓ —— 没查到时写 NULL ✓，若被写成 NOT NULL，
+    /// 错误会在"新增一台节点"时才炸 ✓（与 q_ 那八列同一条理由 ✓）。
+    #[test]
+    fn migrating_from_18_adds_the_node_risk_columns() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        for col in ["risk", "risk_ip"] {
+            conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), []).unwrap();
+        }
+        conn.execute("PRAGMA user_version = 18", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"risk".to_string()), "前提：列已删掉");
+        migrate(&conn, 18).unwrap();
+        let after = cols(&conn);
+        assert!(after.contains(&"risk".to_string()) && after.contains(&"risk_ip".to_string()));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('node') WHERE name IN ('risk','risk_ip') AND \"notnull\"=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notnull, 0, "两列都必须可空");
+    }
+
     #[test]
     fn migrating_from_17_adds_the_risk_day_cache() {
         let db = Db::open(":memory:").unwrap();
