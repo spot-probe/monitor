@@ -299,7 +299,20 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
                             .transpose()
                     }) {
                         Ok(Some((src, true))) => qualify(app.clone(), node_id, src),
-                        Ok(_) => {} // 地址挑不出来 ✓（内网 / 还没上报 ✓）或已经查过 ✓ ⇒ 什么都不做 ✓
+                        // ⚠️ **"挑不出地址"必须说出来** ✗ —— 2026-10-11 现场第二轮：
+                        // 三台节点**明明在线** ✓ 却一直没有质量 ✓，而这两种可能
+                        // （"没地址可查" vs "查过且已作数"）在日志里**长得一样** ✓✗ ——
+                        // 与"没配 URL 打成 debug"是同一个毛病 ✓：**沉默让两种状态无法分辨** ✓。
+                        Ok(Some((src, false))) => {
+                            debug!("node {node_id}: quality for {src} is already recorded")
+                        }
+                        Ok(None) => {
+                            let cols = tokio::task::block_in_place(|| app.db.node_addresses(node_id));
+                            info!(
+                                "node {node_id}: no public address to look up (ip/ipv4/ipv6 = {:?})",
+                                cols.unwrap_or_default()
+                            );
+                        }
                         Err(e) => debug!("node {node_id}: quality check failed: {e:#}"),
                     }
                 socket.send(Message::Ping(Vec::new().into())).await?;

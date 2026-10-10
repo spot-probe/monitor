@@ -1993,6 +1993,21 @@ impl Db {
         )?)
     }
 
+    /// 这台节点上报的三个地址 ✓（`ip` / `ipv4` / `ipv6` ✓）—— **只给诊断用** ✓：
+    /// "挑不出可查地址"时必须把这几个值**原样打出来** ✓，否则运维只看到"没有质量" ✓，
+    /// 而分不清是"地址不合格" ✓ 还是"压根没上报" ✓（2026-10-11 现场就是卡在这里 ✓）。
+    pub fn node_addresses(&self, id: i64) -> Option<(String, String, String)> {
+        let conn = self.conn();
+        conn.query_row("SELECT ip, ipv4, ipv6 FROM node WHERE id=?1", [id], |r| {
+            Ok((
+                r.get::<_, String>(0).unwrap_or_default(),
+                r.get::<_, String>(1).unwrap_or_default(),
+                r.get::<_, String>(2).unwrap_or_default(),
+            ))
+        })
+        .ok()
+    }
+
     /// 这台节点**现在该拿哪个地址去查** ✓（就是面板与主题读结论时用的那个 ✓✓）。
     ///
     /// 刻意**不在这里再挑一遍** ✗：交给 `agent_ws::country_source` —— 挑地址的规矩只有一份 ✓。
