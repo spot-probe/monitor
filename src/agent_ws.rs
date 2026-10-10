@@ -433,7 +433,7 @@ fn public(ip: IpAddr) -> bool {
 ///
 /// The interface addresses are the agent's word, so each must parse as an
 /// address of its own family before it can reach the lookup URL.
-fn country_source(ip: &str, ipv4: &str, ipv6: &str) -> Option<IpAddr> {
+pub(crate) fn country_source(ip: &str, ipv4: &str, ipv6: &str) -> Option<IpAddr> {
     let v4 = ipv4.parse::<Ipv4Addr>().ok().map(IpAddr::V4);
     let v6 = ipv6.parse::<Ipv6Addr>().ok().map(IpAddr::V6);
     [v4, v6, ip.parse().ok()].into_iter().flatten().find(|a| public(*a))

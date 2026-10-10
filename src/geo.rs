@@ -19,7 +19,7 @@ use std::path::Path;
 /// **不编造默认值** ✗（"未知"与"美国"是两件事 ✓，而 `""` 会被读成后者 ✓）。
 // 见 `lookup` 上方那段说明 ✓（同一次欠账 ✓）。
 #[allow(dead_code)]
-#[derive(Default, Clone, PartialEq, Debug)]
+#[derive(Default, Clone, PartialEq, Debug, serde::Serialize)]
 pub struct Quality {
     pub country: Option<String>,
     pub city: Option<String>,

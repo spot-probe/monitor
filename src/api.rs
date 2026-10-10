@@ -302,6 +302,13 @@ fn node_view(
         // underneath -- so a wrong lookup can be corrected without waiting for the
         // lookup service to answer differently.
         "country": if node.country_pin.is_empty() { &node.country } else { &node.country_pin },
+        // 节点质量（IP 结论 ✓）。**只在"这批结论属于当前地址"时才给** ✓✓（判断在
+        // `Node::quality` 里，只做一处 ✓）—— 换过出口的机器这里是 `null` ✓，
+        // 而不是把旧地理当成当前事实 ✓。公开页与面板读的是**同一份 payload** ✓ ⇒ 主题自动拿到 ✓。
+        "quality": match crate::agent_ws::country_source(&node.ip, &node.ipv4, &node.ipv6) {
+            Some(addr) => node.quality(&addr.to_string()),
+            None => None,
+        },
         "sort": node.sort,
         // The bucket, not a private note: it is what the page's tabs are built from.
         "group": node.group,
