@@ -3813,6 +3813,12 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   	return <PageSkeleton shape="cards" rows={3} />
   }
   const text = (k: string) => String(s[k] ?? "")
+  // 勾了哪些周期（逗号分隔 ✓，与 hub 侧同一格式 ✓）。空数组 = 一个都不发 ✓。
+  const pickedPeriods = () =>
+    text("report_periods")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
   // A credential is sent only when something was typed: the field starts empty
   // because the hub never returns the stored value.
   const typed = (...keys: string[]) =>
@@ -3845,6 +3851,56 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         }
       >
 
+      {/* 流量报告 ✓ —— **用本页已有的 `s` / `set`** ✓（不另起一套 state/请求 ✗：
+          那会让同一份设置有两个主人 ✓，而 `set` 本来就是"改一下就保存" ✓）。
+          说明里的时刻读 `s` ✓ —— 改了时间，那四行跟着变 ✓。 */}
+      <section className="space-y-3 rounded-lg border p-3">
+        <div>
+          <h3 className="text-sm font-medium">流量报告</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">按周期把流量汇总发到下面的渠道 ✓（报告就是一条通知 ✓）</p>
+        </div>
+        <div className="space-y-2">
+          {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"], ["quarter", "季报", "每季首日"]] as const).map(
+            ([k, label, when]) => (
+              <div key={k} className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="block text-sm font-medium">{label}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {when} {text("report_time") || "09:00"} 发上一个完整周期
+                  </span>
+                </div>
+                <Switch
+                  checked={pickedPeriods().includes(k)}
+                  onCheckedChange={() => {
+                    const cur = pickedPeriods()
+                    const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+                    void set("report_periods", next.join(","))
+                  }}
+                />
+              </div>
+            ),
+          )}
+        </div>
+        {pickedPeriods().length === 0 && <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>}
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            发送时间
+            <Input type="time" className="w-28" value={text("report_time")} onChange={(e) => void set("report_time", e.target.value)} />
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            时区
+            <Input list="report-tz" className="w-28" value={text("report_tz")} onChange={(e) => void set("report_tz", e.target.value)} />
+            <datalist id="report-tz">
+              {["+08:00", "+00:00", "+09:00", "-05:00", "-08:00"].map((t) => (
+                <option key={t} value={t} />
+              ))}
+            </datalist>
+          </label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          四个周期共用这个时间 ✓ · 报告里的日期按时区切 ✓ · 而「本月已用 / 是否超限」用的是 hub 的月度窗口（可能与此处不同 ✓）
+        </p>
+      </section>
       <ChannelCard title="Telegram" icon={<Send className="size-4" />} configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Bot Token" hint={secretHint("notify_telegram_token")}>
