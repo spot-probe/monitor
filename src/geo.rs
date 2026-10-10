@@ -17,12 +17,10 @@ use std::path::Path;
 ///
 /// 全部 `Option` ✓：库没配、IP 查不到、字段缺失，都是 `None` ✓ ——
 /// **不编造默认值** ✗（"未知"与"美国"是两件事 ✓，而 `""` 会被读成后者 ✓）。
-// 构造它的是**下一步**：真正调用 mmdb 的读取层（`lookup` ✓）。现在只有测试在构造 ✗ ⇒ 暂标 allow，
-// 紧跟着这条说明，接上读取层后删掉 ✓（今天已经这么加过、也这么删过两次 ✓）。
+// 见 `lookup` 上方那段说明 ✓（同一次欠账 ✓）。
 #[allow(dead_code)]
 #[derive(Default, Clone, PartialEq, Debug)]
 pub struct Quality {
-    #[allow(dead_code)]
     pub country: Option<String>,
     pub city: Option<String>,
     pub subdivision: Option<String>,
@@ -50,6 +48,93 @@ pub fn merge(city: Option<Quality>, asn: Option<Quality>) -> Quality {
         }
     }
     out
+}
+
+/// 从 mmdb 查出来的**一个 JSON 记录**里取出我们要的字段 ✓ —— **纯函数** ✓，所以能手写 JSON 测死 ✓✓。
+///
+/// 为什么让它吃 JSON 而不是 `geoip2::City` ✗：那样就**必须有一个真库**才能测 ✓，
+/// 而 mmdb 的样例造不出来 ✗（格式带二叉树 ✓）⇒ 测试只能跳过 ✓。
+/// 吃 JSON 之后，"取哪些字段、缺了怎么办"全都能用**手写的小 JSON** 钉住 ✓✓，
+/// 而真正调 mmdb 的那两行保持**薄到不用测** ✓。
+///
+/// 字段名按 MaxMind 的 GeoLite2 记录 ✓（City 与 ASN 两库同构：有哪个取哪个 ✓）。
+pub fn quality_from_json(v: &serde_json::Value) -> Quality {
+    let s_at = |path: &[&str]| -> Option<String> {
+        let mut cur = v;
+        for k in path {
+            cur = cur.get(k)?;
+        }
+        cur.as_str().map(str::to_string)
+    };
+    let f_at = |path: &[&str]| -> Option<f64> {
+        let mut cur = v;
+        for k in path {
+            cur = cur.get(k)?;
+        }
+        cur.as_f64()
+    };
+    Quality {
+        country: s_at(&["country", "iso_code"]),
+        // 城市名优先英文 ✓（面板与报告都是中文界面 ✓，但英文名比"某些库只给本地名"更通用 ✓）。
+        city: s_at(&["city", "names", "en"]).or_else(|| s_at(&["city", "names", "zh"])),
+        subdivision: v
+            .get("subdivisions")
+            .and_then(|a| a.get(0))
+            .and_then(|d| d.get("iso_code"))
+            .and_then(|c| c.as_str())
+            .map(str::to_string),
+        latitude: f_at(&["location", "latitude"]),
+        longitude: f_at(&["location", "longitude"]),
+        time_zone: s_at(&["location", "time_zone"]),
+        // ASN 库的两样 ✓（同一个函数吃两种记录 ✓ —— 它们字段名不同、互不冲突 ✓）。
+        asn: v.get("autonomous_system_number").and_then(|x| x.as_u64()).map(|x| x as u32),
+        org: s_at(&["autonomous_system_organization"]),
+    }
+}
+
+/// 查一个 IP ✓：City 与 ASN 两份库各查一次，再用 [`merge`] 合起来 ✓。
+///
+/// **三种情况刻意分开** ✓（这是这一层的全部判断 ✓）：
+/// - 库文件不在 ⇒ **没配** ⇒ 返回空结论 ✓、**不报错** ✗（与下载那一层同一条原则 ✓）；
+/// - 文件在、但打不开或读不动 ⇒ **要日志** ✓（库不兼容 / 被截断 ✓ —— 那是要人处理的 ✓）；
+/// - 这个 IP 不在库里 ⇒ 空字段 ✓（正常 ✓ —— MaxMind 也确实有未收录的段 ✓）。
+// 调用它的是**下一步**：把结论落到节点上并暴露给面板与主题（块 3 ✓）。
+// 在那之前它只有测试在用 ✗ ⇒ 暂标 allow，紧跟着这条说明，接上即删 ✓
+//（`Quality` / `merge` 的 allow 在下一轮就能删 ✓ —— 它们已经被 `lookup` 用起来了 ✓）。
+#[allow(dead_code)]
+pub fn lookup(dir: &Path, ip: std::net::IpAddr) -> Quality {
+    let read = |name: &str| -> Option<Quality> {
+        let path = dir.join(name);
+        if !path.exists() {
+            return None; // 没配 ⇒ 不算错 ✓
+        }
+        let reader = match maxminddb::Reader::open_readfile(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("geo: {name}: cannot open the database: {e:#}");
+                return None;
+            }
+        };
+        // v0.32 的 API（**读源码确认过** ✓，不是猜的 ✗）：`lookup(ip)` 不吃泛型 ✓，
+        // 返回 `LookupResult` ✓，再 `decode::<T>()` 得到 `Result<Option<T>>` ——
+        // **`Ok(None)` 正好表示"这个 IP 不在库里"** ✓（MaxMind 确实有未收录的段 ✓），
+        // 那与"库坏了/读不动"是两件事 ✓：前者是空结论 ✓，后者要日志 ✓。
+        match reader.lookup(ip) {
+            Ok(found) => match found.decode::<serde_json::Value>() {
+                Ok(Some(v)) => Some(quality_from_json(&v)),
+                Ok(None) => Some(Quality::default()),
+                Err(e) => {
+                    tracing::warn!("geo: {name}: decode failed: {e:#}");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("geo: {name}: lookup failed: {e:#}");
+                None
+            }
+        }
+    };
+    merge(read(SOURCES[0].name), read(SOURCES[1].name))
 }
 
 /// 库清单里的一个库 ✓。
@@ -255,6 +340,44 @@ mod tests {
         v.extend_from_slice(MMDB_MARKER);
         v.extend_from_slice(b"\x00\x00");
         v
+    }
+
+    /// **用手写 JSON 测字段映射** ✓✓ —— 这一层能测死，正是因为 `lookup` 把 mmdb 的返回值
+    /// 当 JSON 吃 ✓（否则就必须有一个真库 ✗，而 mmdb 样例造不出来 ✓）。
+    #[test]
+    fn quality_reads_the_fields_maxmind_actually_ships() {
+        // 一份 City 记录 ✓（字段名取自 GeoLite2 的真实结构 ✓）。
+        let city = serde_json::json!({
+            "country": { "iso_code": "HK" },
+            "city": { "names": { "en": "Hong Kong", "zh": "香港" } },
+            "subdivisions": [{ "iso_code": "HK" }],
+            "location": { "latitude": 22.3193, "longitude": 114.1694, "time_zone": "Asia/Hong_Kong" }
+        });
+        let q = quality_from_json(&city);
+        assert_eq!(q.country.as_deref(), Some("HK"));
+        assert_eq!(q.city.as_deref(), Some("Hong Kong"), "英文名优先 ✓");
+        assert_eq!(q.subdivision.as_deref(), Some("HK"));
+        assert_eq!(q.latitude, Some(22.3193));
+        assert_eq!(q.time_zone.as_deref(), Some("Asia/Hong_Kong"));
+        assert_eq!(q.asn, None, "City 记录里没有 ASN ✓");
+
+        // 一份 ASN 记录 ✓（同一个函数吃它 ✓）。
+        let asn = serde_json::json!({
+            "autonomous_system_number": 906,
+            "autonomous_system_organization": "DMIT Cloud Services"
+        });
+        let a = quality_from_json(&asn);
+        assert_eq!(a.asn, Some(906));
+        assert_eq!(a.org.as_deref(), Some("DMIT Cloud Services"));
+        assert_eq!(a.country, None);
+
+        // 缺字段时**不能编** ✓ —— 只有中文名时退回中文 ✓，什么都没有就是 None ✓。
+        let zh_only = serde_json::json!({ "city": { "names": { "zh": "香港" } } });
+        assert_eq!(quality_from_json(&zh_only).city.as_deref(), Some("香港"));
+        assert_eq!(quality_from_json(&serde_json::json!({})), Quality::default());
+        // 类型不对也要安全 ✓（库里理论上不会，但坏库/半截库会 ✓）。
+        let weird = serde_json::json!({ "country": { "iso_code": 42 }, "autonomous_system_number": "906" });
+        assert_eq!(quality_from_json(&weird), Quality::default(), "类型不对 ⇒ 当没有 ✓，不 panic ✗");
     }
 
     /// 两份结果合成：**只补空字段** ✓ —— ASN 库不该覆盖 City 库里已有的事实 ✓；
