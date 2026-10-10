@@ -1828,6 +1828,36 @@ impl Db {
             .collect())
     }
 
+    /// 从按天快照表求和：某个日期区间内**每台节点**的上下行合计，按总量从多到少 ✓。
+    ///
+    /// 区间**含首不含尾**（`from <= date < to` ✓）—— 与 [`Period::last_full`] 返回的四个日期
+    /// 同一约定 ✓。周报 / 月报 / 季报因此是**同一句 SQL** ✓，只是区间不同 ✓。
+    ///
+    /// 返回 `(node_id, name, rx, tx)` ✓ —— 名字一起带出来 ✓，因为报告的"逐节点明细"就是它 ✓
+    /// （调用方不必再查一次 ✓，也就不会出现两处各写一次、早晚分叉 ✗）。
+    pub fn traffic_sums(&self, from: &str, to: &str) -> Vec<(i64, String, i64, i64)> {
+        let conn = self.conn();
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT d.node_id, n.name, SUM(d.rx), SUM(d.tx)
+             FROM traffic_day d JOIN node n ON n.id = d.node_id
+             WHERE d.date >= ?1 AND d.date < ?2
+             GROUP BY d.node_id
+             ORDER BY SUM(d.rx) + SUM(d.tx) DESC, d.node_id",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![from, to], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            ))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
         let conn = self.conn();
         let Ok(mut stmt) = conn.prepare_cached(
@@ -4863,6 +4893,42 @@ mod tests {
             Period::Quarter.last_full(d(2026, 5, 20)),
             ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
         );
+    }
+
+    /// 快照求和：区间**含首不含尾** ✓ · 按总量排序 ✓ · 区间内没有快照的节点不出现 ✓。
+    /// 边界那一格（`to` 那天）算不算，正是报表"多一天/少一天"的来源 ✓ —— 必须钉住 ✓。
+    #[test]
+    fn traffic_sums_cover_the_half_open_range_only() {
+        let db = db();
+        let (a, b) = (node(&db, 1), node(&db, 2));
+        let name_of = |id: i64| -> String {
+            db.conn().query_row("SELECT name FROM node WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        let put = |id: i64, date: &str, rx: i64, tx: i64| {
+            db.conn()
+                .execute(
+                    "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx) VALUES (?1,?2,?3,?4)",
+                    rusqlite::params![id, date, rx, tx],
+                )
+                .unwrap();
+        };
+        put(a, "2026-03-01", 1_000, 100);
+        put(a, "2026-03-02", 2_000, 200);
+        put(a, "2026-03-03", 4_000, 400); // `to` 那天：**不算** ✓
+        put(b, "2026-03-02", 500, 50);
+        put(b, "2026-02-28", 9_999, 999); // 区间之前：不算 ✓
+
+        let rows = db.traffic_sums("2026-03-01", "2026-03-03");
+        assert_eq!(rows.len(), 2, "区间内的两台都在");
+        // 3 月 1–2 日：a = 3000 / 300 ✓（3 月 3 日被排除 ✓）；b = 500 / 50 ✓
+        assert_eq!((rows[0].0, rows[0].2, rows[0].3), (a, 3_000, 300), "含首不含尾：`to` 那天不算");
+        assert_eq!(rows[0].1, name_of(a), "名字一起带出来");
+        // 按总量（rx+tx）从多到少：a(3300) 在 b(550) 前面 ✓
+        assert_eq!((rows[1].0, rows[1].2, rows[1].3), (b, 500, 50));
+        // 区间内没有任何快照的节点**不出现** ✓（而不是出现一行 0 —— 那会让"哪些机器在跑流量"
+        // 这件事在报告里失真 ✓）。
+        let had = db.traffic_sums("2020-01-01", "2020-01-02");
+        assert!(had.is_empty(), "空区间应当是空的");
     }
 
     #[test]
