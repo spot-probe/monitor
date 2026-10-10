@@ -4016,28 +4016,51 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         <Card className="gap-6 p-6">
           {/* 第一组：**要不要发**（四个周期各一行 ✓，说明里带上当前的发送时间 ✓ —— 改了时间这四行跟着变 ✓）。 */}
           <section className="space-y-3">
-            <h4 className="flex items-center gap-2 text-sm font-medium">
-              <Bell className="size-4 text-muted-foreground" /> 报告周期
-            </h4>
-            {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"], ["quarter", "季报", "每季首日"]] as const).map(
-              ([k, label, when]) => (
-                <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发上一个完整周期`}>
-                  <Switch
-                    checked={pickedPeriods().includes(k)}
-                    onCheckedChange={() => {
-                      const cur = pickedPeriods()
-                      const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
-                      set("report_periods", next.join(","))
-                    }}
-                  />
-                </Field>
-              ),
-            )}
-            {/* 一个都没勾时**明说不会发** ✓ —— 否则会出现"我设了时间却没收到"的排查 ✓（这类功能最常见的误会 ✓）。 */}
-            {pickedPeriods().length === 0 && (
-              <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>
-            )}
-          </section>
+      <h4 className="flex items-center gap-2 text-sm font-medium">
+        <Bell className="size-4 text-muted-foreground" /> 常规报告
+      </h4>
+      {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"]] as const).map(
+        ([k, label, when]) => (
+          <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发上一个完整周期`}>
+            <Switch
+              checked={pickedPeriods().includes(k)}
+              onCheckedChange={() => {
+                const cur = pickedPeriods()
+                const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+                set("report_periods", next.join(","))
+              }}
+            />
+          </Field>
+        ),
+      )}
+    </section>
+
+    {/* 汇总类单独成组 ✓（六个开关一行排开太长 ✓ —— 与「事件设置」把"数值"与"开关"分两块同一理由 ✓）。 */}
+    <section className="space-y-3 border-t pt-5">
+      <h4 className="flex items-center gap-2 text-sm font-medium">
+        <CalendarClock className="size-4 text-muted-foreground" /> 汇总报告
+      </h4>
+      {([
+        ["quarter", "季报", "每季首日", "上一个完整季度（1–3 / 4–6 / 7–9 / 10–12 月）"],
+        ["half", "半年报", "每半年首日", "上一个完整半年（1–6 / 7–12 月）"],
+        ["year", "年报", "每年 1 月 1 日", "上一个完整自然年"],
+      ] as const).map(([k, label, when, what]) => (
+        <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发${what}`}>
+          <Switch
+            checked={pickedPeriods().includes(k)}
+            onCheckedChange={() => {
+              const cur = pickedPeriods()
+              const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+              set("report_periods", next.join(","))
+            }}
+          />
+        </Field>
+      ))}
+      {/* 一个都没勾时**明说不会发** ✓ —— 这类功能最常见的误会就是"我设了时间却没收到" ✓。 */}
+      {pickedPeriods().length === 0 && (
+        <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>
+      )}
+    </section>
       
           {/* 第二组：**什么时候发**（与上一组用分隔线分开 ✓，与「事件设置」同一写法 ✓）。 */}
           <section className="space-y-3 border-t pt-5">
