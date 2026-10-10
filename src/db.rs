@@ -1906,6 +1906,9 @@ impl Db {
 
     /// 把一次 IP 查询的结论落到节点上 ✓（八个可空列 ✓）。
     ///
+    /// **结论绑定地址** ✓✓（与 `set_country` 同一条规矩 ✓）：`q_ip` 记下"这是查哪个地址得到的" ✓，
+    /// 读取那一侧据此判过期 ✓ —— 一台机器换了出口之后，旧地理不该继续被当成当前事实 ✓✗。
+    ///
     /// **查不到的字段写 NULL，不写空串** ✓✓ —— 这一条是刻意的 ✗：
     /// `''` 会被读成"这个国家是空的" ✓，而 `NULL` 才是"未知" ✓；
     /// 面板与主题据此决定要不要显示那一格 ✓ —— 两者混起来就没法区分了 ✓。
@@ -1913,11 +1916,11 @@ impl Db {
     // 调用它的是**下一步**：节点连上来时按"欠一次查询"那套触发（`agent_ws.rs` 的 `country_owed` ✓）。
     // 在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
     #[allow(dead_code)]
-    pub fn save_quality(&self, node_id: i64, q: &crate::geo::Quality) -> Result<()> {
+    pub fn save_quality(&self, node_id: i64, q: &crate::geo::Quality, source: &str) -> Result<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE node SET q_country=?2, q_city=?3, q_subdivision=?4, q_latitude=?5,
-                             q_longitude=?6, q_time_zone=?7, q_asn=?8, q_org=?9
+                             q_longitude=?6, q_time_zone=?7, q_asn=?8, q_org=?9, q_ip=?10
              WHERE id=?1",
             params![
                 node_id,
@@ -1928,7 +1931,8 @@ impl Db {
                 q.longitude,
                 q.time_zone,
                 q.asn,
-                q.org
+                q.org,
+                source
             ],
         )?;
         Ok(())
@@ -5099,6 +5103,7 @@ mod tests {
                 org: Some("DMIT".into()),
                 ..Default::default()
             },
+            "203.0.113.9",
         )
         .unwrap();
         let row = |c: &str| -> Option<String> {
@@ -5117,7 +5122,7 @@ mod tests {
         assert_eq!(row("q_time_zone"), None, "查不到 ⇒ NULL");
 
         // 再落一份"什么都没查到"的 ✓ ⇒ 八列**全部回到 NULL** ✓（覆盖旧值 ✓）
-        db.save_quality(id, &crate::geo::Quality::default()).unwrap();
+        db.save_quality(id, &crate::geo::Quality::default(), "198.51.100.4").unwrap();
         for c in [
             "q_country",
             "q_city",
