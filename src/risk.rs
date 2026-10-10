@@ -68,6 +68,70 @@ pub fn parse_abuseipdb(v: &serde_json::Value) -> Option<Risk> {
     })
 }
 
+/// 这家来源今天**要不要去查** ✓ —— **纯函数** ✓，所以"开关关着就不发请求"能不靠网络测死 ✓。
+///
+/// 两个条件缺一不可 ✗：开关**恰好**是 `"on"` ✓（缺失 / 空串 / 被改坏的值一律算关 ✓✓ ——
+/// 于是"默认关"不依赖某个默认值一定被写上 ✓）、且 key 非空 ✓（空 = 没配这家 ✓，
+/// 与 `geo_*_url` 的空值同一处理 ✓：跳过，而不是报错 ✓）。
+pub fn active(enabled: &str, key: &str) -> bool {
+    enabled == "on" && !key.trim().is_empty()
+}
+
+/// AbuseIPDB 的查询地址 ✓（`maxAgeInDays=90` = 官方默认口径 ✓）。
+pub fn abuseipdb_url(ip: &str) -> String {
+    format!("https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90")
+}
+
+/// 查一个 IP 的**在线**风险结论 ✓（AbuseIPDB ✓）。
+///
+/// **三处"不发请求"都是刻意的** ✗：
+/// - 开关关着 ✓✓ ⇒ 不把节点 IP 发给任何第三方 ✓（这是隐私的**默认状态** ✓）；
+/// - 没配 key ✓ ⇒ 跳过这家 ✓（正常状态 ✓，不是错误 ✓）；
+/// - **今天已经查过** ✓✓ ⇒ 直接用缓存 ✓ —— 这就是"免费额度不会当天见底"的执行者 ✓。
+///
+/// 顺序是「**先落库、再解析**」✓✓：解析失败（改了字段名 / 服务换了口径 ✓）
+/// 也不该把**那一次额度**丢掉 ✓（额度比一次解析贵得多 ✓）。
+pub async fn check(app: &crate::App, ip: &str, day: &str) -> Option<Risk> {
+    let enabled = app.db.get("risk_enabled").unwrap_or_default();
+    let key = app.db.get("risk_abuseipdb_key").unwrap_or_default();
+    if !active(&enabled, &key) {
+        return None;
+    }
+    // 今天的缓存命中 ⇒ **不再请求** ✓（额度就省在这里 ✓）
+    if let Some(body) = app.db.risk_cached(ip, "abuseipdb", day) {
+        return serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb);
+    }
+    let sent = app
+        .http
+        .get(abuseipdb_url(ip))
+        .header("Key", key.trim())
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    let body = match sent {
+        Ok(r) => match r.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                return {
+                    tracing::warn!("risk: abuseipdb body read failed: {e:#}");
+                    None
+                }
+            }
+        },
+        Err(e) => {
+            return {
+                tracing::warn!("risk: abuseipdb request failed: {e:#}");
+                None
+            }
+        }
+    };
+    // **先落库** ✓✓（哪怕这次解析不出来，额度也没白花 ✓；而且不必为此重查 ✓）
+    if let Err(e) = app.db.save_risk(ip, "abuseipdb", day, &body) {
+        tracing::warn!("risk: caching the abuseipdb answer failed: {e:#}");
+    }
+    serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +168,28 @@ mod tests {
         assert_eq!(parse_abuseipdb(&mk(74.9)).unwrap().label.as_deref(), Some("较高风险"));
         assert_eq!(parse_abuseipdb(&mk(75.0)).unwrap().label.as_deref(), Some("高风险"));
         assert_eq!(parse_abuseipdb(&mk(100.0)).unwrap().label.as_deref(), Some("高风险"));
+    }
+
+    /// **开关与 key 的判据** ✓✓ —— 这一条是"默认不把节点 IP 发给第三方"的保证 ✓，
+    /// 而且它**不依赖某个默认值一定被写上** ✗：缺失 / 空串 / 被改坏的值一律算关 ✓。
+    #[test]
+    fn nothing_leaves_the_hub_unless_it_is_switched_on_and_keyed() {
+        assert!(!active("off", "k"), "关着就不发");
+        assert!(!active("", "k"), "缺失也算关（**不依赖默认值被写上** ✓）");
+        assert!(!active("yes", "k"), "只有恰好 on 才算开（写坏的值得按关处理 ✓✓）");
+        assert!(!active("ON", "k"), "大小写不同也算关（宁可漏查，不可误发 ✓）");
+        assert!(!active("on", ""), "没配 key ⇒ 跳过这家，不是报错 ✓");
+        assert!(!active("on", "   "), "空白 key 等于没配 ✓");
+        assert!(active("on", "k"), "开了且有 key ⇒ 才去查 ✓");
+    }
+
+    /// 查询地址：带 IP 与官方默认窗口 ✓（`maxAgeInDays=90` ✓）。
+    #[test]
+    fn the_request_url_carries_the_ip_and_the_window() {
+        let u = abuseipdb_url("203.0.113.9");
+        assert!(u.starts_with("https://api.abuseipdb.com/api/v2/check?"), "{u}");
+        assert!(u.contains("ipAddress=203.0.113.9"), "{u}");
+        assert!(u.contains("maxAgeInDays=90"), "{u}");
     }
 
     /// 缺字段 / 出错页 / 限流回执 ⇒ `None` ✓ —— **不编 0** ✗：
