@@ -1941,6 +1941,31 @@ impl Db {
             .collect())
     }
 
+    /// 读某天某来源的缓存 ✓（`None` = **今天还没查过** ⇒ 调用方该去请求 ✓）。
+    ///
+    /// 这一句就是"**每个 IP 每天只查一次**"的执行者 ✓✓ —— 额度爆掉与否全看它 ✓。
+    pub fn risk_cached(&self, ip: &str, provider: &str, day: &str) -> Option<String> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT payload FROM risk_day WHERE ip=?1 AND provider=?2 AND day=?3",
+            params![ip, provider, day],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    /// 把一次在线查询的**原样响应**落库 ✓✓ —— 顺序是「**先落库、再解析**」✗：
+    /// 解析失败（改了字段名 ✓、服务换了口径 ✓）也不该把**那一次额度**丢掉 ✓；
+    /// 而原样存下来之后，改动解析规则**不必重查** ✓，也能拿真响应核对字段名 ✓。
+    pub fn save_risk(&self, ip: &str, provider: &str, day: &str, payload: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO risk_day (ip, provider, day, payload) VALUES (?1, ?2, ?3, ?4)",
+            params![ip, provider, day, payload],
+        )?;
+        Ok(())
+    }
+
     /// 快照里**最早的一天** ✓（`None` = 还没有任何快照 ✓）。
     ///
     /// 报告的"本期覆盖 N 天"要它 ✓（见 `report::coverage_note` ✓）——
@@ -5173,6 +5198,28 @@ mod tests {
         // 这件事在报告里失真 ✓）。
         let had = db.traffic_sums("2020-01-01", "2020-01-02");
         assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    /// 额度缓存的读写：**命中就不该再请求** ✓✓ —— 这一条是"免费额度不会当天见底"的保证 ✓。
+    #[test]
+    fn the_risk_cache_answers_once_per_ip_provider_and_day() {
+        let db = db();
+        let ip = "203.0.113.9";
+        // 还没查过 ✓ ⇒ 调用方该去请求 ✓
+        assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-15"), None);
+        // 落库之后**同一天同一来源**就命中了 ✓（原样存 ✓）
+        let body = r#"{"data":{"abuseConfidenceScore":42}}"#;
+        db.save_risk(ip, "abuseipdb", "2026-03-15", body).unwrap();
+        assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-15").as_deref(), Some(body));
+        // **三个维度各自独立** ✓ —— 少一个就会把别人那天的结论当成今天的 ✓
+        assert_eq!(db.risk_cached("198.51.100.4", "abuseipdb", "2026-03-15"), None, "换个 IP 要重查");
+        assert_eq!(db.risk_cached(ip, "ipqs", "2026-03-15"), None, "换个来源要重查");
+        assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-16"), None, "换一天要重查");
+        // 同一天同来源**再存一次是覆盖** ✓（不是写出第二行 ✓ —— 主键在挡 ✓）
+        db.save_risk(ip, "abuseipdb", "2026-03-15", "{}").unwrap();
+        assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-15").as_deref(), Some("{}"));
+        let rows: i64 = db.conn().query_row("SELECT COUNT(*) FROM risk_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "同一天同一来源只该有一行");
     }
 
     /// 过期判断：**结论属于当前地址才作数** ✓✓ —— 这一条是"换出口后不显示旧地理"的保证 ✓。
