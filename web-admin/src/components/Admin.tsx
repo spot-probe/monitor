@@ -1790,20 +1790,14 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
-/// 延迟分布矩阵：横轴时间、纵轴延迟区间、颜色 = 频次（**单一色相深浅** ✓）。
+/// 延迟分布矩阵的**行**：每一带输出一对「标签 + 格子」，交给外层网格约束列宽。
 ///
-/// 它回答折线图答不了的那个问题：**这段时间的样本堆在哪个区间**。
-/// 和丢包条一样是**分格**的 ✓ —— "长窗口 + 短事件"不会被压成几个像素 ✓。
-///
-/// 三处刻意的选择：
-/// - **纵轴写真实毫秒区间**（`136–146 ms`），不写 `P10–P25` 这种统计名 —— 运维读的是毫秒 ✓；
-/// - **颜色只按本图内的峰值归一** ✓：同一张图里深浅可比，**跨图不可比**（窗口与桶宽都不同 ✗）；
-/// - 丢包**不在这里** ✗ —— 它没有延迟、落不进任何区间 ✓，由下面那条色条负责 ✓。
-function HeatMatrix({ edges, buckets, slowest }: {
+/// **为什么不自己包容器** ✗：矩阵、色条、上面那张图必须在**同一个网格**里才有共同的列 ✓。
+/// 前一版各包各的 flex、各自算 `w-24` —— 维护者量出来差了一个 `w-24` ✓，根因正是
+/// "没有共同的列定义" ✗，而不是某个宽度算错 ✓。
+function HeatRows({ edges, buckets, slowest }: {
   edges: number[]
   buckets: { ts: number; counts: number[]; lost: number }[]
-  /// 这一格里**最慢的那台**（由面板已有的逐节点点算出来 ✓ —— 不必再向 hub 要一次 ✓）。
-  /// 聚合最大的风险就是"一台坏机器被另外三台摊平" ✗，所以悬停必须能说出是谁 ✓。
   slowest?: Map<number, { name: string; ms: number }>
 }) {
   if (edges.length < 2 || buckets.length === 0) return null
@@ -1813,15 +1807,17 @@ function HeatMatrix({ edges, buckets, slowest }: {
     c === 0 ? "bg-muted" : c <= peak * 0.25 ? "bg-primary/20" : c <= peak * 0.6 ? "bg-primary/45" : "bg-primary/80"
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
-    <div className="mt-2 space-y-px">
+    <>
       {[...Array(bands)].map((_, r) => {
         const i = bands - 1 - r
+        // `contents`（display: contents）让这一对子元素**直接成为外层网格的两格** ✓ ——
+        // 于是标签进左列、格子在右列，且**不需要 Fragment 的 import** ✓。
         return (
-          <div key={i} className="flex items-center gap-1.5">
-            <span className="w-24 shrink-0 text-right text-[10px] leading-none text-muted-foreground">
+          <div key={edges[i]} className="contents">
+            <span className="text-right text-[10px] leading-none text-muted-foreground">
               {edges[i]}–{edges[i + 1]} ms
             </span>
-            <div className="flex flex-1 gap-px">
+            <div className="flex gap-px">
               {buckets.map((b) => (
                 <span
                   key={b.ts}
@@ -1835,49 +1831,27 @@ function HeatMatrix({ edges, buckets, slowest }: {
           </div>
         )
       })}
-    </div>
+    </>
   )
 }
 
-/// 丢包条：与上面那张延迟图**共用时间轴**的一行窄格子，颜色 = 那一桶的丢包率（**最差那台**）。
-///
-/// 它与延迟图是**两条独立的信息**：延迟图答"什么时候慢"，这一条答"什么时候丢"，
-/// 而两者常常同时发生（拥堵 → 重传 → 丢包）。**分开画正是为了不牺牲任何一维** ——
-/// 把丢包编码进延迟图的颜色里，两样都会读不准。
-///
-/// 只用**一条色阶**（同色相深浅表程度）：0 接近底色、100 是危险色。整数百分比要能分开
-/// 1% 与 0% —— 那正是这张条存在的理由之一（列表里那个 73% 以前在图上完全看不见）。
+/// 丢包条的**行**：同样是「标签 + 格子」的一对 ✓（见 HeatRows 的说明）。
 function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
   if (points.length === 0) return null
   const tone = (l: number) =>
     l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
-  const worst = Math.max(...points.map((p) => p.loss))
   return (
-    <div className="mt-2">
-      {/* **与矩阵逐列对齐**：矩阵的格子从 `w-24` 的毫秒标签之后开始，色条也必须如此 ——
-          否则整块矩阵会被右移一个标签宽，上下对不上（维护者一眼看出来的 ✓）。
-          所以这里放一个等宽占位，并用**同样的 `gap-1.5`** ✓。 */}
-      <div className="flex items-center gap-1.5">
-        {/* **用"有字的标签"，不用空 span** ✗：空的 flex item 实测没撑出宽度
-            （维护者量出来的差 ≈90px ≈ 一个 `w-24` ✓），而**同一种写法的文字标签**
-            在矩阵那边是真的 96px ✓✓。顺带这一行本来就该说明自己是什么 ✓。 */}
-        <span className="w-24 shrink-0 text-right text-[10px] leading-none text-muted-foreground">丢包</span>
-        {/* **高度必须在格子这一层** ✗ —— 我上一改把它留在了外层 ⇒ 内层高度塌成 0 ⇒
-            整条色条看不见了（维护者截图里那条空白就是它 ✓）。外层只管居中与间距 ✓。 */}
-        <div className="flex h-2 flex-1 gap-px overflow-hidden rounded-sm">
+    <div className="contents">
+      <span className="text-right text-[10px] leading-none text-muted-foreground">丢包</span>
+      <div className="flex gap-px">
         {points.map((p) => (
           <span
             key={p.ts}
-            className={`flex-1 ${tone(p.loss)}`}
+            className={`h-2 flex-1 rounded-[1px] ${tone(p.loss)}`}
             title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
           />
         ))}
-        </div>
       </div>
-      <p className="mt-0.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
-        <span>丢包（每一格 = 一个时间桶，取该桶里最差的那台）</span>
-        <span className="tnum">最高 {worst}%</span>
-      </p>
     </div>
   )
 }
@@ -2727,13 +2701,23 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							</div>
       						</div>
       						<div className="mt-3 rounded-lg bg-muted p-3">
-				<BandChart points={pct} />
-				{/* 矩阵在上、色条在下，**逐列对齐** ✓（两边都是 flex-1 的格子 ✓）——
-				    于是"拥堵堆在哪几条带"与"哪几格丢包"能一眼对上 ✓。 */}
-				{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
-					<HeatMatrix edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
-				)}
-				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
+				{/* **一个网格装下三块** ✓（Swimlane）：列在这里定义**一次** ✓ ——
+				    左列是标签泳道、右列是时间泳道，图 / 矩阵 / 色条各占其行 ✓。
+				    前一版三块各包各的 flex、各自算宽度 ⇒ 维护者量出差了一个 `w-24` ✗。
+				    这里**没有任何宽度计算** ✓，所以不可能再错位 ✓。 */}
+				<div className="grid grid-cols-[6rem_1fr] items-center gap-x-2 gap-y-0.5">
+					<span />
+					<BandChart points={pct} />
+					{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
+						<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
+					)}
+					<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
+					<span />
+					<p className="flex items-baseline justify-between text-[10px] text-muted-foreground">
+						<span>每一格 = 一个时间桶；丢包取该桶里最差的那台</span>
+						<span className="tnum">最高 {stats[openTask.id]?.loss ?? 0}%</span>
+					</p>
+				</div>
 			</div>
       					</section>
       				)}
