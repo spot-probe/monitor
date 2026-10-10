@@ -1871,6 +1871,14 @@ function pctl(sorted: number[], p: number): number {
 /// 中间那层带子是 P25–P75（一半的节点落在里面），P50 是中位数，P90/P99 是长尾。于是既看得见趋势，
 /// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
 /// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
+/// 纵轴上界（留 8% 余量）。**一处算、两处用** ✓ —— 图里画网格线与刻度、左列写那两个数字 ✓。
+///
+/// 抽出来是因为"图"和"左列刻度"必须是**同一个数** ✗：各算一次迟早分叉 ✓，
+/// 而那种错在图上只表现为"刻度略偏"，肉眼根本看不出来 ✓（与热力图的 `band_edges` 同一理由 ✓）。
+function bandTop(points: { p99: number | null }[]): number {
+  return Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
+}
+
 function BandChart({ points, height = 150 }: {
   // 分位数**可以为 null**：一个桶如果 100% 丢包，它没有有效样本 —— 那种桶**必须在轴上**
   // （否则"这段彻底不通"会表现成一块与"没数据"无法区分的空白 ✗），而线在那里**断开**
@@ -1888,7 +1896,7 @@ function BandChart({ points, height = 150 }: {
   if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
   const t0 = Math.min(...points.map((p) => p.ts))
   const t1 = Math.max(...points.map((p) => p.ts))
-  const hi = Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
+  const hi = bandTop(points)
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
@@ -1942,8 +1950,8 @@ function BandChart({ points, height = 150 }: {
           </text>
         </>
       )}
-      <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
-      <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
+      {/* 纵轴刻度**不画在这里** ✗ —— 它们由外层网格的**左列**渲染 ✓（那一列现在就是纵轴泳道 ✓），
+          否则左列会空一块，而刻度挤在图内也会与左列的行标签不在同一条视线上 ✓。 */}
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
       <text x={w} y={height - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{clock(t1)}</text>
     </svg>
@@ -2706,7 +2714,12 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				    前一版三块各包各的 flex、各自算宽度 ⇒ 维护者量出差了一个 `w-24` ✗。
 				    这里**没有任何宽度计算** ✓，所以不可能再错位 ✓。 */}
 				<div className="grid grid-cols-[6rem_1fr] items-center gap-x-2 gap-y-0.5">
-					<span />
+					{/* 纵轴泳道：上界 / 0 —— 高度与内边距**跟图一致** ✓（150 与 14 都是 `BandChart`
+					    的默认值 ✓），于是两个数字与图里的网格线在同一条水平线上 ✓。 */}
+					<div className="flex h-[150px] flex-col justify-between py-[14px] text-right text-[9px] leading-none text-muted-foreground">
+						<span>{Math.round(bandTop(pct))} ms</span>
+						<span>0</span>
+					</div>
 					<BandChart points={pct} />
 					{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
 						<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
