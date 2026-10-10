@@ -75,6 +75,20 @@ export type Node = {
     asn?: number | null
     org?: string | null
   }
+  /**
+   * 在线风险（第三方 ✓）。**开关关着时整块不存在** ✓ ——
+   * 面板据此**根本不显示**那一节 ✓，而不是显示"无数据" ✗（后者会被读成"查过了、结果是干净" ✓）。
+   */
+  risk?: {
+    source: string
+    /** 0–100 ✓ —— **只在同一家内部可比** ✗（各家口径不同 ✓，绝不合成一个分 ✓✓）。 */
+    score?: number | null
+    /** 家自带的档位之外的、**我们给的**文字 ✓（"低/较高/高风险" ✓）。 */
+    label?: string | null
+    reports?: number | null
+    usage?: string | null
+    tor?: boolean | null
+  } | null
   ip?: string
   ipv4?: string
   ipv6?: string

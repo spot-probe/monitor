@@ -604,6 +604,31 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
                 </div>
               )
             })()}
+
+            {/* 在线风险（第三方 ✓）—— **开关关着时整块不出现** ✓✓：
+                不显示"无数据" ✗（那会被读成"查过了、结果是干净" ✓ —— 与"没查"完全两回事 ✓）。
+                ⚠️ **逐源并列** ✓，**绝不合成一个分** ✗✗：各家口径不同 ✓，
+                而分歧本身就是最有信息量的信号 ✓（同一台机器可能一家说高风险、另一家说低风险 ✓）。 */}
+            {node.risk && (
+              <div className="rounded-lg border bg-muted/30 p-3">
+                <p className="text-xs font-medium">
+                  在线风险 <span className="font-normal text-muted-foreground">（{node.risk.source}）</span>
+                </p>
+                <div className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+                  <p>
+                    风险{" "}
+                    <span className="font-mono text-foreground">
+                      {node.risk.score != null ? `${node.risk.score}/100` : "—"}
+                    </span>
+                    {node.risk.label ? ` · ${node.risk.label}` : ""}
+                    {node.risk.label && <span className="ml-1 opacity-70">（档位文字由本面板给出，各家口径不同）</span>}
+                  </p>
+                  {node.risk.reports != null && <p>举报 {node.risk.reports} 次</p>}
+                  {node.risk.usage && <p>用途 {node.risk.usage}</p>}
+                  <p>Tor 出口 {node.risk.tor === true ? "是" : node.risk.tor === false ? "否" : "未知"}</p>
+                </div>
+              </div>
+            )}
             </p>
           </div>
         </div>
