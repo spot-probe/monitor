@@ -1067,6 +1067,9 @@ pub enum Period {
     Week,
     Month,
     Quarter,
+    /// 自然半年：1–6 月 / 7–12 月 ✓（**不是财年** ✗ —— 本仓其余地方也都是自然年 / ISO 周 ✓）。
+    Half,
+    Year,
 }
 
 impl Period {
@@ -1099,6 +1102,22 @@ impl Period {
                 };
                 (prev_first, this_first)
             }
+            Period::Half => {
+                // 当前半年从 1 月或 7 月起 ✓ —— 于是"上一个完整半年"就是**另一半** ✓
+                // （上半年里看到的是去年下半年 ✓，跨年 ✓）。
+                let m = if today.month() <= 6 { 1 } else { 7 };
+                let this_h = NaiveDate::from_ymd_opt(today.year(), m, 1).unwrap();
+                let prev_h = if m == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 7, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap()
+                };
+                (prev_h, this_h)
+            }
+            Period::Year => {
+                let this_y = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap();
+                (NaiveDate::from_ymd_opt(today.year() - 1, 1, 1).unwrap(), this_y)
+            }
             Period::Quarter => {
                 let this_q_first_month = ((today.month() - 1) / 3) * 3 + 1; // 1 / 4 / 7 / 10
                 let this_q = NaiveDate::from_ymd_opt(today.year(), this_q_first_month, 1).unwrap();
@@ -1130,6 +1149,14 @@ impl Period {
                     NaiveDate::from_ymd_opt(start.year(), start.month() - 3, 1).unwrap()
                 }
             }
+            Period::Half => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 7, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), 1, 1).unwrap()
+                }
+            }
+            Period::Year => NaiveDate::from_ymd_opt(start.year() - 1, 1, 1).unwrap(),
         };
         (start.to_string(), end.to_string(), prev.to_string(), start.to_string())
     }
@@ -4903,6 +4930,38 @@ mod tests {
             Period::Quarter.last_full(d(2026, 4, 1)),
             ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
         );
+        // 半年：4 月里发 → 上一个完整半年是**去年下半年**（7/1 → 今年 1/1 ✓，跨年 ✓）；
+        // 对比期 = 去年上半年 ✓。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 4, 10)),
+            ("2025-07-01".into(), "2026-01-01".into(), "2025-01-01".into(), "2025-07-01".into())
+        );
+        // 半年：10 月里发 → 上一个完整半年是**今年上半年**（1/1 → 7/1 ✓）；对比期 = 去年下半年 ✓。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 10, 2)),
+            ("2026-01-01".into(), "2026-07-01".into(), "2025-07-01".into(), "2026-01-01".into())
+        );
+        // 半年边界：正好 7 月 1 日发 → 上一个完整半年是今年上半年 ✓（不能算成"刚过去的那一天" ✗）。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 7, 1)),
+            ("2026-01-01".into(), "2026-07-01".into(), "2025-07-01".into(), "2026-01-01".into())
+        );
+        // 年报：3 月里发 → 上一个完整年是**去年全年** ✓；对比期 = 前年 ✓。
+        assert_eq!(
+            Period::Year.last_full(d(2026, 3, 5)),
+            ("2025-01-01".into(), "2026-01-01".into(), "2024-01-01".into(), "2025-01-01".into())
+        );
+        // 年报边界：正好 1 月 1 日发 → 上一个完整年仍是去年 ✓（不是"今年" ✗）。
+        assert_eq!(
+            Period::Year.last_full(d(2026, 1, 1)),
+            ("2025-01-01".into(), "2026-01-01".into(), "2024-01-01".into(), "2025-01-01".into())
+        );
+        // 闰年不影响年与半年的长度 ✓（区间是**日期** ✓ —— 天数由日历决定 ✓，2024 是闰年 ✓）。
+        assert_eq!(
+            Period::Year.last_full(d(2025, 6, 1)),
+            ("2024-01-01".into(), "2025-01-01".into(), "2023-01-01".into(), "2024-01-01".into())
+        );
+
         // 季中：5 月里发 → 仍然是"上一个完整季度"（Q1 ✓），不是"进行中的 Q2" ✗。
         assert_eq!(
             Period::Quarter.last_full(d(2026, 5, 20)),

@@ -54,6 +54,8 @@ pub fn title(period: Period, from: &str, to: &str, tz: &str) -> String {
         Period::Week => "周报",
         Period::Month => "月报",
         Period::Quarter => "季报",
+        Period::Half => "半年报",
+        Period::Year => "年报",
     };
     // 区间含首不含尾 ✓，所以"覆盖到哪天"要把 `to` 退一天 ✓，否则读起来像多算了一天 ✗。
     format!("【流量{name}】{from} ~ {to} · {tz}")

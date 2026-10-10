@@ -67,7 +67,7 @@ pub fn valid_tz(v: &str) -> bool {
 
 /// 严格校验：逗号分隔，元素只能是那四个（**空串合法** ✓ = 一个周期都不发 ✓）。
 pub fn valid_periods(v: &str) -> bool {
-    v.split(',').all(|p| matches!(p.trim(), "" | "day" | "week" | "month" | "quarter"))
+    v.split(',').all(|p| matches!(p.trim(), "" | "day" | "week" | "month" | "quarter" | "half" | "year"))
 }
 
 fn label(minutes: i32) -> String {
@@ -83,6 +83,8 @@ fn parse_periods(s: &str) -> Vec<Period> {
             "week" => Some(Period::Week),
             "month" => Some(Period::Month),
             "quarter" => Some(Period::Quarter),
+            "half" => Some(Period::Half),
+            "year" => Some(Period::Year),
             _ => None,
         };
         if let Some(p) = p {
@@ -100,6 +102,8 @@ fn key(p: Period) -> &'static str {
         Period::Week => "week",
         Period::Month => "month",
         Period::Quarter => "quarter",
+        Period::Half => "half",
+        Period::Year => "year",
     }
 }
 
