@@ -764,6 +764,13 @@ pub struct Node {
     /// 这批结论**查的是哪个地址** ✓ —— 与当前查询地址不符时，上面八项应当读作未知 ✓。
     #[serde(default)]
     pub q_ip: Option<String>,
+    /// 在线风险（第三方 ✓，**默认关** ⇒ 未开时为空 ✓）。
+    /// 存的是**结论 JSON** ✓（`row_to_node` 当场解析 ✓；解析不出来就当未知 ✓，不 panic ✗）。
+    /// `risk_ip` 与 `q_ip` **同一条规矩** ✓✓：地址不符 ⇒ 当作未知 ✓。
+    #[serde(default)]
+    pub risk: Option<serde_json::Value>,
+    #[serde(default)]
+    pub risk_ip: Option<String>,
     /// Set in the panel: two uppercase letters, or empty for the looked-up
     /// `country`. What the status page shows is this when present.
     #[serde(default)]
@@ -3619,6 +3626,20 @@ impl Node {
     }
 }
 
+impl Node {
+    /// 在线风险的结论 ✓ —— **只在它属于当前地址时才给** ✓✓（与 [`Node::quality`] 一字不差的规矩 ✓）。
+    ///
+    /// 判断**只做一处**（这里 ✓）：面板与主题都不判 ✓ —— 否则早晚有一处忘了判 ✓，
+    /// 症状是"某个页面显示了换出口之前的旧结论" ✓，极难发现 ✓。
+    pub fn risk(&self, source: &str) -> Option<&serde_json::Value> {
+        let ip = self.risk_ip.as_deref().filter(|ip| !ip.is_empty())?;
+        if ip != source {
+            return None;
+        }
+        self.risk.as_ref()
+    }
+}
+
 fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
     let s = |i: &str| r.get::<_, String>(i).unwrap_or_default();
     let n = |i: &str| r.get::<_, i64>(i).unwrap_or(0);
@@ -3664,6 +3685,9 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         q_asn: r.get::<_, Option<i64>>("q_asn").unwrap_or(None).map(|x| x as u32),
         q_org: r.get::<_, Option<String>>("q_org").unwrap_or(None),
         q_ip: r.get::<_, Option<String>>("q_ip").unwrap_or(None),
+        // `risk` 存的是 JSON **文本** ✓ ⇒ 这里当场解析 ✓；坏文本 ⇒ 当未知 ✓（不是错误 ✓）。
+        risk: r.get::<_, Option<String>>("risk").unwrap_or(None).and_then(|t| serde_json::from_str(&t).ok()),
+        risk_ip: r.get::<_, Option<String>>("risk_ip").unwrap_or(None),
         country_pin: s("country_pin"),
         ipv4_pin: s("ipv4_pin"),
         ipv6_pin: s("ipv6_pin"),
@@ -5285,6 +5309,22 @@ mod tests {
         assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-15").as_deref(), Some("{}"));
         let rows: i64 = db.conn().query_row("SELECT COUNT(*) FROM risk_day", [], |r| r.get(0)).unwrap();
         assert_eq!(rows, 1, "同一天同一来源只该有一行");
+    }
+
+    /// 在线结论的过期判断：与质量**同一条规矩** ✓✓（地址不符 ⇒ 当作未知 ✓）。
+    #[test]
+    fn the_online_risk_counts_only_for_the_address_it_came_from() {
+        let mut n = Node::default();
+        assert_eq!(n.risk("203.0.113.9"), None, "没查过就是未知");
+        n.risk_ip = Some("203.0.113.9".into());
+        n.risk = Some(serde_json::json!({ "source": "AbuseIPDB", "score": 42.0 }));
+        assert_eq!(n.risk("203.0.113.9").unwrap()["score"], 42.0, "地址相符就该作数");
+        assert_eq!(n.risk("198.51.100.4"), None, "换过地址 ⇒ 旧结论不作数");
+        // 地址相符、但结论那块**解析失败过**（列里是坏 JSON ✓）⇒ 未知 ✓，不是 panic ✗
+        n.risk = None;
+        assert_eq!(n.risk("203.0.113.9"), None, "没有结论就是未知");
+        n.risk_ip = Some(String::new());
+        assert_eq!(n.risk(""), None, "空地址不算查过");
     }
 
     /// 过期判断：**结论属于当前地址才作数** ✓✓ —— 这一条是"换出口后不显示旧地理"的保证 ✓。
