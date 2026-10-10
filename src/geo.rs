@@ -472,6 +472,16 @@ pub async fn watch(app: crate::Shared) {
                 let _ = fetch(&app, source).await;
             }
         }
+        // 顺带**扫一遍欠着质量的节点** ✓✓（离线也算 ✓）——
+        // 心跳那道门只覆盖"此刻在线"的 ✓，而很少上线的机器恰恰最需要看一眼质量 ✓。
+        // 节流在 `qualify` 内部 ✓（每节点每小时一次 ✓），所以这里每 10 分钟扫一次是安全的 ✓。
+        let pending = app.db.quality_pending();
+        if !pending.is_empty() {
+            tracing::info!("geo: {} node(s) still need a quality lookup", pending.len());
+            for (id, source) in pending {
+                crate::agent_ws::qualify(app.clone(), id, source);
+            }
+        }
         tokio::time::sleep(std::time::Duration::from_secs(600)).await;
     }
 }

@@ -566,7 +566,7 @@ fn assess(app: Shared, node_id: i64, source: String) {
     });
 }
 
-fn qualify(app: Shared, node_id: i64, source: String) {
+pub(crate) fn qualify(app: Shared, node_id: i64, source: String) {
     let mut asked = QUALIFIED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if asked.get(&node_id).is_some_and(|at| at.elapsed() < LOCATE_RETRY) {
         return;

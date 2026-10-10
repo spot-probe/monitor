@@ -2011,6 +2011,39 @@ impl Db {
         crate::agent_ws::country_source(&ip, &v4, &v6).map(|a| a.to_string())
     }
 
+    /// 列出**所有还欠一次本地质量查询**的节点 ✓（id + 该用哪个地址 ✓）。
+    ///
+    /// **为什么需要它** ✗：心跳那道门只覆盖"此刻在线"的节点 ✓ ——
+    /// 而一台很少上线的机器，面板上就会**永远**显示"还没查到" ✓✗，
+    /// 偏偏那正是最需要看一眼质量的场景 ✓（现场就是这样：六台里三台离线 ✓，那三台一直没有 ✓）。
+    /// ⇒ 由 `geo::watch` 每轮顺带扫一遍 ✓，于是**离线也能有质量** ✓✓。
+    ///
+    /// 地址仍然交给 [`Self::quality_source`] 挑 ✓（规矩只有一份 ✓）；
+    /// "欠不欠"交给 [`Self::quality_owed`] ✓ —— 与面板判过期**同一条** ✓。
+    pub fn quality_pending(&self) -> Vec<(i64, String)> {
+        let ids: Vec<i64> = {
+            let conn = self.conn();
+            let mut stmt = match conn.prepare("SELECT id FROM node ORDER BY sort, id") {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0));
+            match rows {
+                Ok(r) => r.filter_map(Result::ok).collect(),
+                Err(_) => return Vec::new(),
+            }
+        };
+        ids.into_iter()
+            .filter_map(|id| {
+                let src = self.quality_source(id)?;
+                match self.quality_owed(id, &src) {
+                    Ok(true) => Some((id, src)),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// 读某天某来源的缓存 ✓（`None` = **今天还没查过** ⇒ 调用方该去请求 ✓）。
     ///
     /// 这一句就是"**每个 IP 每天只查一次**"的执行者 ✓✓ —— 额度爆掉与否全看它 ✓。
@@ -5343,6 +5376,60 @@ mod tests {
         assert_eq!(rows, 1, "同一天同一来源只该有一行");
     }
 
+    /// **周期扫描该挑出谁** ✓✓ —— 这条测试就是"触发条件"的验收 ✓。
+    ///
+    /// 现场的场景（2026-10-11）：六台里三台离线 ⇒ 心跳那道门碰不到它们 ✗ ⇒
+    /// 面板上永远"还没查到" ✓。这台扫描就是为了补上它们 ✓。
+    #[test]
+    fn the_sweep_picks_up_exactly_the_nodes_that_still_owe_a_lookup() {
+        let db = db();
+        // 造三台带地址的节点 ✓（照别的测试的写法 ✓ —— `create_node` + `Node { … }` ✓）
+        // ⚠️ `create_node` **不写 `ipv4`** ✗ —— 那是 agent 上报的事实 ✓（由 `save_facts` 落）。
+        // 所以这里建完节点后**直接写列** ✓：本测试要验的是**扫描的判据** ✓，
+        // 而不是"创建节点时能不能带地址" ✓（那是另一件事 ✓，硬塞进这里只会让失败信息指错方向 ✓）。
+        let mk = |name: &str, v4: &str| -> i64 {
+            let id = db
+                .create_node(&Node { name: name.into(), ..Default::default() }, &format!("token-{name}"))
+                .unwrap();
+            db.conn().execute("UPDATE node SET ipv4=?2 WHERE id=?1", rusqlite::params![id, v4]).unwrap();
+            id
+        };
+        // ⚠️ 别再用 `203.0.113.x` / `198.51.100.x` ✗ —— 那是**文档保留段**（TEST-NET ✓），
+        // `country_source` 会**正确地跳过**它们 ✓ ⇒ 测试会因为"地址不合格"而挂 ✓，
+        // 而且失败信息看起来像"节点没被挑出来" ✓ —— 与真正要测的事**毫无关系** ✗✓。
+        let a = mk("a", "1.1.1.1"); // 真公网 ✓
+        let b = mk("b", "8.8.8.8"); // 真公网 ✓
+        let c = mk("c", "192.168.1.5"); // **内网** ✓ ⇒ 按设计不查 ✓
+                                        // 其中一台已经查过 ✓ ⇒ 不该再出现在待查清单里 ✓
+        db.save_quality(
+            a,
+            &crate::geo::Quality { country: Some("US".into()), ..Default::default() },
+            "1.1.1.1", // 必须与 quality_source(a) 同一个地址 ✓（错过一次 ✓）
+        )
+        .unwrap();
+        let pending = db.quality_pending();
+        let ids: Vec<i64> = pending.iter().map(|(id, _)| *id).collect();
+        assert!(!ids.contains(&a), "查过的节点不该再欠 ✓");
+        // 失败时**把状态一起说出来** ✓ —— 否则"没被挑出来"这四个字会让人以为是逻辑错 ✗，
+        // 而真相可能是"地址根本没存进去" ✓ 或"地址不合格" ✓（今天已经因此绕了两圈 ✓）。
+        assert!(
+            ids.contains(&b),
+            "没查过的节点必须被挑出来 ✓（这正是离线的那些 ✓）\n  待查清单={:?}\n  b 的地址={:?}\n  b 的 ip/ipv4 列={:?}",
+            ids,
+            db.quality_source(b),
+            db.conn()
+                .query_row("SELECT ip, ipv4, ipv6 FROM node WHERE id=?1", [b], |r| Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                )))
+                .unwrap()
+        );
+        let src = pending.iter().find(|(id, _)| *id == b).map(|(_, s)| s.clone());
+        assert_eq!(src.as_deref(), Some("8.8.8.8"), "带的地址要与面板判过期用的**同一个** ✓");
+        assert!(!db.quality_pending().iter().any(|(id, _)| *id == c), "内网地址不查 ✓");
+    }
+
     /// **现场那个 bug 的单测** ✓✓（2026-10-11）：节点**已经有国家** ✓，但本地质量从来没查过 ✓。
     ///
     /// 我原来把"要不要查质量"挂在**国家那套欠账门**上 ✗ ⇒ 国家一查到，门就永久关上 ✓
@@ -5423,7 +5510,7 @@ mod tests {
                 org: Some("DMIT".into()),
                 ..Default::default()
             },
-            "203.0.113.9",
+            "1.1.1.1",
         )
         .unwrap();
         let row = |c: &str| -> Option<String> {
