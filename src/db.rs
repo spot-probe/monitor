@@ -112,7 +112,18 @@ CREATE TABLE IF NOT EXISTS node (
   private_remark TEXT NOT NULL DEFAULT '',
   -- agent 是否允许被 hub 远程升级（它在 hello 里如实上报；老 agent 不上报 → 0 ✓）。
   -- **只能由这台机器自己打开**：hub 不给写这个列的能力，升级必须由本机重跑安装命令。
-  allow_remote_upgrade INTEGER NOT NULL DEFAULT 0
+  allow_remote_upgrade INTEGER NOT NULL DEFAULT 0,
+  -- 节点质量（IP 结论 ✓）：由 hub 用**本地**库查出 ✓，不是 agent 上报的 ✗ ——
+  -- agent 依旧零改动 ✓，也不把节点 IP 发给第三方 ✓（除非以后显式打开在线库 ✓）。
+  -- 八个列**全部可空** ✓：查不到就是空 ✓ —— "未知"与"美国"是两件事 ✗（`''` 会被读成后者 ✓）。
+  q_country     TEXT,
+  q_city        TEXT,
+  q_subdivision TEXT,
+  q_latitude    REAL,
+  q_longitude   REAL,
+  q_time_zone   TEXT,
+  q_asn         INTEGER,
+  q_org         TEXT
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -262,7 +273,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -576,6 +587,24 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
                PRIMARY KEY (node_id, date)
              );",
         )?;
+    }
+
+    // 17：节点质量（IP 结论）. 八个可空列 ✓ —— 查不到就是空 ✓。
+    // 全新库由上面的 SCHEMA 带上 ✓ ⇒ **只有升级路径的测试碰得到这一块** ✓（1.9.12 的教训 ✓）。
+    if from < 17 {
+        for (col, ty) in [
+            ("q_country", "TEXT"),
+            ("q_city", "TEXT"),
+            ("q_subdivision", "TEXT"),
+            ("q_latitude", "REAL"),
+            ("q_longitude", "REAL"),
+            ("q_time_zone", "TEXT"),
+            ("q_asn", "INTEGER"),
+            ("q_org", "TEXT"),
+        ] {
+            // `add_column` 是 3 个参数 ✓ —— 列名与类型在**同一个字符串**里 ✓（见它自己的用法 ✓）。
+            add_column(&tx, "node", &format!("{col} {ty}"))?;
+        }
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -5020,6 +5049,56 @@ mod tests {
         // 这件事在报告里失真 ✓）。
         let had = db.traffic_sums("2020-01-01", "2020-01-02");
         assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    /// **升级路径的闸**：一个"16 版"的库（没有那八列）迁移后必须有它们、且戳到 17 ✓。
+    /// 全新库的 SCHEMA 本来就带 ⇒ 只有这种"从上一版升上来"的测试碰得到真正的升级路径 ✓。
+    #[test]
+    fn migrating_from_16_adds_the_node_quality_columns() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        const COLS: [&str; 8] = [
+            "q_country",
+            "q_city",
+            "q_subdivision",
+            "q_latitude",
+            "q_longitude",
+            "q_time_zone",
+            "q_asn",
+            "q_org",
+        ];
+        for col in COLS {
+            conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), []).unwrap();
+        }
+        conn.execute("PRAGMA user_version = 16", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"q_asn".to_string()), "前提：列已删掉");
+        migrate(&conn, 16).unwrap();
+        let after = cols(&conn);
+        for col in COLS {
+            assert!(after.contains(&col.to_string()), "迁移后必须有 {col}");
+        }
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // **必须可空** ✓：查不到就是 NULL ✓ —— 若被写成 NOT NULL，插入节点时就会失败 ✓，
+        // 而那种错会在"新增一台节点"时才炸 ✗，与这里看起来毫无关系 ✓。
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('node') WHERE name LIKE 'q_%' AND \"notnull\"=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notnull, 0, "八个质量列都必须可空");
     }
 
     #[test]
