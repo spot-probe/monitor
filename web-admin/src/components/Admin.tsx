@@ -573,7 +573,10 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
               const where = [q?.city, q?.subdivision, q?.country].filter(Boolean).join(" · ")
               return (
                 <div className="rounded-lg border bg-muted/30 p-3">
-                  <p className="text-xs font-medium">IP 质量</p>
+                  <p className="text-xs font-medium">
+                    IP 质量{" "}
+                    <span className="font-normal text-muted-foreground">（hub 本地查询，不外发）</span>
+                  </p>
                   {known ? (
                     <div className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
                       <p>
@@ -595,6 +598,15 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
                         </p>
                       )}
                       {q?.time_zone && <p>时区 {q.time_zone}</p>}
+                      {/* 署名 ✓ —— 数据出处必须写出来 ✓：这是许可要求（DB-IP 是 CC BY 4.0 ✓，
+                          MaxMind 也要一句 attribution ✓），不是可选装饰 ✗。 */}
+                      <p className="pt-1 text-[10px] leading-relaxed opacity-70">
+                        数据：
+                        <a className="underline underline-offset-2" href="https://db-ip.com" target="_blank" rel="noreferrer">
+                          IP Geolocation by DB-IP
+                        </a>
+                        （或 MaxMind GeoLite2，视配置而定）
+                      </p>
                     </div>
                   ) : (
                     <p className="mt-1.5 text-xs text-muted-foreground">
@@ -4222,6 +4234,71 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
                 }
               >
                 保存 IP 风险
+              </Button>
+            </div>
+          </Card>
+        </Section>
+
+        <Section
+          title="IP 数据库（本地库）"
+          hint="hub 把这几份库下载到**本地**、自己查询 —— 节点 IP 不会发给任何第三方。留空表示不下载该库。"
+        >
+          <Card className="gap-6 p-6">
+            <section className="space-y-3">
+              <h4 className="text-sm font-medium">镜像地址</h4>
+              <Field
+                row
+                label="城市库"
+                hint="厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。地址里可以写 {YYYY-MM}，下载时按当天替换 —— 有些直链带月份，写死了下个月就会 404。"
+              >
+                <Input
+                  value={text("geo_city_url")}
+                  onChange={(e) => set("geo_city_url", e.target.value)}
+                  placeholder="未配置（跳过这个库）"
+                />
+              </Field>
+              <Field
+                row
+                label="ASN 库"
+                hint="给每台节点标出它走谁的线路（ASN + 组织）；同样支持 {YYYY-MM}。"
+              >
+                <Input
+                  value={text("geo_asn_url")}
+                  onChange={(e) => set("geo_asn_url", e.target.value)}
+                  placeholder="未配置（跳过这个库）"
+                />
+              </Field>
+              <Field
+                row
+                label="Tor 出口列表"
+                hint="纯文本清单，没有额度限制，所以刷新得比数据库勤。"
+              >
+                <Input
+                  value={text("geo_tor_url")}
+                  onChange={(e) => set("geo_tor_url", e.target.value)}
+                  placeholder="未配置（跳过这个库）"
+                />
+              </Field>
+            </section>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              只接受 https 地址。已配置的库会各自按自己的节奏刷新（数据库每天一次，Tor 列表每小时）。这里的库全部在 hub
+              本地查询，不涉及任何外部请求 —— 与上面的「IP 风险（在线库）」是两条完全不同的路。
+            </p>
+            {/* 每节自己的保存 ✓ —— 这一页的 set 只是草稿 ✓，只有 save(…) 才落库 ✓。 */}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+              <Button variant="ghost" onClick={reload}>
+                重置
+              </Button>
+              <Button
+                onClick={() =>
+                  save({
+                    geo_city_url: text("geo_city_url"),
+                    geo_asn_url: text("geo_asn_url"),
+                    geo_tor_url: text("geo_tor_url"),
+                  })
+                }
+              >
+                保存 IP 数据库
               </Button>
             </div>
           </Card>
