@@ -1987,7 +1987,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // 为什么需要它：x 轴**固定铺满整个窗口**，所以"长窗口 + 短事件"会把那件事压成几个像素
   // （维护者在 24 小时窗口里看到的那团锯齿就是它）。热力图治的是"一眼看全景"，
   // 这个选择器治的是"把近处放大" —— 两者不冲突。
-  const [span, setSpan] = useState(24)
+  // **名字不能叫 `span`** ✗：对话框里有一个局部 `const span = …`（直方图的分桶宽度），
+  // 它会**遮住**这个名字 —— 于是 `span === h` 拿分桶宽度去比 1/6/24/168，永远为假，
+  // 四个选项**没有一个高亮** ✗（维护者查了元素 class 才看出来 ✓）。
+  const [winHours, setSpan] = useState(24)
 	// 首次请求失败时的原因。`load()` 原来把错误整个吞掉（`.catch(() => {})`），于是页面
 	// 显示「没有监控」——和「没能取到数据」长得一模一样，而这两件事需要完全不同的动作。
 	const [error, setError] = useState("")
@@ -2051,7 +2054,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
     Promise.all(
       tasks.map((t) =>
         api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
-          `/nodes/ping-series?task=${t.id}&hours=${span}`,
+          `/nodes/ping-series?task=${t.id}&hours=${winHours}`,
         )
           .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
           .catch(() => []),
@@ -2169,7 +2172,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
     return () => {
       alive = false
     }
-  }, [tasks, span])
+  }, [tasks, winHours])
   useEffect(() => { load() }, [])
 
   async function save() {
@@ -2626,7 +2629,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							      type="button"
       							      onClick={() => setSpan(h)}
       							      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
-        span === h ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+        winHours === h ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
       }`}
       							    >
       							      {h < 24 ? `${h} 小时` : h === 24 ? "24 小时" : "7 天"}
