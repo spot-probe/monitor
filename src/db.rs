@@ -1888,16 +1888,24 @@ impl Db {
         }
         let today = Local::now().date_naive().to_string();
         if day_start != today {
-            // **日切：先把刚过去的那一天存进快照，再重置** ✓ —— 顺序不能反 ✗：
-            // 反了就把"新一天"当成"昨天"写进去 ✓，而那一天还没过完 ✓。
-            // 此刻 `day_rx/day_tx` 是刚结束那天的总量 ✓、`day_start` 是那一天本身 ✓
-            //（节点离线跨过午夜也没关系 ✓：它下次上报时才走到这里，日期仍是那一天 ✓）。
-            // 用 `OR REPLACE` 而不是裸 INSERT：万一同一节点在同一瞬间被处理两次 ✓，
-            // 重复的快照会让**周报翻倍** ✗ —— 而那种错在报表上几乎看不出来 ✓。
-            conn.execute(
-                "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx) VALUES (?1, ?2, ?3, ?4)",
-                params![node_id, day_start, day_rx, day_tx],
-            )?;
+            // ⚠️ **首次上报不算日切** ✗：新节点的这一行里 `day_start` 是**空串**（列默认值 ✓），
+            // 于是它第一次上报也满足 `day_start != today` ✓ —— 但那不是"一天结束了"，
+            // 而是"还**没有**过任何一天" ✓。不排除它就会写出一行 `date=''` 的空快照 ✗，
+            // 而任何按日期求和的报表都得先把它剔掉 ✓。
+            // （这条是单测 `a_rollover_snapshots_the_day_that_just_ended` 的第一条断言抓到的 ✓。）
+            if !day_start.is_empty() {
+                // **值直接由 SQL 从表里取** ✓（而不是用局部变量 ✗）：
+                // 走到这里时，局部 `day_rx/day_tx` 可能**已经被重算成新一天的值** ✓
+                // —— 单测的第二条断言就是这么抓到的（存进去的是 9500/4600，而要求是 8000/4000 ✗）。
+                // 而那一刻表里**还是旧值** ✓（重置的 UPDATE 在这段之后 ✓），
+                // 所以 `INSERT ... SELECT` 读到的必然"刚结束那天"的总量 ✓ ——
+                // 它免疫于局部变量的顺序 ✓，这正是我想要的性质 ✓。
+                conn.execute(
+                    "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx)
+                     SELECT node_id, day_start, day_rx, day_tx FROM traffic WHERE node_id = ?1",
+                    params![node_id],
+                )?;
+            }
             day_rx = d_rx;
             day_tx = d_tx;
         }
@@ -3744,6 +3752,36 @@ mod tests {
         assert_eq!((t.month_rx, t.month_tx), (500, 100), "a new period counts only this report's delta");
         assert_eq!((t.day_rx, t.day_tx), (2_000, 700), "the day carries on across a billing rollover");
         assert_eq!(t.total_rx, 10_000, "lifetime total is untouched by either rollover");
+    }
+
+    /// **日切时先存快照、再重置** ✓ —— 顺序反了就会把"还没过完的新一天"当成昨天写进去 ✗，
+    /// 而那种错在报表上只表现为"少一天/多一天"，几乎看不出来 ✓（与主键那一条同一个理由 ✓）。
+    #[test]
+    fn a_rollover_snapshots_the_day_that_just_ended() {
+        let db = db();
+        let id = node(&db, 1);
+        db.accumulate(id, "boot-a", Some((0, 0))).unwrap();
+        db.accumulate(id, "boot-a", Some((8_000, 4_000))).unwrap();
+        // 还没跨日：**不该**有任何快照 —— 否则报表里会多出一个"今天"的行 ✗。
+        let n: i64 = db.conn().query_row("SELECT COUNT(*) FROM traffic_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "没跨日就不该有快照");
+
+        // 跨日：这次上报先把**刚结束那天**存下来，然后才重置这一天的计数。
+        db.conn().execute("UPDATE traffic SET day_start='1999-01-01' WHERE node_id=?1", [id]).unwrap();
+        db.accumulate(id, "boot-a", Some((9_500, 4_600))).unwrap();
+        let (date, rx, tx): (String, i64, i64) = db
+            .conn()
+            .query_row("SELECT date, rx, tx FROM traffic_day WHERE node_id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(date, "1999-01-01", "快照属于**刚结束**的那一天，不是今天");
+        assert_eq!((rx, tx), (8_000, 4_000), "值必须是**重置前**的总量");
+
+        // 再走一次同样的路径：**不能**写出第二行（重复快照 ⇒ 周报翻倍 ✗）。
+        db.accumulate(id, "boot-a", Some((9_900, 4_800))).unwrap();
+        let n: i64 = db.conn().query_row("SELECT COUNT(*) FROM traffic_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "同一天只该有一行");
     }
 
     /// The other half of the rollover: the counters restart on the node's next
