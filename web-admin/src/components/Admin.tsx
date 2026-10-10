@@ -1849,8 +1849,11 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
     l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
   return (
     <div className="contents">
-      <span className="text-right text-[10px] leading-none text-muted-foreground">丢包</span>
-      <div className="flex gap-px">
+      {/* **与上面的图拉开距离** ✓（维护者：现在感觉是凑在一起的 ✓）。
+          这一行在网格里是**两个格子**（标签 + 色条 ✓），所以两边一起加 `mt-3` ✓ ——
+          只加一边会让它们错开半格 ✓。 */}
+      <span className="mt-3 text-right text-[10px] leading-none text-muted-foreground">丢包</span>
+      <div className="mt-3 flex gap-px">
         {points.map((p) => (
           <span
             key={p.ts}
