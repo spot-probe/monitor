@@ -12,6 +12,7 @@ mod db;
 mod frontend;
 mod fx;
 mod notify;
+mod report;
 mod theme;
 
 use std::collections::HashMap;

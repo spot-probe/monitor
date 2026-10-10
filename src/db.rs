@@ -1058,9 +1058,8 @@ pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
 ///
 /// **四个周期共用同一个区间算法** ✓ —— 它们不是四套逻辑，而是"同一张按天快照表"的
 /// 四种长度 ✓（这正是先做 `traffic_day` 换来的性质 ✓）。
-// 下一块（报告生成与调度）会构造它 ✓ —— 现在先落地基，所以暂标 allow，
-// 而不是把警告压过去就算：这处 allow 紧跟着这条说明，接上调度后一并删掉 ✓
-//（与热力图那对 struct 同一处理 ✓）。
+// 整条报告链**还没接线** ✗（`report` 模块只有测试在调用 ✓）—— 见 src/report.rs 顶部那段说明 ✓：
+// 下一步的调度器会构造这些变体 ✓，届时连同 report.rs 那行模块级 allow 一起删掉 ✓。
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Period {
@@ -1079,6 +1078,8 @@ impl Period {
     /// 而"与上周期对比"的基准也会跟着浮动 ✓。固定成"昨天整天"才可比 ✓、也才可复现 ✓。
     ///
     /// 边界一律按 **ISO**（周一起算 ✓、季度 1/4/7/10 月起算 ✓）—— 与东八区的习惯一致 ✓。
+    // 调度器（下一步）会调用它 ✓；现在 `title()` 只用到 `Period` 本身 ✗ ⇒ 暂标 allow，
+    // 紧跟着这条说明，接上调度后删掉 ✓（与之前的处理一致 ✓）。
     #[allow(dead_code)]
     pub fn last_full(self, today: chrono::NaiveDate) -> (String, String, String, String) {
         use chrono::{Datelike, Duration, NaiveDate};
