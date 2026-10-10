@@ -3851,56 +3851,6 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         }
       >
 
-      {/* 流量报告 ✓ —— **用本页已有的 `s` / `set`** ✓（不另起一套 state/请求 ✗：
-          那会让同一份设置有两个主人 ✓，而 `set` 本来就是"改一下就保存" ✓）。
-          说明里的时刻读 `s` ✓ —— 改了时间，那四行跟着变 ✓。 */}
-      <section className="space-y-3 rounded-lg border p-3">
-        <div>
-          <h3 className="text-sm font-medium">流量报告</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">按周期把流量汇总发到下面的渠道 ✓（报告就是一条通知 ✓）</p>
-        </div>
-        <div className="space-y-2">
-          {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"], ["quarter", "季报", "每季首日"]] as const).map(
-            ([k, label, when]) => (
-              <div key={k} className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <span className="block text-sm font-medium">{label}</span>
-                  <span className="block text-xs text-muted-foreground">
-                    {when} {text("report_time") || "09:00"} 发上一个完整周期
-                  </span>
-                </div>
-                <Switch
-                  checked={pickedPeriods().includes(k)}
-                  onCheckedChange={() => {
-                    const cur = pickedPeriods()
-                    const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
-                    void set("report_periods", next.join(","))
-                  }}
-                />
-              </div>
-            ),
-          )}
-        </div>
-        {pickedPeriods().length === 0 && <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>}
-        <div className="flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-sm">
-            发送时间
-            <Input type="time" className="w-28" value={text("report_time")} onChange={(e) => void set("report_time", e.target.value)} />
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            时区
-            <Input list="report-tz" className="w-28" value={text("report_tz")} onChange={(e) => void set("report_tz", e.target.value)} />
-            <datalist id="report-tz">
-              {["+08:00", "+00:00", "+09:00", "-05:00", "-08:00"].map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
-          </label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          四个周期共用这个时间 ✓ · 报告里的日期按时区切 ✓ · 而「本月已用 / 是否超限」用的是 hub 的月度窗口（可能与此处不同 ✓）
-        </p>
-      </section>
       <ChannelCard title="Telegram" icon={<Send className="size-4" />} configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Bot Token" hint={secretHint("notify_telegram_token")}>
@@ -4058,6 +4008,81 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       		</Button>
       	</div>
       </Card>
+      </Section>
+      <Section
+        title="流量报告"
+        hint="按周期把流量汇总发到上面的通知渠道（报告就是一条通知）；改完点右下角保存。"
+      >
+        <Card className="gap-6 p-6">
+          {/* 第一组：**要不要发**（四个周期各一行 ✓，说明里带上当前的发送时间 ✓ —— 改了时间这四行跟着变 ✓）。 */}
+          <section className="space-y-3">
+            <h4 className="flex items-center gap-2 text-sm font-medium">
+              <Bell className="size-4 text-muted-foreground" /> 报告周期
+            </h4>
+            {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"], ["quarter", "季报", "每季首日"]] as const).map(
+              ([k, label, when]) => (
+                <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发上一个完整周期`}>
+                  <Switch
+                    checked={pickedPeriods().includes(k)}
+                    onCheckedChange={() => {
+                      const cur = pickedPeriods()
+                      const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+                      set("report_periods", next.join(","))
+                    }}
+                  />
+                </Field>
+              ),
+            )}
+            {/* 一个都没勾时**明说不会发** ✓ —— 否则会出现"我设了时间却没收到"的排查 ✓（这类功能最常见的误会 ✓）。 */}
+            {pickedPeriods().length === 0 && (
+              <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>
+            )}
+          </section>
+      
+          {/* 第二组：**什么时候发**（与上一组用分隔线分开 ✓，与「事件设置」同一写法 ✓）。 */}
+          <section className="space-y-3 border-t pt-5">
+            <h4 className="flex items-center gap-2 text-sm font-medium">
+              <Timer className="size-4 text-muted-foreground" /> 发送时间与时区
+            </h4>
+            <Field row icon={<Timer className="size-4 text-muted-foreground" />} label="发送时间" hint="四个周期共用这一个时间">
+              <Input type="time" className="w-28" value={text("report_time")} onChange={(e) => set("report_time", e.target.value)} />
+            </Field>
+            <Field
+              row
+              icon={<CalendarClock className="size-4 text-muted-foreground" />}
+              label="时区"
+              hint="报告里的日期按它切；而「本月已用 / 是否超限」用的是 hub 的月度窗口，可能与此处不同"
+            >
+              <Input list="report-tz" className="w-28" value={text("report_tz")} onChange={(e) => set("report_tz", e.target.value)} />
+              {/* 下拉 + 手填**同一个控件** ✓（`<input list>` + `<datalist>` ✓）—— 下拉好用、手填兜底 ✓。 */}
+              <datalist id="report-tz">
+                {["+08:00", "+00:00", "+09:00", "-05:00", "-08:00"].map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+            </Field>
+          </section>
+      
+          {/* ⚠️ **必须有这个保存** ✗ —— 这一页的 `set` 是**草稿**（只改界面 ✓），
+              只有 `save(...)` 才落库 ✓。我第一版只用了 `set` ⇒ 开关点了会变、刷新就回退 ✗✗；
+              是**读「事件设置」那张卡的写法**才发现的 ✓（它与 Webhook 卡各有一个保存按钮 ✓）。 */}
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+            <Button variant="ghost" onClick={reload}>
+              重置
+            </Button>
+            <Button
+              onClick={() =>
+                save({
+                  report_periods: text("report_periods"),
+                  report_time: text("report_time"),
+                  report_tz: text("report_tz"),
+                })
+              }
+            >
+              保存流量报告
+            </Button>
+          </div>
+        </Card>
       </Section>
     </div>
   )
