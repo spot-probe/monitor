@@ -1790,6 +1790,50 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
+/// 延迟分布矩阵：横轴时间、纵轴延迟区间、颜色 = 频次（**单一色相深浅** ✓）。
+///
+/// 它回答折线图答不了的那个问题：**这段时间的样本堆在哪个区间**。
+/// 和丢包条一样是**分格**的 ✓ —— "长窗口 + 短事件"不会被压成几个像素 ✓。
+///
+/// 三处刻意的选择：
+/// - **纵轴写真实毫秒区间**（`136–146 ms`），不写 `P10–P25` 这种统计名 —— 运维读的是毫秒 ✓；
+/// - **颜色只按本图内的峰值归一** ✓：同一张图里深浅可比，**跨图不可比**（窗口与桶宽都不同 ✗）；
+/// - 丢包**不在这里** ✗ —— 它没有延迟、落不进任何区间 ✓，由下面那条色条负责 ✓。
+function HeatMatrix({ edges, buckets }: {
+  edges: number[]
+  buckets: { ts: number; counts: number[]; lost: number }[]
+}) {
+  if (edges.length < 2 || buckets.length === 0) return null
+  const bands = edges.length - 1
+  const peak = Math.max(1, ...buckets.flatMap((b) => b.counts))
+  const tone = (c: number) =>
+    c === 0 ? "bg-muted" : c <= peak * 0.25 ? "bg-primary/20" : c <= peak * 0.6 ? "bg-primary/45" : "bg-primary/80"
+  const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  return (
+    <div className="mt-2 space-y-px">
+      {[...Array(bands)].map((_, r) => {
+        const i = bands - 1 - r
+        return (
+          <div key={i} className="flex items-center gap-1.5">
+            <span className="w-24 shrink-0 text-right text-[10px] leading-none text-muted-foreground">
+              {edges[i]}–{edges[i + 1]} ms
+            </span>
+            <div className="flex flex-1 gap-px">
+              {buckets.map((b) => (
+                <span
+                  key={b.ts}
+                  className={`h-2.5 flex-1 rounded-[1px] ${tone(b.counts[i])}`}
+                  title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次`}
+                />
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 /// 丢包条：与上面那张延迟图**共用时间轴**的一行窄格子，颜色 = 那一桶的丢包率（**最差那台**）。
 ///
 /// 它与延迟图是**两条独立的信息**：延迟图答"什么时候慢"，这一条答"什么时候丢"，
@@ -2009,6 +2053,24 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
+
+  // 热力图的取数：**必须和上面这些 hooks 挨在一起** ✓（在任何提前 return 之前 ✓）——
+  // 上一版我把它插在派生的 `openTask` 之后，而那行在提前 return 之下 ⇒
+  // `rules-of-hooks` 当场报了"hook 被条件调用" ✗（那是真错，不是风格 ✓）。
+  // 依赖也**只能用顶部的 `openNodes`** ✗ 不能用 `openTask`：依赖数组是渲染期求值的，
+  // 而 `openTask` 声明在后面 ⇒ 会撞 TDZ ✗。
+  const [heat, setHeat] = useState<{ task: number; edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] } | null>(null)
+  useEffect(() => {
+    if (openNodes === null) return
+    const id = openNodes
+    let alive = true
+    api<{ edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] }>(
+      `/nodes/ping-heatmap?task=${id}&hours=${winHours}`,
+    )
+      .then((d) => { if (alive) setHeat({ task: id, edges: d.edges ?? [], buckets: d.buckets ?? [] }) })
+      .catch(() => { /* 取不到就不画矩阵 ✓ —— 折线图与色条不受影响 ✓ */ })
+    return () => { alive = false }
+  }, [openNodes, winHours])
 	// 直方图点中的桶：null = 不过滤。切点按当前这批节点均值的分位数算，不写死毫秒。
 	const [bucket, setBucket] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
@@ -2639,6 +2701,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
       						</div>
       						<div className="mt-3 rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
+				{/* 矩阵在上、色条在下，**逐列对齐** ✓（两边都是 flex-1 的格子 ✓）——
+				    于是"拥堵堆在哪几条带"与"哪几格丢包"能一眼对上 ✓。 */}
+				{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
+					<HeatMatrix edges={heat.edges} buckets={heat.buckets} />
+				)}
 				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 			</div>
       					</section>
