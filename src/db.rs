@@ -1027,9 +1027,6 @@ pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
 ///
 /// `counts` 的长度是 `edges.len() - 1`（由调用方保证）；`lost` 单列而不是混进
 /// `counts` —— 丢包没有延迟、落不进任何延迟区间，而它恰恰是最该看见的那一维。
-// 下一步的查询（时间桶 × 区间计数）会构造它 —— 现在先落地基，所以暂标 allow，
-// 而不是把警告压过去就算：两处 allow 都紧跟着这条说明，接上查询后一并删掉。
-#[allow(dead_code)]
 pub struct HeatBucket {
     pub ts: i64,
     pub counts: Vec<i64>,
@@ -1040,9 +1037,6 @@ pub struct HeatBucket {
 ///
 /// 为什么需要它：折线图只能画一个统计量（P50/P90…），回答不了"这段时间**堆在哪个区间**"；
 /// 而这个矩阵能 —— 而且它和丢包条一样是**分格**的，所以"长窗口 + 短事件"不会被压成几个像素。
-// 下一步的查询（时间桶 × 区间计数）会构造它 —— 现在先落地基，所以暂标 allow，
-// 而不是把警告压过去就算：两处 allow 都紧跟着这条说明，接上查询后一并删掉。
-#[allow(dead_code)]
 pub struct Heatmap {
     pub edges: Vec<i64>,
     pub buckets: Vec<HeatBucket>,
@@ -1589,6 +1583,54 @@ impl Db {
     ///
     /// 先前两版都把参照认错了（先是小时级 `ping_records_hourly`，再是分钟级 `ping_records`），
     /// 结果"与 X 一致"是对着一个**不是线上用的**函数成立的。这一版按 `ping_window` 的 SQL 抄。
+    /// 一个探测任务在窗口内的**延迟分布矩阵**：时间桶 × 延迟区间 → 频次。
+    ///
+    /// **只查明细（`ping_record`）** ✓ —— 小时汇总里没有频次分布（只有 `answered/lost/latency/lo/hi`），
+    /// 所以热力图的长窗口受**水位线**限制：水位线之前的数据只能靠小时行，而小时行给不出区间计数。
+    /// 于是这里显式只取明细 ⇒ 窗口上限就是明细的保留期（7 天）；更长的窗口要等汇总带上频次。
+    ///
+    /// 区间边界用 [`Db::band_edges`]（由**这个窗口内**的分位数算 ✓）—— 不写死毫秒：
+    /// 延迟的"正常"取决于目标。
+    pub fn ping_heatmap(&self, task_id: i64, since: i64, step: i64, group: Option<&str>) -> Result<Heatmap> {
+        let conn = self.conn();
+        let rolled = rolled(&conn)?.unwrap_or(0);
+        let mut stmt = conn.prepare_cached(
+            "SELECT (ts/?4)*?4 AS bucket, latency FROM ping_record
+             WHERE task_id=?1 AND ts>=?2 AND ts>=?3
+             AND (?5 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?5))
+             ORDER BY bucket",
+        )?;
+        let mut rows = stmt.query(params![task_id, since, rolled, step, group])?;
+        let mut samples: Vec<(i64, i64)> = Vec::new();
+        while let Some(row) = rows.next()? {
+            samples.push((row.get(0)?, row.get(1)?));
+        }
+        drop(rows);
+        drop(stmt);
+        // 边界只由**有效样本**算（丢包没有延迟，写进来会把分布拉低）。
+        let mut ok: Vec<i64> = samples.iter().map(|(_, l)| *l).filter(|l| *l >= 0).collect();
+        ok.sort_unstable();
+        let edges = Db::band_edges(&ok);
+        let mut buckets: Vec<HeatBucket> = Vec::new();
+        let mut i = 0;
+        while i < samples.len() {
+            let ts = samples[i].0;
+            let mut counts = vec![0i64; edges.len() - 1];
+            let mut lost = 0i64;
+            while i < samples.len() && samples[i].0 == ts {
+                let lat = samples[i].1;
+                if lat < 0 {
+                    lost += 1;
+                } else {
+                    counts[Db::band_of(&edges, lat)] += 1;
+                }
+                i += 1;
+            }
+            buckets.push(HeatBucket { ts, counts, lost });
+        }
+        Ok(Heatmap { edges, buckets })
+    }
+
     pub fn ping_series_by_task(
         &self,
         task_id: i64,
@@ -2688,6 +2730,20 @@ impl Db {
             edges.push(edges[0] + 1);
         }
         edges
+    }
+
+    /// 一个延迟值落在第几条带（0 起）。区间按 `[lo, hi)` 取，**最后一个带包含上界**
+    /// —— 否则"恰好等于窗口最大值的那个样本"会掉出所有带子，凭空少一个点。
+    ///
+    /// 抽成纯函数是为了能不依赖数据库直接测边界：差一格是这类计数最典型的错，
+    /// 而它在图上只表现为"某一格颜色略浅"，肉眼根本看不出来。
+    pub fn band_of(edges: &[i64], latency: i64) -> usize {
+        debug_assert!(edges.len() >= 2, "至少两个边界才成一条带子");
+        let mut k = 0;
+        while k + 1 < edges.len() && latency >= edges[k + 1] {
+            k += 1;
+        }
+        k.min(edges.len().saturating_sub(2))
     }
 
     pub fn ping_window(
@@ -5466,6 +5522,21 @@ mod heatmap_tests {
         for w in e.windows(2) {
             assert!(w[0] < w[1], "边界必须严格递增：{:?}", e);
         }
+    }
+
+    /// 分带：区间按 `[lo, hi)`，**最后一个带包含上界**。
+    #[test]
+    fn band_of_keeps_the_top_sample_inside() {
+        let e = vec![10, 20, 30, 40];
+        assert_eq!(Db::band_of(&e, 10), 0, "等于下界 → 第一条带");
+        assert_eq!(Db::band_of(&e, 19), 0, "下界之内");
+        assert_eq!(Db::band_of(&e, 20), 1, "等于边界 → 归上一条带（[lo, hi)）");
+        assert_eq!(Db::band_of(&e, 39), 2);
+        // **恰好等于最大值**必须落在最后一条带里，否则"窗口里最慢的那个样本"
+        // 会掉出所有带子 —— 总计数与采样数对不上，而图上只是"某格略浅" ✗。
+        // `e` 有 4 个边界 ⇒ **3 条带**（下标 0..=2），所以"最后一条"是 2 —— 不是 3。
+        assert_eq!(Db::band_of(&e, 40), 2, "等于上界 → 最后一条带");
+        assert_eq!(Db::band_of(&e, 999), 2, "超出上界也归最后一条（防御，靠 .min 夹取）");
     }
 
     /// 没有样本时给一条退化带子，调用方不必特判。
