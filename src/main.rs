@@ -11,6 +11,7 @@ mod auth;
 mod db;
 mod frontend;
 mod fx;
+mod geo;
 mod notify;
 mod report;
 mod report_watch;
