@@ -1023,6 +1023,31 @@ pub type AtRiskRow = (String, String, f64, i64);
 /// 三条榜：延迟最差 · 丢包最多 · 离线最久（后者是 `(节点名, last_seen)`）。
 pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
 
+/// 热力图的一个时间桶：每条的计数 + 丢包数。
+///
+/// `counts` 的长度是 `edges.len() - 1`（由调用方保证）；`lost` 单列而不是混进
+/// `counts` —— 丢包没有延迟、落不进任何延迟区间，而它恰恰是最该看见的那一维。
+// 下一步的查询（时间桶 × 区间计数）会构造它 —— 现在先落地基，所以暂标 allow，
+// 而不是把警告压过去就算：两处 allow 都紧跟着这条说明，接上查询后一并删掉。
+#[allow(dead_code)]
+pub struct HeatBucket {
+    pub ts: i64,
+    pub counts: Vec<i64>,
+    pub lost: i64,
+}
+
+/// 一个探测任务在窗口内的**延迟分布矩阵**：时间桶 × 延迟区间 → 频次。
+///
+/// 为什么需要它：折线图只能画一个统计量（P50/P90…），回答不了"这段时间**堆在哪个区间**"；
+/// 而这个矩阵能 —— 而且它和丢包条一样是**分格**的，所以"长窗口 + 短事件"不会被压成几个像素。
+// 下一步的查询（时间桶 × 区间计数）会构造它 —— 现在先落地基，所以暂标 allow，
+// 而不是把警告压过去就算：两处 allow 都紧跟着这条说明，接上查询后一并删掉。
+#[allow(dead_code)]
+pub struct Heatmap {
+    pub edges: Vec<i64>,
+    pub buckets: Vec<HeatBucket>,
+}
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -2631,6 +2656,40 @@ impl Db {
     /// the panel reads today, and this is switched over to it only once the two are
     /// known to agree. Same assignment filter, so a probe taken off the node stops
     /// appearing here too.
+    /// 热力图的区间边界：**由窗口内的分位数算出来**，不写死毫秒。
+    ///
+    /// 为什么必须这样：延迟的「正常」取决于目标 —— 到香港 3 ms 与到洛杉矶 150 ms 的
+    /// "慢"完全不是一回事，写死 `50/100/200` 只会让一张图在一个目标上挤成一条、
+    /// 在另一个目标上散成一片。本仓在别处已经写过同一条判断（"延迟的「正常」取决于目标，
+    /// 所以不写死毫秒阈值"），这里沿用。
+    ///
+    /// 返回 `n+1` 个边界（含首尾）：`[min, p10, p25, p50, p75, p90, max]` ⇒ 6 条带。
+    /// 用**最近秩**取分位（不做插值）：运维读的是"这一段里有多少个点"，
+    /// 边界取一个**真实出现过的值**比取一个插值出来的小数更好解释。
+    pub fn band_edges(sorted: &[i64]) -> Vec<i64> {
+        if sorted.is_empty() {
+            // 没有样本时给一条退化的带子 —— 让调用方不必特判，画出来就是"空的"。
+            return vec![0, 1];
+        }
+        let n = sorted.len();
+        let mut edges = vec![sorted[0]];
+        for q in [0.10f64, 0.25, 0.50, 0.75, 0.90] {
+            let i = ((q * (n as f64 - 1.0)).round() as usize).min(n - 1);
+            edges.push(sorted[i]);
+        }
+        edges.push(sorted[n - 1]);
+        // 边界必须**严格递增**：分位数可能重复（样本少、或大量同值时），
+        // 而重复的边界会造出宽度为 0 的带子 —— 那种带子永远为空，图上是噪音。
+        edges.dedup();
+        // 但 dedup 也可能把边界塌缩到**只剩一个值** ⇒ 一条带子都没有 ⇒ 图上是空的。
+        // （大量同值时就会这样：全部样本都在同一个毫秒上 —— 单测 `…survive_a_single_value` 抓到过。）
+        // 这时给一条**退化但可用**的带子，调用方不必特判。
+        if edges.len() < 2 {
+            edges.push(edges[0] + 1);
+        }
+        edges
+    }
+
     pub fn ping_window(
         &self,
         node_id: i64,
@@ -5372,5 +5431,46 @@ mod tests {
         // 而**平均**只有 (99 + 19×10)/20 = 14.45 —— 平均与 P95 的差距就是「分布带」要表达的东西。
         assert!((r[5] - 14.45).abs() < 0.01, "平均应为 14.45，实际 {}", r[5]);
         assert!(r[9] > r[5] * 6.0, "P95 应当远高于平均，这正是分布带的意义");
+    }
+}
+
+#[cfg(test)]
+mod heatmap_tests {
+    use super::*;
+
+    /// 边界由分位数算，且**含首尾**、**严格递增**。
+    #[test]
+    fn band_edges_follow_the_window_quantiles() {
+        let v: Vec<i64> = (1..=100).collect();
+        let e = Db::band_edges(&v);
+        // 6 条带 ⇒ 7 个边界，两端就是最小与最大（运维要看的是"最快/最慢到多少"）。
+        assert_eq!(e[0], 1, "首个边界应当是最小值");
+        assert_eq!(*e.last().unwrap(), 100, "末个边界应当是最大值");
+        // 最近秩：100 个点时 p10 → 下标 round(0.10*99)=10 → 值 11。
+        assert_eq!(e[1], 11, "p10");
+        assert_eq!(e[2], 26, "p25");
+        assert_eq!(e[3], 51, "p50");
+        assert_eq!(e[4], 75, "p75");
+        assert_eq!(e[5], 90, "p90");
+        // 严格递增（重复值被去掉）—— 否则会出现宽度为 0 的带子（永远为空、只是噪音）。
+        for w in e.windows(2) {
+            assert!(w[0] < w[1], "边界必须严格递增：{:?}", e);
+        }
+    }
+
+    /// 大量同值时边界会塌缩 —— 必须仍是严格递增，且至少留一条能用的带子。
+    #[test]
+    fn band_edges_survive_a_single_value() {
+        let e = Db::band_edges(&[42, 42, 42, 42]);
+        assert!(e.len() >= 2, "至少两个边界才成一条带子：{:?}", e);
+        for w in e.windows(2) {
+            assert!(w[0] < w[1], "边界必须严格递增：{:?}", e);
+        }
+    }
+
+    /// 没有样本时给一条退化带子，调用方不必特判。
+    #[test]
+    fn band_edges_handle_no_samples() {
+        assert_eq!(Db::band_edges(&[]), vec![0, 1]);
     }
 }
