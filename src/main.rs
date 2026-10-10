@@ -15,6 +15,7 @@ mod geo;
 mod notify;
 mod report;
 mod report_watch;
+mod risk;
 mod theme;
 
 use std::collections::HashMap;
