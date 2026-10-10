@@ -225,6 +225,20 @@ pub const SOURCES: [Source; 5] = [
     },
 ];
 
+/// 磁盘上那份库文件**够不够新** ✓（够新 ⇒ 这一轮不必下载 ✓）。
+///
+/// ⚠️ **为什么这个判断必须有** ✗✗ —— 2026-10-11 现场：
+/// 记录"上次什么时候拉的"原本只是**进程内的一个局部变量** ✓ ⇒ **一重启就忘** ✗ ⇒
+/// 每次重启都重新下载 127 MB ✓ ⇒ 又 OOM ✓ ⇒ 又重启 ✓ ⇒ **死循环** ✗✗
+///（日志里 restart counter 一路涨到 12 ✓）。
+/// ⇒ 判据改成看**文件自己的 mtime** ✓✓：既**不需要任何新状态** ✓，
+/// 也**天然跨重启** ✓ —— 一台刚拉过的 hub，重启一次不会再花 127 MB 的流量 ✓。
+///
+/// 纯函数 ✓（时间由调用方给 ✓）⇒ 边界能测 ✓：文件不存在 ✓ / 刚拉过 ✓ / 已经过期 ✓。
+pub fn recently_fetched(age: Option<std::time::Duration>, every: std::time::Duration) -> bool {
+    age.is_some_and(|age| age < every)
+}
+
 /// 把配置里的 URL 展开成**这一次真正要取**的地址 ✓ —— 只替换日期占位符 ✓。
 ///
 /// 支持 `{YYYY}` ✓ · `{YYYY-MM}` ✓ · `{YYYY-MM-DD}` ✓（都按给定的日期 ✓）。
@@ -466,6 +480,15 @@ pub async fn watch(app: crate::Shared) {
         tracing::info!("geo: {} of {} databases configured", configured, SOURCES.len());
         for source in SOURCES.iter() {
             // 第一次必然到点 ✓（表是空的 ✓）⇒ 启动后 30 秒那一轮会把该拉的都拉了 ✓。
+            // **文件自己说了算** ✓✓ —— 见 `recently_fetched` 的说明 ✓：
+            // 只看进程内的计时 ✗ 会让"重启"变成"重新下载 127 MB" ✓ ✗。
+            let age = std::fs::metadata(app.data_dir.join(source.name))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok());
+            if recently_fetched(age, source.every) {
+                continue; // 磁盘上那份还新 ✓ ⇒ 这一轮不碰它 ✓（重启也只是重跑这一句 ✓）
+            }
             let due = last.get(source.name).is_none_or(|t| t.elapsed() >= source.every);
             if due {
                 last.insert(source.name, std::time::Instant::now());
@@ -612,6 +635,29 @@ mod tests {
         enc.write_all(&plain).unwrap();
         let no_db = enc.finish().unwrap();
         assert!(unpack(Pack::TarGz, "x.mmdb", &no_db).is_err(), "包里没有 .mmdb ⇒ 拒绝");
+    }
+
+    /// **重启不该重新下载** ✓✓ —— 这条测试盯的就是那个死循环的成因 ✗：
+    /// "上次拉取时间"只存在进程内 ⇒ 重启即遗忘 ⇒ 反复重下 127 MB ⇒ OOM ⇒ 死循环 ✓。
+    /// 判据改成看文件 mtime 之后 ✓：够新就跳过 ✓，与进程活多久无关 ✓。
+    #[test]
+    fn a_recent_file_is_not_fetched_again_even_after_a_restart() {
+        let day = std::time::Duration::from_secs(24 * 3600);
+        assert!(!recently_fetched(None, day), "文件不在 ⇒ 该拉 ✓");
+        assert!(
+            recently_fetched(Some(std::time::Duration::from_secs(60)), day),
+            "刚拉过 ⇒ 跳过 ✓（重启也一样 ✓）"
+        );
+        assert!(
+            recently_fetched(Some(day - std::time::Duration::from_secs(1)), day),
+            "还差一秒到期 ⇒ 仍跳过 ✓"
+        );
+        assert!(!recently_fetched(Some(day), day), "到点 ⇒ 该拉 ✓");
+        assert!(!recently_fetched(Some(day * 2), day), "过期 ⇒ 该拉 ✓");
+        // Tor 那种一小时一刷的 ✓：一小时零一秒前拉过 ⇒ 该拉 ✓
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(!recently_fetched(Some(hour + std::time::Duration::from_secs(1)), hour));
+        assert!(recently_fetched(Some(std::time::Duration::from_secs(3599)), hour));
     }
 
     /// URL 里的日期占位符 ✓✓ —— 这条测试的意义是"**不必等到下个月**"就能验 ✓：
