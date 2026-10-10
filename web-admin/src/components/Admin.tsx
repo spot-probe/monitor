@@ -2743,15 +2743,26 @@ function Ping({ nodes }: { nodes: Node[] }) {
 						))}
 					</div>
 					<BandChart points={pct} />
-					{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
-						<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
-					)}
 					<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 					<span />
 					<p className="flex items-baseline justify-between text-[10px] text-muted-foreground">
 						<span>每一格 = 一个时间桶；丢包取该桶里最差的那台</span>
 						<span className="tnum">最高 {stats[openTask.id]?.loss ?? 0}%</span>
 					</p>
+					{/* **热力图独立成一块** ✓（维护者提的 ✓）：上面那张图与色条讲"随时间"✓，
+					    矩阵讲"分布"✗ —— 两件事挤进同一个网格，左列就得分身伺候两个纵轴 ✓。
+					    现在它是同一张卡片里的独立一段 ✓，有自己的小标题与自己的一套区间标签 ✓。 */}
+					{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
+						<div className="col-span-2 mt-4 border-t border-border/60 pt-2">
+							<p className="flex items-center gap-1.5 text-xs font-medium">
+								延迟分布
+								<Help>按**时间 × 延迟区间**统计每一格里有多少个样本。纵轴是这个窗口内的真实毫秒区间（由数据的分位数算出，不是写死的档位）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里 —— 它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
+							</p>
+							<div className="mt-2 grid grid-cols-[4.5rem_1fr] items-center gap-y-0.5">
+								<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
+							</div>
+						</div>
+					)}
 				</div>
 			</div>
       					</section>
