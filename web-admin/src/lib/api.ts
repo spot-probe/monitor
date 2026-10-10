@@ -64,6 +64,17 @@ export type Node = {
   country_pin?: string
   /** Panel only. The looked-up country, which a pin hides. */
   country_auto?: string
+  /** IP 结论（hub 用**本地**库查出 ✓）。整块可缺 ✓ —— 没查过、或查的地址已过期 ⇒ 不给 ✓。 */
+  quality?: {
+    country?: string | null
+    city?: string | null
+    subdivision?: string | null
+    latitude?: number | null
+    longitude?: number | null
+    time_zone?: string | null
+    asn?: number | null
+    org?: string | null
+  }
   ip?: string
   ipv4?: string
   ipv6?: string

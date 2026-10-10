@@ -564,6 +564,46 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
             </div>
             <p className="text-xs leading-relaxed text-muted-foreground">
               留空为自动。国家/地区填两位代码，如 CN；手填的值会一直显示，IP 变了要自己改。
+            {/* IP 质量（IP 结论 ✓）—— 放在"国家/地区"旁边而不是只挂在悬停里 ✓：
+                这些是**节点事实**，该看得见 ✓（与"报错不该只活在 hover 里"同一条理由 ✓）。
+                数据由 hub 用**本地**库查出 ✓（不外发 ✓），并且只在"属于当前地址"时才作数 ✓。 */}
+            {(() => {
+              const q = node.quality
+              const known = !!q && (q.asn != null || q.org || q.city || q.country)
+              const where = [q?.city, q?.subdivision, q?.country].filter(Boolean).join(" · ")
+              return (
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <p className="text-xs font-medium">IP 质量</p>
+                  {known ? (
+                    <div className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+                      <p>
+                        ASN <span className="font-mono text-foreground">AS{q.asn ?? "?"}</span>
+                        {q?.org ? ` · ${q.org}` : ""}
+                      </p>
+                      {where && <p>位置 {where}</p>}
+                      {q?.latitude != null && q?.longitude != null && (
+                        <p>
+                          坐标{" "}
+                          <a
+                            className="font-mono text-primary underline underline-offset-2"
+                            href={`https://check.place/${q.latitude},${q.longitude},15,cn`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {q.latitude.toFixed(4)}, {q.longitude.toFixed(4)}
+                          </a>
+                        </p>
+                      )}
+                      {q?.time_zone && <p>时区 {q.time_zone}</p>}
+                    </div>
+                  ) : (
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      还没查到（或这台机器换过出口，旧结论已不再作数 ✓）。hub 会按需重查，稍后回来看。
+                    </p>
+                  )}
+                </div>
+              )
+            })()}
             </p>
           </div>
         </div>
