@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS traffic (
   day_start TEXT NOT NULL DEFAULT ''
 );
 
+  -- 按天的流量快照：`traffic` 只存"今天 / 本月 / 累计"三个**当前**窗口，
+  -- 而日报要的是"昨天"、周报要 7 天、季报要 3 个月 —— 那些边界一过就取不到了。
+  -- 每天在**日切那一刻**写一行（与 `day_start` 同一次判断，不另起一套）。
+  -- 于是周/月/季报全都变成**这张表的区间求和**，只有一套逻辑。
+  CREATE TABLE IF NOT EXISTS traffic_day (
+    node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+    date    TEXT    NOT NULL,
+    rx      INTEGER NOT NULL DEFAULT 0,
+    tx      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (node_id, date)
+  );
+
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
@@ -245,7 +257,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -546,6 +558,21 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 15 {
         migrate_to_15(&tx)?;
     }
+    // 16：按天的流量快照表。**从上一版升上来的库**必须在这里补建 ✓ ——
+    // 全新库由上面的 SCHEMA 带上 ✓，所以只有"升级路径"的测试碰得到这一块 ✓
+    // （1.9.12 的教训：步骤必须在自己的 `if from < N` 里，且盖章在块外 ✓）。
+    if from < 16 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS traffic_day (
+               node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+               date    TEXT    NOT NULL,
+               rx      INTEGER NOT NULL DEFAULT 0,
+               tx      INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (node_id, date)
+             );",
+        )?;
+    }
+
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -4668,6 +4695,39 @@ mod tests {
     /// **升级路径的闸（1.9.12 的教训照搬）**：一个"14 版"的库（缺 allow_remote_upgrade）迁移后
     /// 必须有那一列、且戳到 15。全新库的 SCHEMA 本来就带它，`add_column` 会当「重复列」忽略，
     /// 所以只有这种"从上一版升上来"的测试才碰得到真正的升级路径。
+    /// **升级路径的闸**（照 1.9.12 那条搬）：一个"15 版"的库（没有 traffic_day）迁移后
+    /// 必须有这张表、且戳到 16 ✓。全新库的 SCHEMA 本来就带上它 ✗ —— 所以
+    /// **只有这种"从上一版升上来"的测试才碰得到真正的升级路径** ✓。
+    #[test]
+    fn migrating_from_15_adds_the_traffic_day_table() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("DROP TABLE traffic_day", []).unwrap();
+        conn.execute("PRAGMA user_version = 15", []).unwrap();
+        let has = |c: &rusqlite::Connection| -> bool {
+            c.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='traffic_day'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        };
+        assert!(!has(&conn), "前提：表已删掉");
+        migrate(&conn, 15).unwrap();
+        assert!(has(&conn), "迁移后必须有 traffic_day");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // 表形也要对：漏了主键会让同一天写两次、周报翻倍。
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(traffic_day)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["node_id", "date", "rx", "tx"], "列与顺序都要对");
+    }
+
     #[test]
     fn migrating_from_14_adds_the_allow_remote_upgrade_column() {
         let db = Db::open(":memory:").unwrap();
