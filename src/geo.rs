@@ -75,7 +75,12 @@ pub fn quality_from_json(v: &serde_json::Value) -> Quality {
     Quality {
         country: s_at(&["country", "iso_code"]),
         // 城市名优先英文 ✓（面板与报告都是中文界面 ✓，但英文名比"某些库只给本地名"更通用 ✓）。
-        city: s_at(&["city", "names", "en"]).or_else(|| s_at(&["city", "names", "zh"])),
+        // 英文优先 ✓；退回中文时**两个键都试** ✗：MaxMind 用 `zh` ✓，
+        // 而 DB-IP 的样例里是 **`zh-CN`** ✓（对着它的格式页核实过 ✓）——
+        // 只写 `zh` 的话，用 DB-IP 时中文名会永远取不到 ✓，而那是静默的 ✗。
+        city: s_at(&["city", "names", "en"])
+            .or_else(|| s_at(&["city", "names", "zh"]))
+            .or_else(|| s_at(&["city", "names", "zh-CN"])),
         subdivision: v
             .get("subdivisions")
             .and_then(|a| a.get(0))
@@ -100,6 +105,17 @@ pub fn quality_from_json(v: &serde_json::Value) -> Quality {
 // 调用它的是**下一步**：把结论落到节点上并暴露给面板与主题（块 3 ✓）。
 // 在那之前它只有测试在用 ✗ ⇒ 暂标 allow，紧跟着这条说明，接上即删 ✓
 //（`Quality` / `merge` 的 allow 在下一轮就能删 ✓ —— 它们已经被 `lookup` 用起来了 ✓）。
+// 城市库的候选：优先 MaxMind，没有就退回 DB-IP ✓✓。
+//
+// 两家的字段名互相兼容 ✓（DB-IP 官方写明"尽量贴近既有工具的 schema" ✓，
+// 且 country.iso_code / city.names / location.latitude 等都已对着它的格式页样例核实 ✓），
+// 所以解析那一份代码两边通用 ✓。
+// 差别只有一处 ✗：DB-IP 没有 location.time_zone ⇒ 用 DB-IP 时"时区"是空的 ✓
+//（空比错好 ✓，面板上也如实显示为未知 ✓）。
+const CITY_FILES: [&str; 2] = ["GeoLite2-City.mmdb", "dbip-city-lite.mmdb"];
+/// ASN 库的候选 ✓（同理 ✓）。
+const ASN_FILES: [&str; 2] = ["GeoLite2-ASN.mmdb", "dbip-asn-lite.mmdb"];
+
 pub fn lookup(dir: &Path, ip: std::net::IpAddr) -> Quality {
     let read = |name: &str| -> Option<Quality> {
         let path = dir.join(name);
@@ -132,7 +148,9 @@ pub fn lookup(dir: &Path, ip: std::net::IpAddr) -> Quality {
             }
         }
     };
-    merge(read(SOURCES[0].name), read(SOURCES[1].name))
+    // 按候选顺序问一遍 ✓，用**第一个存在**的那份 ✓（都不在 ⇒ 未知 ✓，不是错误 ✓）。
+    let first = |names: &[&str]| names.iter().find_map(|n| read(n));
+    merge(first(&CITY_FILES), first(&ASN_FILES))
 }
 
 /// 库清单里的一个库 ✓。
@@ -164,7 +182,7 @@ pub struct Source {
 /// MaxMind 是 mmdb ✓、Tor 出口是纯文本 ✓；
 /// IP2Proxy LITE / DB-IP 的发布形态（mmdb ✗ BIN ✗ CSV ✗）**我没有核实** ✓，
 /// 所以先不写进来 ✓ —— 核实之后各加一行即可 ✓（它们的形态字段已经准备好 ✓）。
-pub const SOURCES: [Source; 3] = [
+pub const SOURCES: [Source; 5] = [
     Source {
         name: "GeoLite2-City.mmdb",
         pack: Pack::TarGz,
@@ -179,6 +197,22 @@ pub const SOURCES: [Source; 3] = [
         shape: Shape::Mmdb,
         key: "geo_asn_url",
         min_bytes: 1 << 20,
+        every: std::time::Duration::from_secs(24 * 3600),
+    },
+    Source {
+        name: "dbip-city-lite.mmdb",
+        shape: Shape::Mmdb,
+        key: "geo_city_url",
+        min_bytes: 1 << 20,
+        pack: Pack::Gzip,
+        every: std::time::Duration::from_secs(24 * 3600),
+    },
+    Source {
+        name: "dbip-asn-lite.mmdb",
+        shape: Shape::Mmdb,
+        key: "geo_asn_url",
+        min_bytes: 1 << 19,
+        pack: Pack::Gzip,
         every: std::time::Duration::from_secs(24 * 3600),
     },
     Source {
@@ -229,9 +263,6 @@ pub enum Pack {
     /// 裸文件 ✓（Tor 列表 ✓）。
     Raw,
     /// `.gz` ✓（DB-IP 的 `.mmdb.gz` ✓）。
-    // 还没人用 ✗：DB-IP 就是**零注册**那条路 ✓（下一步加进 `SOURCES` ✓）——
-    // 先把解压这一层与它的往返测试做好 ✓，加来源只是各一行 ✓。
-    #[allow(dead_code)]
     Gzip,
     /// `.tar.gz` ✓（MaxMind 的下载包 ✓ —— 里面还带一层目录 ✓，所以要挑出那个 `.mmdb` ✓）。
     TarGz,
