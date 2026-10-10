@@ -61,6 +61,30 @@ pub fn title(period: Period, from: &str, to: &str, tz: &str) -> String {
     format!("【流量{name}】{from} ~ {to} · {tz}")
 }
 
+/// **覆盖说明**：快照从哪天开始，这一段里实际覆盖了多少天 ✓。
+///
+/// **半年报与年报必须带它** ✗：快照是"启用那天"才开始有的 ✓ ⇒ 一年后第一份年报，
+/// 区间里可能只有几个月的行 ✓ —— 而我们是"区间里有什么就加什么" ✓
+/// ⇒ **总量会偏小，且报告里看不出来** ✗✗。把这句写在报告里，是唯一能让读者自己判断的办法 ✓。
+///
+/// 覆盖完整时**返回 `None`** ✓（日报/周报通常如此 ✓）—— 不给每次报告都加一行废话 ✓，
+/// 只在"确实不全"时说话 ✓。
+pub fn coverage_note(from: &str, to: &str, earliest: Option<&str>) -> Option<String> {
+    let e = earliest?;
+    // 字典序即日期序 ✓（`YYYY-MM-DD` ✓）—— 所以这里不需要解析日期 ✓。
+    if e <= from {
+        return None;
+    }
+    let days = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d")
+        .ok()
+        .zip(chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d").ok())
+        .zip(chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d").ok())
+        // 日期**相减**取天数 ✓ —— `Range<NaiveDate>` 不能迭代 ✗（chrono 的日期不是 `Step` ✓）。
+        .map(|((f, t), e)| (t - e.max(f)).num_days().max(0))
+        .unwrap_or(0);
+    Some(format!("本期覆盖 {days} 天（快照自 {e} 起 —— 更早的用量没有留存，总量偏小）"))
+}
+
 /// 正文 ✓。`rows` 与 `prev` 由调用方按总量降序传进来 ✓（顺序在这里不再排 ✓ —— 排一次就够 ✓）。
 pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
     let sum = |v: &[(String, i64, i64)]| v.iter().fold((0i64, 0i64), |a, r| (a.0 + r.1, a.1 + r.2));
@@ -172,6 +196,25 @@ mod tests {
         assert!(!many.contains("node020"), "第 21 台不该在：{}", many);
         assert!(many.contains("…还有 10 台 · 合计 20.0 GB"), "汇总行：{}", many);
         assert!(many.contains("合计  上行 30.0 GB · 下行 30.0 GB · 总计 60.0 GB"), "总量按全部算：{}", many);
+    }
+
+    /// 覆盖说明：**完整时不说话** ✓、不全时说清从哪天起 ✓ —— 这一句就是"别让第一份年报在说谎" ✓。
+    #[test]
+    fn the_coverage_note_only_speaks_when_something_is_missing() {
+        // 快照比区间起点更早 ⇒ 完整 ⇒ **不写** ✓。
+        assert_eq!(coverage_note("2026-03-01", "2026-03-02", Some("2020-01-01")), None);
+        assert_eq!(
+            coverage_note("2026-03-01", "2026-03-02", Some("2026-03-01")),
+            None,
+            "正好从起点开始也算完整"
+        );
+        // 还没有任何快照 ⇒ 也不写（那种情况本来就整份都没有内容 ✓）。
+        assert_eq!(coverage_note("2026-03-01", "2026-03-02", None), None);
+        // 快照晚于起点 ⇒ **必须说** ✓，天数按"从快照那天到区间终点" ✓。
+        let n = coverage_note("2026-01-01", "2026-04-01", Some("2026-02-01")).unwrap();
+        assert!(n.contains("本期覆盖 59 天"), "{n}");
+        assert!(n.contains("快照自 2026-02-01 起"), "{n}");
+        assert!(n.contains("总量偏小"), "要说清后果，而不是只报个数字：{n}");
     }
 
     /// 上期为 0（或没有上期）时**不写百分比** ✓，但要说明原因 ✓ —— 不能悄悄省略 ✗。

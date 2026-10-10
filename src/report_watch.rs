@@ -142,7 +142,12 @@ fn tick(app: &App) -> anyhow::Result<()> {
             .map(|r| (r.name, r.rx, r.tx))
             .collect::<Vec<_>>();
         let title = crate::report::title(p, &from, &to, &label(offset));
-        let message = crate::report::body(&rows, &prev);
+        // **覆盖说明拼在末尾** ✓（脚注的位置 ✓）—— 只在"确实不全"时才有内容 ✓（见它的说明 ✓）。
+        let message = match crate::report::coverage_note(&from, &to, app.db.earliest_traffic_day().as_deref())
+        {
+            Some(note) => format!("{}\n\n{note}", crate::report::body(&rows, &prev)),
+            None => crate::report::body(&rows, &prev),
+        };
         notify::send(
             app,
             Note { event: "traffic", node: String::new(), title, message, ..Default::default() },

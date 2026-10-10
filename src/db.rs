@@ -1856,6 +1856,18 @@ impl Db {
             .collect())
     }
 
+    /// 快照里**最早的一天** ✓（`None` = 还没有任何快照 ✓）。
+    ///
+    /// 报告的"本期覆盖 N 天"要它 ✓（见 `report::coverage_note` ✓）——
+    /// 半年报与年报必须带这句 ✗：快照是从启用那天才有的 ✓，否则第一份年报会静悄悄地偏小 ✓。
+    pub fn earliest_traffic_day(&self) -> Option<String> {
+        let conn = self.conn();
+        conn.query_row("SELECT MIN(date) FROM traffic_day", [], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+            .filter(|d| !d.is_empty())
+    }
+
     /// 每台节点的**月度额度**（0 = 不限 ✓，与 `node.traffic_limit` 同一约定 ✓）。
     ///
     /// 报告的"超限 / 将超限"要它 ✓ —— 额度是**月度**的 ✓，所以判断看的是"本月已用"
