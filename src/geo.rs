@@ -148,16 +148,41 @@ pub struct Source {
     pub key: &'static str,
     /// 小于这个字节数一定是坏的 ✓（一个 200 字节的"城市库"不可能是真的 ✓）。
     pub min_bytes: usize,
+    /// **多久刷一次** ✓✓ —— 必须按来源定 ✗，不能一刀切：
+    /// MaxMind 的 EULA 限**每天 30 次下载** ✗（官方页写明 ✓），而 Tor 列表随时小改、没有额度 ✓。
+    pub every: std::time::Duration,
 }
 
-/// 现在纳入的库 ✓ —— **只放我确认过形态的** ✗：
+/// 现在纳入的库 ✓ —— **只放我确认过形态的** ✗。
+///
+/// ⚠️ 每个库的 `every` 不是随手定的 ✓：MaxMind 官方写明**每天最多 30 次下载** ✗，
+/// 所以那两个是**每天一次** ✓（离限额很远 ✓）；而 Tor 列表没有额度限制 ✓，所以每小时 ✓。
+/// 把这条约束放在这里 ✓，比放在某个循环里更不容易被改坏 ✓。
 /// MaxMind 是 mmdb ✓、Tor 出口是纯文本 ✓；
 /// IP2Proxy LITE / DB-IP 的发布形态（mmdb ✗ BIN ✗ CSV ✗）**我没有核实** ✓，
 /// 所以先不写进来 ✓ —— 核实之后各加一行即可 ✓（它们的形态字段已经准备好 ✓）。
 pub const SOURCES: [Source; 3] = [
-    Source { name: "GeoLite2-City.mmdb", shape: Shape::Mmdb, key: "geo_city_url", min_bytes: 1 << 20 },
-    Source { name: "GeoLite2-ASN.mmdb", shape: Shape::Mmdb, key: "geo_asn_url", min_bytes: 1 << 20 },
-    Source { name: "tor-exit.txt", shape: Shape::Text, key: "geo_tor_url", min_bytes: 1 << 10 },
+    Source {
+        name: "GeoLite2-City.mmdb",
+        shape: Shape::Mmdb,
+        key: "geo_city_url",
+        min_bytes: 1 << 20,
+        every: std::time::Duration::from_secs(24 * 3600),
+    },
+    Source {
+        name: "GeoLite2-ASN.mmdb",
+        shape: Shape::Mmdb,
+        key: "geo_asn_url",
+        min_bytes: 1 << 20,
+        every: std::time::Duration::from_secs(24 * 3600),
+    },
+    Source {
+        name: "tor-exit.txt",
+        shape: Shape::Text,
+        key: "geo_tor_url",
+        min_bytes: 1 << 10,
+        every: std::time::Duration::from_secs(3600),
+    },
 ];
 
 /// 把配置里的 URL 展开成**这一次真正要取**的地址 ✓ —— 只替换日期占位符 ✓。
@@ -319,26 +344,29 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     }
 }
 
-/// 拉一轮**全部**库 ✓。
-pub async fn refresh(app: &App) -> usize {
-    let mut updated = 0;
-    for source in SOURCES.iter() {
-        if fetch(app, source).await {
-            updated += 1;
-        }
-    }
-    updated
-}
-
-/// 启动时拉一次，然后**低频**刷新 ✓。
+/// 启动后不久拉一轮 ✓，然后**每个库按自己的间隔**刷 ✓。
 ///
-/// 间隔按"库本身更新很慢"来定 ✓（MaxMind 每周 ✓、Tor 列表随时小改 ✓）——
-/// 每小时一次足够 ✓，而且**没有任何额度** ✓（这些是静态文件 ✓）。
+/// ⚠️ **不能一刀切** ✗（我原来是『每小时把所有库都拉一遍』✗）：
+/// MaxMind 官方限**每天 30 次下载** ✓ —— 每小时一次就是每天 24 次城市 + 24 次 ASN = **48 次** ✗✗，
+/// 超限之后的表现是『库更新不了、IP 质量慢慢变旧』✓，而**没有任何报错指向这里** ✗。
+/// 所以间隔写在每个 [`Source`] 上 ✓（见那里关于 30 次的注释 ✓）。
+///
+/// 循环本身**每 10 分钟**醒一次 ✓，只为看谁到点了 ✓ —— 比按最长间隔睡更稳 ✓：
+/// 将来加一个『每小时』的新库，也不用改这里 ✓。
 pub async fn watch(app: crate::Shared) {
+    let mut last: std::collections::HashMap<&'static str, std::time::Instant> =
+        std::collections::HashMap::new();
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     loop {
-        refresh(&app).await;
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        for source in SOURCES.iter() {
+            // 第一次必然到点 ✓（表是空的 ✓）⇒ 启动后 30 秒那一轮会把该拉的都拉了 ✓。
+            let due = last.get(source.name).is_none_or(|t| t.elapsed() >= source.every);
+            if due {
+                last.insert(source.name, std::time::Instant::now());
+                let _ = fetch(&app, source).await;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
     }
 }
 
