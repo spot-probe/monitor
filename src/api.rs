@@ -1546,6 +1546,9 @@ const READABLE_SETTINGS: &[&str] = &[
     "geo_city_url",
     "geo_asn_url",
     "geo_tor_url",
+    // 在线风险库（默认关 ✓；key 空 = 没配该家 ✓）。
+    "risk_enabled",
+    "risk_abuseipdb_key",
 ];
 
 /// How long a release lookup stands before the panel asks GitHub again, and how
@@ -2686,6 +2689,13 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
             (!value.is_empty() && !value.starts_with("https://"))
                 .then_some("geo database URL must start with https://".into())
         }
+        // 在线风险库 ✓。**开关默认关** ✓✓ —— "把节点 IP 发给第三方"必须是**显式**选择 ✓，
+        // 而不是升级之后悄悄开始发 ✓（那是这一块唯一涉及隐私的地方 ✓）。
+        "risk_enabled" if !matches!(value, "on" | "off") => Some("risk lookup must be on or off".into()),
+        // AbuseIPDB 的 key：空值合法 ✓（= 没配 ✓ ⇒ 跳过这家 ✓，与 `geo_*_url` 同一处理 ✓）。
+        // ⚠️ 它还**不是** secret 处理 ✗（面板会把它回显 ✓）—— 与 Telegram token 那种"只报设没设"
+        // 不同 ✓；接面板那一节时改成同一处理 ✓（记在这里，免得忘 ✓）。
+        "risk_abuseipdb_key" => None,
         k if READABLE_SETTINGS.contains(&k) || k == "github_client_secret" => None,
         _ => Some(format!("unknown setting: {key}")),
     }
