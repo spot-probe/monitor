@@ -278,9 +278,12 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
                 if let Some(source) = &owed {
                     match tokio::task::block_in_place(|| app.db.country_owed(node_id, source)) {
                         Ok(true) => {
-                            // 国家与 IP 质量**各自判断、各自节流** ✓（同一时机、同一地址 ✓）。
+                            // 三路各自判断、各自节流 ✓（同一时机、同一地址 ✓）：
+                            // 国家 ✓（第三方 · 只存两字母）、本地质量 ✓（本地库 · 不外发）、
+                            // 在线风险 ✓（第三方 · **默认关** ✓、每天一次 ✓）。
                             locate(app.clone(), node_id, source.clone());
                             qualify(app.clone(), node_id, source.clone());
+                            assess(app.clone(), node_id, source.clone());
                         }
                         Ok(false) => owed = None,
                         Err(e) => debug!("node {node_id}: country check failed: {e:#}"),
@@ -462,6 +465,11 @@ static ASKED: OnceLock<Mutex<HashMap<i64, Instant>>> = OnceLock::new();
 /// 两者的频率与失败互不相干 ✓ —— 合成一张会让一个的失败拖住另一个 ✓。
 static QUALIFIED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>> =
     std::sync::OnceLock::new();
+
+/// 在线风险库的节流表 ✓（第三张，同样**各自一张** ✓：本地查询、国家查询、在线查询
+/// 的频率与失败互不相干 ✓）。
+static ASSESSED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>> =
+    std::sync::OnceLock::new();
 const LOCATE_RETRY: Duration = Duration::from_secs(3_600);
 
 /// Resolves a node's lookup address (see [`country_source`]) to a country, at
@@ -508,6 +516,31 @@ fn locate(app: Shared, node_id: i64, source: String) {
 ///
 /// **失败留空、下次再试** ✓：与 country 完全同一条规矩 ✓ ——
 /// 查不到就是"未知" ✓，而不是"没有质量" ✗（两者在面板上完全不同 ✓）。
+/// 查一台节点的**在线**风险结论 ✓（走第三方 ✓）。
+///
+/// **它的产物是"缓存里那一行"，不是返回值** ✓✓ —— 所以这里拿到结果就丢掉 ✓：
+/// 面板读的是 `risk_day` 里那份**原样响应** ✓（解析留给读的时候 ✓），
+/// 于是这一层**不需要任何额外的存储、迁移或接口** ✓✓
+///（这正是"先落库、再解析"那条设计换来的 ✓）。
+///
+/// 开关、key、以及"今天是否已经查过"都由 [`crate::risk::check`] 自己判 ✓ ——
+/// 这里只管**什么时候问一次** ✓（与 `qualify` 同一时机 ✓、同一套节流 ✓）。
+fn assess(app: Shared, node_id: i64, source: String) {
+    let mut asked = ASSESSED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if asked.get(&node_id).is_some_and(|at| at.elapsed() < LOCATE_RETRY) {
+        return;
+    }
+    asked.insert(node_id, Instant::now());
+    drop(asked);
+
+    tokio::spawn(async move {
+        // 日子按 **UTC** 取 ✓ —— 这一层只用来"每天一次"去重 ✓，
+        // 与报告那种"按东八区切"的口径无关 ✓（跨零点前后各查一次，无害 ✓）。
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = crate::risk::check(&app, &source, &day).await;
+    });
+}
+
 fn qualify(app: Shared, node_id: i64, source: String) {
     let mut asked = QUALIFIED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if asked.get(&node_id).is_some_and(|at| at.elapsed() < LOCATE_RETRY) {
