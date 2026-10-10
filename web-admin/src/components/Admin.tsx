@@ -4172,6 +4172,61 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           </div>
         </Card>
       </Section>
+
+        <Section
+          title="IP 风险（在线库）"
+          hint="把节点 IP 发给第三方风险库评分。**默认关闭**；关闭时一个请求都不会发出去。打开后每台节点每天查一次，结果缓存在本地。"
+        >
+          <Card className="gap-6 p-6">
+            <section className="space-y-3">
+              <h4 className="text-sm font-medium">AbuseIPDB</h4>
+              <Field
+                row
+                label="启用"
+                hint="打开后会把**节点 IP** 发给 AbuseIPDB（第三方、国外服务）——这是本页唯一会把节点地址发出去的功能。"
+              >
+                <Switch
+                  checked={text("risk_enabled") === "on"}
+                  onCheckedChange={(v) => set("risk_enabled", v ? "on" : "off")}
+                />
+              </Field>
+              <Field
+                row
+                label="API Key"
+                hint="在 abuseipdb.com 免费申请；留空表示没配 —— 这一家会被跳过（是正常状态，不是错误）。"
+              >
+                <Input
+                  value={text("risk_abuseipdb_key")}
+                  onChange={(e) => set("risk_abuseipdb_key", e.target.value)}
+                  placeholder="未设置"
+                />
+              </Field>
+              {/* 关着时**明说不会发** ✓ —— 隐私这件事写在界面上 ✓，而不是只写在代码注释里 ✗。 */}
+              {text("risk_enabled") !== "on" && (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  当前关闭：不会向任何第三方发送节点地址。
+                </p>
+              )}
+            </section>
+            {/* ⚠️ 每节必须有**自己的保存** ✗ —— 这一页的 `set` 只是草稿 ✓（今天在流量报告那节栽过一次 ✓）。 */}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+              <Button variant="ghost" onClick={reload}>
+                重置
+              </Button>
+              <Button
+                onClick={() =>
+                  save({
+                    risk_enabled: text("risk_enabled"),
+                    risk_abuseipdb_key: text("risk_abuseipdb_key"),
+                  })
+                }
+              >
+                保存 IP 风险
+              </Button>
+            </div>
+          </Card>
+        </Section>
+
     </div>
   )
 }
