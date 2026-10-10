@@ -1790,34 +1790,78 @@ function Sparkline({ values, className = "" }: { values: number[]; className?: s
   )
 }
 
-/// 丢包条：与上面那张延迟图**共用时间轴**的一行窄格子，颜色 = 那一桶的丢包率（**最差那台**）。
+/// 延迟分布矩阵的**行**：每一带输出一对「标签 + 格子」，交给外层网格约束列宽。
 ///
-/// 它与延迟图是**两条独立的信息**：延迟图答"什么时候慢"，这一条答"什么时候丢"，
-/// 而两者常常同时发生（拥堵 → 重传 → 丢包）。**分开画正是为了不牺牲任何一维** ——
-/// 把丢包编码进延迟图的颜色里，两样都会读不准。
-///
-/// 只用**一条色阶**（同色相深浅表程度）：0 接近底色、100 是危险色。整数百分比要能分开
-/// 1% 与 0% —— 那正是这张条存在的理由之一（列表里那个 73% 以前在图上完全看不见）。
+/// **为什么不自己包容器** ✗：矩阵、色条、上面那张图必须在**同一个网格**里才有共同的列 ✓。
+/// 前一版各包各的 flex、各自算 `w-24` —— 维护者量出来差了一个 `w-24` ✓，根因正是
+/// "没有共同的列定义" ✗，而不是某个宽度算错 ✓。
+function HeatRows({ edges, buckets, slowest }: {
+  edges: number[]
+  buckets: { ts: number; counts: number[]; lost: number }[]
+  slowest?: Map<number, { name: string; ms: number }>
+}) {
+  if (edges.length < 2 || buckets.length === 0) return null
+  const bands = edges.length - 1
+  const peak = Math.max(1, ...buckets.flatMap((b) => b.counts))
+  const tone = (c: number) =>
+    c === 0 ? "bg-muted" : c <= peak * 0.25 ? "bg-primary/20" : c <= peak * 0.6 ? "bg-primary/45" : "bg-primary/80"
+  const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  return (
+    <>
+      {[...Array(bands)].map((_, r) => {
+        const i = bands - 1 - r
+        // `contents`（display: contents）让这一对子元素**直接成为外层网格的两格** ✓ ——
+        // 于是标签进左列、格子在右列，且**不需要 Fragment 的 import** ✓。
+        return (
+          <div key={edges[i]} className="contents">
+            <span className="text-right text-[10px] leading-none text-muted-foreground">
+              {edges[i]}–{edges[i + 1]} ms
+            </span>
+            <div className="flex gap-px">
+              {buckets.map((b) => (
+                <span
+                  key={b.ts}
+                  className={`h-2.5 flex-1 rounded-[1px] ${tone(b.counts[i])}`}
+                  title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次${
+                    slowest?.get(b.ts) ? ` · 最慢 ${slowest.get(b.ts)!.name} ${slowest.get(b.ts)!.ms} ms` : ""
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
+        )
+      })}
+      {/* **自己的时间轴** ✓：矩阵现在是独立的一张图 ✓，不再借上面那张图的横轴 ✓
+          （维护者的原话：需要为热力图增加水平的时间轴 ✓）。 */}
+      <span />
+      <p className="flex justify-between text-[10px] leading-none text-muted-foreground">
+        <span>{clock(buckets[0].ts)}</span>
+        <span>{clock(buckets[buckets.length - 1].ts)}</span>
+      </p>
+    </>
+  )
+}
+
+/// 丢包条的**行**：同样是「标签 + 格子」的一对 ✓（见 HeatRows 的说明）。
 function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
   if (points.length === 0) return null
   const tone = (l: number) =>
     l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
-  const worst = Math.max(...points.map((p) => p.loss))
   return (
-    <div className="mt-2">
-      <div className="flex h-2 w-full gap-px overflow-hidden rounded-sm">
+    <div className="contents">
+      {/* **与上面的图拉开距离** ✓（维护者：现在感觉是凑在一起的 ✓）。
+          这一行在网格里是**两个格子**（标签 + 色条 ✓），所以两边一起加 `mt-3` ✓ ——
+          只加一边会让它们错开半格 ✓。 */}
+      <span className="mt-3 text-right text-[10px] leading-none text-muted-foreground">丢包</span>
+      <div className="mt-3 flex gap-px">
         {points.map((p) => (
           <span
             key={p.ts}
-            className={`flex-1 ${tone(p.loss)}`}
+            className={`h-2 flex-1 rounded-[1px] ${tone(p.loss)}`}
             title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
           />
         ))}
       </div>
-      <p className="mt-0.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
-        <span>丢包（每一格 = 一个时间桶，取该桶里最差的那台）</span>
-        <span className="tnum">最高 {worst}%</span>
-      </p>
     </div>
   )
 }
@@ -1837,6 +1881,14 @@ function pctl(sorted: number[], p: number): number {
 /// 中间那层带子是 P25–P75（一半的节点落在里面），P50 是中位数，P90/P99 是长尾。于是既看得见趋势，
 /// 也看得见「大部分节点在什么范围、最慢的那批在哪里」—— 而**少掉一整张图的高度**。
 /// 手写 SVG，与 `Sparkline` 同一路子：面板不引图表库（首屏体积量过，且正打算拆小）。
+/// 纵轴上界（留 8% 余量）。**一处算、两处用** ✓ —— 图里画网格线与刻度、左列写那两个数字 ✓。
+///
+/// 抽出来是因为"图"和"左列刻度"必须是**同一个数** ✗：各算一次迟早分叉 ✓，
+/// 而那种错在图上只表现为"刻度略偏"，肉眼根本看不出来 ✓（与热力图的 `band_edges` 同一理由 ✓）。
+function bandTop(points: { p99: number | null }[]): number {
+  return Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
+}
+
 function BandChart({ points, height = 150 }: {
   // 分位数**可以为 null**：一个桶如果 100% 丢包，它没有有效样本 —— 那种桶**必须在轴上**
   // （否则"这段彻底不通"会表现成一块与"没数据"无法区分的空白 ✗），而线在那里**断开**
@@ -1854,7 +1906,7 @@ function BandChart({ points, height = 150 }: {
   if (points.length < 2) return <p className="text-xs text-muted-foreground">还没有收到足够的上报。</p>
   const t0 = Math.min(...points.map((p) => p.ts))
   const t1 = Math.max(...points.map((p) => p.ts))
-  const hi = Math.max(1, ...points.map((p) => p.p99 ?? 0)) * 1.08
+  const hi = bandTop(points)
   const w = 640
   const pad = 14
   const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * w
@@ -1886,6 +1938,23 @@ function BandChart({ points, height = 150 }: {
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+      {/* **中间的网格线** ✓：左列现在是**真正的纵轴**（5 个刻度 ✓），所以在图里把对应的
+          三条线画出来 —— 否则那些数字悬在空白里，读者没法把曲线的高度换成数值 ✗。
+          分数与左列用的是同一组（25/50/75% ✓），上界也同为 `bandTop` ✓，不会分叉 ✓。 */}
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line
+          key={f}
+          x1="0"
+          y1={pad + f * (height - pad * 2)}
+          x2={w}
+          y2={pad + f * (height - pad * 2)}
+          stroke="currentColor"
+          className="text-foreground/10"
+          strokeWidth="1"
+          strokeDasharray="3 3"
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
       {segs.map((s, i) => (
         <polygon key={`band-${i}`} points={band(s)} className="fill-primary/15" />
       ))}
@@ -1908,8 +1977,8 @@ function BandChart({ points, height = 150 }: {
           </text>
         </>
       )}
-      <text x="2" y={pad - 3} fontSize="9" className="fill-muted-foreground">{Math.round(hi)} ms</text>
-      <text x="2" y={y(0) - 3} fontSize="9" className="fill-muted-foreground">0</text>
+      {/* 纵轴刻度**不画在这里** ✗ —— 它们由外层网格的**左列**渲染 ✓（那一列现在就是纵轴泳道 ✓），
+          否则左列会空一块，而刻度挤在图内也会与左列的行标签不在同一条视线上 ✓。 */}
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
       <text x={w} y={height - 2} fontSize="9" textAnchor="end" className="fill-muted-foreground">{clock(t1)}</text>
     </svg>
@@ -2009,6 +2078,24 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	const [perNode, setPerNode] = useState<Record<number, { node: number; avg: number | null; loss: number; samples: number; points: { ts: number; latency: number }[] }[]>>({})
 	// 一次只展开一条：同时摊开好几条时表格会长到读不下去。
 	const [openNodes, setOpenNodes] = useState<number | null>(null)
+
+  // 热力图的取数：**必须和上面这些 hooks 挨在一起** ✓（在任何提前 return 之前 ✓）——
+  // 上一版我把它插在派生的 `openTask` 之后，而那行在提前 return 之下 ⇒
+  // `rules-of-hooks` 当场报了"hook 被条件调用" ✗（那是真错，不是风格 ✓）。
+  // 依赖也**只能用顶部的 `openNodes`** ✗ 不能用 `openTask`：依赖数组是渲染期求值的，
+  // 而 `openTask` 声明在后面 ⇒ 会撞 TDZ ✗。
+  const [heat, setHeat] = useState<{ task: number; edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] } | null>(null)
+  useEffect(() => {
+    if (openNodes === null) return
+    const id = openNodes
+    let alive = true
+    api<{ edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] }>(
+      `/nodes/ping-heatmap?task=${id}&hours=${winHours}`,
+    )
+      .then((d) => { if (alive) setHeat({ task: id, edges: d.edges ?? [], buckets: d.buckets ?? [] }) })
+      .catch(() => { /* 取不到就不画矩阵 ✓ —— 折线图与色条不受影响 ✓ */ })
+    return () => { alive = false }
+  }, [openNodes, winHours])
 	// 直方图点中的桶：null = 不过滤。切点按当前这批节点均值的分位数算，不写死毫秒。
 	const [bucket, setBucket] = useState<number | null>(null)
   const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
@@ -2571,7 +2658,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       		{/* flex 列 + 只有正文滚动：DialogContent 自带 overflow-y-auto，若不拦住，标题与页脚会
       		    跟着正文一起被滚走 —— 快速划动时看上去就像弹窗「悬空」脱开了。 */}
       		<DialogContent
-				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-4xl"
+				className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-5xl"
 				// 不自动聚焦第一个可聚焦元素：否则标题旁那个 ? 的气泡会在打开时自己弹开，盖住统计条。
 				onOpenAutoFocus={(e) => e.preventDefault()}
 			>
@@ -2591,6 +2678,17 @@ function Ping({ nodes }: { nodes: Node[] }) {
 
       			{(() => {
       		const all = perNode[openTask.id] ?? []
+		// 每一格里**最慢的那台** ✓ —— 用面板已有的逐节点点算 ✓（不再向 hub 要一次 ✓）。
+		// 这一步是悬停能不能回答"是全网慢，还是一台慢"的关键 ✓：聚合会把一台的尖峰摊平 ✗。
+		const slowest = new Map<number, { name: string; ms: number }>()
+		for (const p of all) {
+			const name = nodes.find((n) => n.id === p.node)?.name ?? `节点 ${p.node}`
+			for (const q of p.points) {
+				if (q.latency === null) continue
+				const cur = slowest.get(q.ts)
+				if (!cur || q.latency > cur.ms) slowest.set(q.ts, { name, ms: q.latency })
+			}
+		}
       		if (all.length === 0) return <p className="py-6 text-sm text-muted-foreground">还没有收到任何节点的上报。</p>
       		// 分位数切点只算一次：直方图与明细筛选共用同一套桶，点柱子才会得到相符的行。
       		const avgSorted = all.map((p) => p.avg ?? 0).sort((x, y) => x - y)
@@ -2638,11 +2736,51 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							</div>
       						</div>
       						<div className="mt-3 rounded-lg bg-muted p-3">
-				<BandChart points={pct} />
-				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
+				{/* **一个网格装下三块** ✓（Swimlane）：列在这里定义**一次** ✓ ——
+				    左列是标签泳道、右列是时间泳道，图 / 矩阵 / 色条各占其行 ✓。
+				    前一版三块各包各的 flex、各自算宽度 ⇒ 维护者量出差了一个 `w-24` ✗。
+				    这里**没有任何宽度计算** ✓，所以不可能再错位 ✓。 */}
+				{/* 标签列**按内容定宽** ✓：最宽的标签是 `200–209 ms`（≈58px ✓），所以 4.5rem(72px)
+				    足够容纳 + 与图留一点空隙 ✓ —— 而原先的 6rem 白留了约 30px ✗，那 30px 给图更值 ✓。 */}
+				<div className="grid grid-cols-[4.5rem_1fr] items-center gap-x-2 gap-y-0.5">
+					{/* 纵轴泳道：上界 / 0 —— 高度与内边距**跟图一致** ✓（150 与 14 都是 `BandChart`
+					    的默认值 ✓），于是两个数字与图里的网格线在同一条水平线上 ✓。 */}
+					<div className="flex h-[150px] flex-col justify-between py-[14px] text-right text-[9px] leading-none text-muted-foreground">
+						{/* 5 个刻度：上界 / 3/4 / 1/2 / 1/4 / 0 ✓ —— 与图里那 5 条横线（顶、3 条中间、底）
+						    一一对应 ✓。上界同样取 `bandTop` ✓（一处算、两处用 ✓）。 */}
+						{[0, 1, 2, 3, 4].map((i) => (
+							<span key={i}>{i === 4 ? "0" : `${Math.round(bandTop(pct) * (1 - i / 4))} ms`}</span>
+						))}
+					</div>
+					<BandChart points={pct} />
+					<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
+					<span />
+					<p className="flex items-baseline justify-between text-[10px] text-muted-foreground">
+						<span>每一格 = 一个时间桶；丢包取该桶里最差的那台</span>
+						<span className="tnum">最高 {stats[openTask.id]?.loss ?? 0}%</span>
+					</p>
+				</div>
 			</div>
       					</section>
       				)}
+
+				{/* **热力图与「各节点平均」同级** ✓（维护者要的 ✓）：自己的小节标题 ✓、
+				    自己的卡片 ✓、**自己的时间轴** ✓ —— 不再寄居在「延迟随时间」里 ✓。 */}
+				{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
+					<section className="mt-7">
+						<div className="flex flex-wrap items-baseline justify-between gap-x-3">
+							<h4 className="flex items-center gap-1.5 text-sm font-semibold">
+								延迟分布
+								<Help>按**时间 × 延迟区间**统计每一格里有多少个样本。横轴是时间（与上面那张图同一个窗口）。纵轴是这个窗口内的**真实毫秒区间** —— 由数据的分位数算出，不是写死的档位（延迟的"正常"取决于目标）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里：它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
+							</h4>
+						</div>
+						<div className="mt-2 rounded-lg bg-muted p-3">
+							<div className="grid grid-cols-[4.5rem_1fr] items-center gap-y-0.5">
+								<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
+							</div>
+						</div>
+					</section>
+				)}
 
       				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
