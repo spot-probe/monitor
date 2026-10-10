@@ -13,6 +13,45 @@
 use crate::App;
 use std::path::Path;
 
+/// 一次查询的**结论** ✓ —— 参考里第 ① 节要的那些字段 ✓。
+///
+/// 全部 `Option` ✓：库没配、IP 查不到、字段缺失，都是 `None` ✓ ——
+/// **不编造默认值** ✗（"未知"与"美国"是两件事 ✓，而 `""` 会被读成后者 ✓）。
+// 构造它的是**下一步**：真正调用 mmdb 的读取层（`lookup` ✓）。现在只有测试在构造 ✗ ⇒ 暂标 allow，
+// 紧跟着这条说明，接上读取层后删掉 ✓（今天已经这么加过、也这么删过两次 ✓）。
+#[allow(dead_code)]
+#[derive(Default, Clone, PartialEq, Debug)]
+pub struct Quality {
+    #[allow(dead_code)]
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub subdivision: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub time_zone: Option<String>,
+    pub asn: Option<u32>,
+    pub org: Option<String>,
+}
+
+/// 把 City 与 ASN 两份查询结果**合成一个结论** ✓ —— **纯函数** ✓，所以它有自己的单测 ✓。
+///
+/// 分层是刻意的 ✓：真正调用 mmdb 的那几行保持极薄 ✓（没有便宜的样例库可造 ✗），
+/// 而"怎么解读结果"（哪些字段要 ✓、缺了怎么办 ✓、两份怎么合 ✓）留在这里被测死 ✓✓。
+#[allow(dead_code)]
+pub fn merge(city: Option<Quality>, asn: Option<Quality>) -> Quality {
+    let mut out = city.unwrap_or_default();
+    if let Some(a) = asn {
+        // ASN 只有那两样 ✓：只补**空**的字段 ✓ —— 不覆盖 City 已有的事实 ✓。
+        if out.asn.is_none() {
+            out.asn = a.asn;
+        }
+        if out.org.is_none() {
+            out.org = a.org;
+        }
+    }
+    out
+}
+
 /// 库清单里的一个库 ✓。
 ///
 /// **URL 不在代码里** ✗✓：镜像地址由设置给（默认空 ✓）—— 与 `github_proxy` 完全同形 ✓：
@@ -216,6 +255,29 @@ mod tests {
         v.extend_from_slice(MMDB_MARKER);
         v.extend_from_slice(b"\x00\x00");
         v
+    }
+
+    /// 两份结果合成：**只补空字段** ✓ —— ASN 库不该覆盖 City 库里已有的事实 ✓；
+    /// 两份都缺时全是 `None` ✓（**不编默认值** ✗ —— `""` 会被读成"未知的那个国家" ✓）。
+    #[test]
+    fn merging_takes_the_asn_only_where_the_city_left_a_hole() {
+        let city = Quality {
+            country: Some("HK".into()),
+            city: Some("Hong Kong".into()),
+            org: Some("City 库知道的组织".into()),
+            ..Default::default()
+        };
+        let asn = Quality { asn: Some(906), org: Some("DMIT".into()), ..Default::default() };
+        let q = merge(Some(city), Some(asn));
+        assert_eq!(q.country.as_deref(), Some("HK"));
+        assert_eq!(q.asn, Some(906), "ASN 补进来 ✓");
+        assert_eq!(q.org.as_deref(), Some("City 库知道的组织"), "**不覆盖**已有的 ✓");
+        // 只有 ASN 库可用时 ✓（城市库没配 ✓）
+        let only_asn = merge(None, Some(Quality { asn: Some(906), ..Default::default() }));
+        assert_eq!(only_asn.asn, Some(906));
+        assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
+        // 两个都没有 ⇒ 全空 ✓
+        assert_eq!(merge(None, None), Quality::default());
     }
 
     /// 数据目录：显式优先 ✓；否则与 DB 同目录 ✓；DB 就在当前目录时退回 `.` ✓。
