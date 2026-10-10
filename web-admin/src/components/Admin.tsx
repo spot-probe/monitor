@@ -1858,7 +1858,10 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
           否则整块矩阵会被右移一个标签宽，上下对不上（维护者一眼看出来的 ✓）。
           所以这里放一个等宽占位，并用**同样的 `gap-1.5`** ✓。 */}
       <div className="flex items-center gap-1.5">
-        <span className="w-24 shrink-0" />
+        {/* **用"有字的标签"，不用空 span** ✗：空的 flex item 实测没撑出宽度
+            （维护者量出来的差 ≈90px ≈ 一个 `w-24` ✓），而**同一种写法的文字标签**
+            在矩阵那边是真的 96px ✓✓。顺带这一行本来就该说明自己是什么 ✓。 */}
+        <span className="w-24 shrink-0 text-right text-[10px] leading-none text-muted-foreground">丢包</span>
         {/* **高度必须在格子这一层** ✗ —— 我上一改把它留在了外层 ⇒ 内层高度塌成 0 ⇒
             整条色条看不见了（维护者截图里那条空白就是它 ✓）。外层只管居中与间距 ✓。 */}
         <div className="flex h-2 flex-1 gap-px overflow-hidden rounded-sm">
