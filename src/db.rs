@@ -131,6 +131,23 @@ CREATE TABLE IF NOT EXISTS traffic (
   day_start TEXT NOT NULL DEFAULT ''
 );
 
+  -- ⚠️ **这张表不参与保留期清理** ✗（housekeeping 只动 `metric` / `ping_*` ✓）——
+  -- 半年报与年报依赖它跨年留存 ✓（年报要 13 个月以上的行 ✓）：哪天有人顺手把它也"按保留期清一下"，
+  -- 年报就会被**静悄悄地掏空** ✓（总量偏小、且只有那行「本期覆盖 N 天」能提示 ✓）。
+  -- 体量可忽略：100 台 × 365 天 ≈ 3.6 万行/年 ✓。
+  --
+  -- 按天的流量快照：`traffic` 只存"今天 / 本月 / 累计"三个**当前**窗口，
+  -- 而日报要的是"昨天"、周报要 7 天、季报要 3 个月 —— 那些边界一过就取不到了。
+  -- 每天在**日切那一刻**写一行（与 `day_start` 同一次判断，不另起一套）。
+  -- 于是周/月/季报全都变成**这张表的区间求和**，只有一套逻辑。
+  CREATE TABLE IF NOT EXISTS traffic_day (
+    node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+    date    TEXT    NOT NULL,
+    rx      INTEGER NOT NULL DEFAULT 0,
+    tx      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (node_id, date)
+  );
+
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
@@ -245,7 +262,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -546,6 +563,21 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 15 {
         migrate_to_15(&tx)?;
     }
+    // 16：按天的流量快照表。**从上一版升上来的库**必须在这里补建 ✓ ——
+    // 全新库由上面的 SCHEMA 带上 ✓，所以只有"升级路径"的测试碰得到这一块 ✓
+    // （1.9.12 的教训：步骤必须在自己的 `if from < N` 里，且盖章在块外 ✓）。
+    if from < 16 {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS traffic_day (
+               node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
+               date    TEXT    NOT NULL,
+               rx      INTEGER NOT NULL DEFAULT 0,
+               tx      INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (node_id, date)
+             );",
+        )?;
+    }
+
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -1027,6 +1059,114 @@ pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
 ///
 /// `counts` 的长度是 `edges.len() - 1`（由调用方保证）；`lost` 单列而不是混进
 /// `counts` —— 丢包没有延迟、落不进任何延迟区间，而它恰恰是最该看见的那一维。
+/// 报告周期：日报 / 周报 / 月报 / 季报。
+///
+/// **四个周期共用同一个区间算法** ✓ —— 它们不是四套逻辑，而是"同一张按天快照表"的
+/// 四种长度 ✓（这正是先做 `traffic_day` 换来的性质 ✓）。
+// 整条报告链**还没接线** ✗（`report` 模块只有测试在调用 ✓）—— 见 src/report.rs 顶部那段说明 ✓：
+// 下一步的调度器会构造这些变体 ✓，届时连同 report.rs 那行模块级 allow 一起删掉 ✓。
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Period {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    /// 自然半年：1–6 月 / 7–12 月 ✓（**不是财年** ✗ —— 本仓其余地方也都是自然年 / ISO 周 ✓）。
+    Half,
+    Year,
+}
+
+impl Period {
+    /// 该周期的**上一个完整周期**：返回 `(start, end, prev_start, prev_end)`，
+    /// 四个日期都是 `YYYY-MM-DD`，区间**含首不含尾**（`start <= date < end` ✓）。
+    ///
+    /// **刻意取"已结束的那一个"，而不是"至今"** ✗：报告是按时发的（默认 09:00 ✓），
+    /// 若取"至今"，今天这一截会被算进去 ✓ ⇒ 同一份日报在 09:00 与 17:00 是两个数 ✗，
+    /// 而"与上周期对比"的基准也会跟着浮动 ✓。固定成"昨天整天"才可比 ✓、也才可复现 ✓。
+    ///
+    /// 边界一律按 **ISO**（周一起算 ✓、季度 1/4/7/10 月起算 ✓）—— 与东八区的习惯一致 ✓。
+    // 调度器（下一步）会调用它 ✓；现在 `title()` 只用到 `Period` 本身 ✗ ⇒ 暂标 allow，
+    // 紧跟着这条说明，接上调度后删掉 ✓（与之前的处理一致 ✓）。
+    #[allow(dead_code)]
+    pub fn last_full(self, today: chrono::NaiveDate) -> (String, String, String, String) {
+        use chrono::{Datelike, Duration, NaiveDate};
+        let (start, end) = match self {
+            Period::Day => (today - Duration::days(1), today),
+            Period::Week => {
+                // 本周一（`weekday().num_days_from_monday()`：周一 = 0 ✓）
+                let this_mon = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+                (this_mon - Duration::days(7), this_mon)
+            }
+            Period::Month => {
+                let this_first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+                let prev_first = if today.month() == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 12, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), today.month() - 1, 1).unwrap()
+                };
+                (prev_first, this_first)
+            }
+            Period::Half => {
+                // 当前半年从 1 月或 7 月起 ✓ —— 于是"上一个完整半年"就是**另一半** ✓
+                // （上半年里看到的是去年下半年 ✓，跨年 ✓）。
+                let m = if today.month() <= 6 { 1 } else { 7 };
+                let this_h = NaiveDate::from_ymd_opt(today.year(), m, 1).unwrap();
+                let prev_h = if m == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 7, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap()
+                };
+                (prev_h, this_h)
+            }
+            Period::Year => {
+                let this_y = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap();
+                (NaiveDate::from_ymd_opt(today.year() - 1, 1, 1).unwrap(), this_y)
+            }
+            Period::Quarter => {
+                let this_q_first_month = ((today.month() - 1) / 3) * 3 + 1; // 1 / 4 / 7 / 10
+                let this_q = NaiveDate::from_ymd_opt(today.year(), this_q_first_month, 1).unwrap();
+                let prev_q = if this_q_first_month == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 10, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), this_q_first_month - 3, 1).unwrap()
+                };
+                (prev_q, this_q)
+            }
+        };
+        // **上一周期按日历算，不按"等长后退"** ✗ —— 这一条是测试抓出来的 ✓：
+        // 月份长度不等，2024 年 2 月（闰月 29 天 ✓）若后退等长天数会落到 **2024-01-03** ✗，
+        // 而"上一个月"显然是 1 月整月 ✓。季度同理 ✓（跨年时更明显 ✓）。
+        let prev = match self {
+            Period::Day => start - Duration::days(1),
+            Period::Week => start - Duration::days(7),
+            Period::Month => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 12, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), start.month() - 1, 1).unwrap()
+                }
+            }
+            Period::Quarter => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 10, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), start.month() - 3, 1).unwrap()
+                }
+            }
+            Period::Half => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 7, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), 1, 1).unwrap()
+                }
+            }
+            Period::Year => NaiveDate::from_ymd_opt(start.year() - 1, 1, 1).unwrap(),
+        };
+        (start.to_string(), end.to_string(), prev.to_string(), start.to_string())
+    }
+}
+
 pub struct HeatBucket {
     pub ts: i64,
     pub counts: Vec<i64>,
@@ -1721,6 +1861,62 @@ impl Db {
             .collect())
     }
 
+    /// 快照里**最早的一天** ✓（`None` = 还没有任何快照 ✓）。
+    ///
+    /// 报告的"本期覆盖 N 天"要它 ✓（见 `report::coverage_note` ✓）——
+    /// 半年报与年报必须带这句 ✗：快照是从启用那天才有的 ✓，否则第一份年报会静悄悄地偏小 ✓。
+    pub fn earliest_traffic_day(&self) -> Option<String> {
+        let conn = self.conn();
+        conn.query_row("SELECT MIN(date) FROM traffic_day", [], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+            .filter(|d| !d.is_empty())
+    }
+
+    /// 每台节点的**月度额度**（0 = 不限 ✓，与 `node.traffic_limit` 同一约定 ✓）。
+    ///
+    /// 报告的"超限 / 将超限"要它 ✓ —— 额度是**月度**的 ✓，所以判断看的是"本月已用"
+    /// 而不是这个周期的量 ✓（见 `report::body` 的说明 ✓）。
+    pub fn traffic_limits(&self) -> std::collections::HashMap<i64, i64> {
+        let conn = self.conn();
+        let Ok(mut stmt) = conn.prepare_cached("SELECT id, traffic_limit FROM node") else {
+            return Default::default();
+        };
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// 从按天快照表求和：某个日期区间内**每台节点**的上下行合计，按总量从多到少 ✓。
+    ///
+    /// 区间**含首不含尾**（`from <= date < to` ✓）—— 与 [`Period::last_full`] 返回的四个日期
+    /// 同一约定 ✓。周报 / 月报 / 季报因此是**同一句 SQL** ✓，只是区间不同 ✓。
+    ///
+    /// 返回 `(node_id, name, rx, tx)` ✓ —— 名字一起带出来 ✓，因为报告的"逐节点明细"就是它 ✓
+    /// （调用方不必再查一次 ✓，也就不会出现两处各写一次、早晚分叉 ✗）。
+    pub fn traffic_sums(&self, from: &str, to: &str) -> Vec<(i64, String, i64, i64)> {
+        let conn = self.conn();
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT d.node_id, n.name, SUM(d.rx), SUM(d.tx)
+             FROM traffic_day d JOIN node n ON n.id = d.node_id
+             WHERE d.date >= ?1 AND d.date < ?2
+             GROUP BY d.node_id
+             ORDER BY SUM(d.rx) + SUM(d.tx) DESC, d.node_id",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![from, to], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            ))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
     pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
         let conn = self.conn();
         let Ok(mut stmt) = conn.prepare_cached(
@@ -1861,6 +2057,24 @@ impl Db {
         }
         let today = Local::now().date_naive().to_string();
         if day_start != today {
+            // ⚠️ **首次上报不算日切** ✗：新节点的这一行里 `day_start` 是**空串**（列默认值 ✓），
+            // 于是它第一次上报也满足 `day_start != today` ✓ —— 但那不是"一天结束了"，
+            // 而是"还**没有**过任何一天" ✓。不排除它就会写出一行 `date=''` 的空快照 ✗，
+            // 而任何按日期求和的报表都得先把它剔掉 ✓。
+            // （这条是单测 `a_rollover_snapshots_the_day_that_just_ended` 的第一条断言抓到的 ✓。）
+            if !day_start.is_empty() {
+                // **值直接由 SQL 从表里取** ✓（而不是用局部变量 ✗）：
+                // 走到这里时，局部 `day_rx/day_tx` 可能**已经被重算成新一天的值** ✓
+                // —— 单测的第二条断言就是这么抓到的（存进去的是 9500/4600，而要求是 8000/4000 ✗）。
+                // 而那一刻表里**还是旧值** ✓（重置的 UPDATE 在这段之后 ✓），
+                // 所以 `INSERT ... SELECT` 读到的必然"刚结束那天"的总量 ✓ ——
+                // 它免疫于局部变量的顺序 ✓，这正是我想要的性质 ✓。
+                conn.execute(
+                    "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx)
+                     SELECT node_id, day_start, day_rx, day_tx FROM traffic WHERE node_id = ?1",
+                    params![node_id],
+                )?;
+            }
             day_rx = d_rx;
             day_tx = d_tx;
         }
@@ -3709,6 +3923,36 @@ mod tests {
         assert_eq!(t.total_rx, 10_000, "lifetime total is untouched by either rollover");
     }
 
+    /// **日切时先存快照、再重置** ✓ —— 顺序反了就会把"还没过完的新一天"当成昨天写进去 ✗，
+    /// 而那种错在报表上只表现为"少一天/多一天"，几乎看不出来 ✓（与主键那一条同一个理由 ✓）。
+    #[test]
+    fn a_rollover_snapshots_the_day_that_just_ended() {
+        let db = db();
+        let id = node(&db, 1);
+        db.accumulate(id, "boot-a", Some((0, 0))).unwrap();
+        db.accumulate(id, "boot-a", Some((8_000, 4_000))).unwrap();
+        // 还没跨日：**不该**有任何快照 —— 否则报表里会多出一个"今天"的行 ✗。
+        let n: i64 = db.conn().query_row("SELECT COUNT(*) FROM traffic_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "没跨日就不该有快照");
+
+        // 跨日：这次上报先把**刚结束那天**存下来，然后才重置这一天的计数。
+        db.conn().execute("UPDATE traffic SET day_start='1999-01-01' WHERE node_id=?1", [id]).unwrap();
+        db.accumulate(id, "boot-a", Some((9_500, 4_600))).unwrap();
+        let (date, rx, tx): (String, i64, i64) = db
+            .conn()
+            .query_row("SELECT date, rx, tx FROM traffic_day WHERE node_id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(date, "1999-01-01", "快照属于**刚结束**的那一天，不是今天");
+        assert_eq!((rx, tx), (8_000, 4_000), "值必须是**重置前**的总量");
+
+        // 再走一次同样的路径：**不能**写出第二行（重复快照 ⇒ 周报翻倍 ✗）。
+        db.accumulate(id, "boot-a", Some((9_900, 4_800))).unwrap();
+        let n: i64 = db.conn().query_row("SELECT COUNT(*) FROM traffic_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "同一天只该有一行");
+    }
+
     /// The other half of the rollover: the counters restart on the node's next
     /// report, so a node silent since before a boundary still holds the previous
     /// period's bytes on disk. The read side must not return those.
@@ -4668,6 +4912,146 @@ mod tests {
     /// **升级路径的闸（1.9.12 的教训照搬）**：一个"14 版"的库（缺 allow_remote_upgrade）迁移后
     /// 必须有那一列、且戳到 15。全新库的 SCHEMA 本来就带它，`add_column` 会当「重复列」忽略，
     /// 所以只有这种"从上一版升上来"的测试才碰得到真正的升级路径。
+    /// **升级路径的闸**（照 1.9.12 那条搬）：一个"15 版"的库（没有 traffic_day）迁移后
+    /// 必须有这张表、且戳到 16 ✓。全新库的 SCHEMA 本来就带上它 ✗ —— 所以
+    /// **只有这种"从上一版升上来"的测试才碰得到真正的升级路径** ✓。
+    /// 周期 → 日期区间：四种周期的**边界**各钉一条 ✓（跨月、跨年、跨季、周一起算 ✓）。
+    /// 这类错只表现为"报表少一天/多一天"，没人看得出来 ✓ —— 所以必须靠测试 ✓。
+    #[test]
+    fn periods_cover_the_last_full_one_and_its_predecessor() {
+        use chrono::NaiveDate;
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+
+        // 日报：昨天整天；上一周期 = 前天整天。
+        assert_eq!(
+            Period::Day.last_full(d(2026, 3, 15)),
+            ("2026-03-14".into(), "2026-03-15".into(), "2026-03-13".into(), "2026-03-14".into())
+        );
+        // 周报：周一发的报告应当覆盖**上一个周一至周日**（周一起算 ✓）。
+        assert_eq!(
+            Period::Week.last_full(d(2026, 3, 16)), // 2026-03-16 是周一
+            ("2026-03-09".into(), "2026-03-16".into(), "2026-03-02".into(), "2026-03-09".into())
+        );
+        // 月报：3 月 1 日发 → 覆盖 2 月整月（**闰年 2 月是 29 天** ✓，上一周期与它等长 ✓）。
+        assert_eq!(
+            Period::Month.last_full(d(2024, 3, 1)),
+            ("2024-02-01".into(), "2024-03-01".into(), "2024-01-01".into(), "2024-02-01".into())
+        );
+        // 跨年：1 月 1 日发月报 → 上一个周期是去年 12 月 ✓。
+        assert_eq!(
+            Period::Month.last_full(d(2026, 1, 1)),
+            ("2025-12-01".into(), "2026-01-01".into(), "2025-11-01".into(), "2025-12-01".into())
+        );
+        // 季报：4 月 1 日发 → 覆盖 Q1（1–3 月 ✓）；上一周期 = 去年 Q4 ✓（跨年 ✓）。
+        assert_eq!(
+            Period::Quarter.last_full(d(2026, 4, 1)),
+            ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
+        );
+        // 半年：4 月里发 → 上一个完整半年是**去年下半年**（7/1 → 今年 1/1 ✓，跨年 ✓）；
+        // 对比期 = 去年上半年 ✓。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 4, 10)),
+            ("2025-07-01".into(), "2026-01-01".into(), "2025-01-01".into(), "2025-07-01".into())
+        );
+        // 半年：10 月里发 → 上一个完整半年是**今年上半年**（1/1 → 7/1 ✓）；对比期 = 去年下半年 ✓。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 10, 2)),
+            ("2026-01-01".into(), "2026-07-01".into(), "2025-07-01".into(), "2026-01-01".into())
+        );
+        // 半年边界：正好 7 月 1 日发 → 上一个完整半年是今年上半年 ✓（不能算成"刚过去的那一天" ✗）。
+        assert_eq!(
+            Period::Half.last_full(d(2026, 7, 1)),
+            ("2026-01-01".into(), "2026-07-01".into(), "2025-07-01".into(), "2026-01-01".into())
+        );
+        // 年报：3 月里发 → 上一个完整年是**去年全年** ✓；对比期 = 前年 ✓。
+        assert_eq!(
+            Period::Year.last_full(d(2026, 3, 5)),
+            ("2025-01-01".into(), "2026-01-01".into(), "2024-01-01".into(), "2025-01-01".into())
+        );
+        // 年报边界：正好 1 月 1 日发 → 上一个完整年仍是去年 ✓（不是"今年" ✗）。
+        assert_eq!(
+            Period::Year.last_full(d(2026, 1, 1)),
+            ("2025-01-01".into(), "2026-01-01".into(), "2024-01-01".into(), "2025-01-01".into())
+        );
+        // 闰年不影响年与半年的长度 ✓（区间是**日期** ✓ —— 天数由日历决定 ✓，2024 是闰年 ✓）。
+        assert_eq!(
+            Period::Year.last_full(d(2025, 6, 1)),
+            ("2024-01-01".into(), "2025-01-01".into(), "2023-01-01".into(), "2024-01-01".into())
+        );
+
+        // 季中：5 月里发 → 仍然是"上一个完整季度"（Q1 ✓），不是"进行中的 Q2" ✗。
+        assert_eq!(
+            Period::Quarter.last_full(d(2026, 5, 20)),
+            ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
+        );
+    }
+
+    /// 快照求和：区间**含首不含尾** ✓ · 按总量排序 ✓ · 区间内没有快照的节点不出现 ✓。
+    /// 边界那一格（`to` 那天）算不算，正是报表"多一天/少一天"的来源 ✓ —— 必须钉住 ✓。
+    #[test]
+    fn traffic_sums_cover_the_half_open_range_only() {
+        let db = db();
+        let (a, b) = (node(&db, 1), node(&db, 2));
+        let name_of = |id: i64| -> String {
+            db.conn().query_row("SELECT name FROM node WHERE id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        let put = |id: i64, date: &str, rx: i64, tx: i64| {
+            db.conn()
+                .execute(
+                    "INSERT OR REPLACE INTO traffic_day (node_id, date, rx, tx) VALUES (?1,?2,?3,?4)",
+                    rusqlite::params![id, date, rx, tx],
+                )
+                .unwrap();
+        };
+        put(a, "2026-03-01", 1_000, 100);
+        put(a, "2026-03-02", 2_000, 200);
+        put(a, "2026-03-03", 4_000, 400); // `to` 那天：**不算** ✓
+        put(b, "2026-03-02", 500, 50);
+        put(b, "2026-02-28", 9_999, 999); // 区间之前：不算 ✓
+
+        let rows = db.traffic_sums("2026-03-01", "2026-03-03");
+        assert_eq!(rows.len(), 2, "区间内的两台都在");
+        // 3 月 1–2 日：a = 3000 / 300 ✓（3 月 3 日被排除 ✓）；b = 500 / 50 ✓
+        assert_eq!((rows[0].0, rows[0].2, rows[0].3), (a, 3_000, 300), "含首不含尾：`to` 那天不算");
+        assert_eq!(rows[0].1, name_of(a), "名字一起带出来");
+        // 按总量（rx+tx）从多到少：a(3300) 在 b(550) 前面 ✓
+        assert_eq!((rows[1].0, rows[1].2, rows[1].3), (b, 500, 50));
+        // 区间内没有任何快照的节点**不出现** ✓（而不是出现一行 0 —— 那会让"哪些机器在跑流量"
+        // 这件事在报告里失真 ✓）。
+        let had = db.traffic_sums("2020-01-01", "2020-01-02");
+        assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    #[test]
+    fn migrating_from_15_adds_the_traffic_day_table() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("DROP TABLE traffic_day", []).unwrap();
+        conn.execute("PRAGMA user_version = 15", []).unwrap();
+        let has = |c: &rusqlite::Connection| -> bool {
+            c.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='traffic_day'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        };
+        assert!(!has(&conn), "前提：表已删掉");
+        migrate(&conn, 15).unwrap();
+        assert!(has(&conn), "迁移后必须有 traffic_day");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // 表形也要对：漏了主键会让同一天写两次、周报翻倍。
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(traffic_day)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(cols, vec!["node_id", "date", "rx", "tx"], "列与顺序都要对");
+    }
+
     #[test]
     fn migrating_from_14_adds_the_allow_remote_upgrade_column() {
         let db = Db::open(":memory:").unwrap();

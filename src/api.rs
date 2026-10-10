@@ -1531,6 +1531,10 @@ const READABLE_SETTINGS: &[&str] = &[
     "theme",
     "github_proxy",
     "update_notice",
+    // 流量报告的三个设置 ✓（调度在 src/report_watch.rs ✓；键的**值**由上面的分支校验 ✓）。
+    "report_periods",
+    "report_time",
+    "report_tz",
 ];
 
 /// How long a release lookup stands before the panel asks GitHub again, and how
@@ -2652,6 +2656,18 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
         "admin_password" if value.len() < 12 => Some("password must be at least 12 characters".into()),
         "admin_password" => None,
         k if k.starts_with("notify_") => crate::notify::setting_error(k, value),
+        // 报告设置：**必须早于下面那条"白名单即可"的分支** ✓。白名单分支只检查"键认识" ✓、
+        // 不看值 ✗ ⇒ 一个写成 `99:99` 的时间会被存下来 ✓，而调度是"到点才发" ✓
+        // ⇒ **永远不发、且没人知道为什么** ✗✗ —— 这类静默失败正是要在这里挡住的 ✓。
+        "report_periods" if !crate::report_watch::valid_periods(value) => {
+            Some("report periods must be a comma-separated list of day, week, month, quarter".into())
+        }
+        "report_time" if !crate::report_watch::valid_time(value) => {
+            Some("report time must look like 09:00".into())
+        }
+        "report_tz" if !crate::report_watch::valid_tz(value) => {
+            Some("report time zone must look like +08:00".into())
+        }
         k if READABLE_SETTINGS.contains(&k) || k == "github_client_secret" => None,
         _ => Some(format!("unknown setting: {key}")),
     }

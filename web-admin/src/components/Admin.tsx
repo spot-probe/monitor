@@ -3813,6 +3813,12 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   	return <PageSkeleton shape="cards" rows={3} />
   }
   const text = (k: string) => String(s[k] ?? "")
+  // 勾了哪些周期（逗号分隔 ✓，与 hub 侧同一格式 ✓）。空数组 = 一个都不发 ✓。
+  const pickedPeriods = () =>
+    text("report_periods")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
   // A credential is sent only when something was typed: the field starts empty
   // because the hub never returns the stored value.
   const typed = (...keys: string[]) =>
@@ -4002,6 +4008,104 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       		</Button>
       	</div>
       </Card>
+      </Section>
+      <Section
+        title="流量报告"
+        hint="按周期把流量汇总发到上面的通知渠道（报告就是一条通知）；改完点右下角保存。"
+      >
+        <Card className="gap-6 p-6">
+          {/* 第一组：**要不要发**（四个周期各一行 ✓，说明里带上当前的发送时间 ✓ —— 改了时间这四行跟着变 ✓）。 */}
+          <section className="space-y-3">
+      <h4 className="flex items-center gap-2 text-sm font-medium">
+        <Bell className="size-4 text-muted-foreground" /> 常规报告
+      </h4>
+      {([["day", "日报", "每天"], ["week", "周报", "每周一"], ["month", "月报", "每月 1 号"]] as const).map(
+        ([k, label, when]) => (
+          <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发上一个完整周期`}>
+            <Switch
+              checked={pickedPeriods().includes(k)}
+              onCheckedChange={() => {
+                const cur = pickedPeriods()
+                const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+                set("report_periods", next.join(","))
+              }}
+            />
+          </Field>
+        ),
+      )}
+    </section>
+
+    {/* 汇总类单独成组 ✓（六个开关一行排开太长 ✓ —— 与「事件设置」把"数值"与"开关"分两块同一理由 ✓）。 */}
+    <section className="space-y-3 border-t pt-5">
+      <h4 className="flex items-center gap-2 text-sm font-medium">
+        <CalendarClock className="size-4 text-muted-foreground" /> 汇总报告
+      </h4>
+      {([
+        ["quarter", "季报", "每季首日", "上一个完整季度（1–3 / 4–6 / 7–9 / 10–12 月）"],
+        ["half", "半年报", "每半年首日", "上一个完整半年（1–6 / 7–12 月）"],
+        ["year", "年报", "每年 1 月 1 日", "上一个完整自然年"],
+      ] as const).map(([k, label, when, what]) => (
+        <Field row key={k} label={label} hint={`${when} ${text("report_time") || "09:00"} 发${what}`}>
+          <Switch
+            checked={pickedPeriods().includes(k)}
+            onCheckedChange={() => {
+              const cur = pickedPeriods()
+              const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
+              set("report_periods", next.join(","))
+            }}
+          />
+        </Field>
+      ))}
+      {/* 一个都没勾时**明说不会发** ✓ —— 这类功能最常见的误会就是"我设了时间却没收到" ✓。 */}
+      {pickedPeriods().length === 0 && (
+        <p className="text-xs text-warn-fg">一个周期都没勾 —— 不会发送任何报告</p>
+      )}
+    </section>
+      
+          {/* 第二组：**什么时候发**（与上一组用分隔线分开 ✓，与「事件设置」同一写法 ✓）。 */}
+          <section className="space-y-3 border-t pt-5">
+            <h4 className="flex items-center gap-2 text-sm font-medium">
+              <Timer className="size-4 text-muted-foreground" /> 发送时间与时区
+            </h4>
+            <Field row icon={<Timer className="size-4 text-muted-foreground" />} label="发送时间" hint="四个周期共用这一个时间">
+              <Input type="time" className="w-28" value={text("report_time")} onChange={(e) => set("report_time", e.target.value)} />
+            </Field>
+            <Field
+              row
+              icon={<CalendarClock className="size-4 text-muted-foreground" />}
+              label="时区"
+              hint="报告里的日期按它切；而「本月已用 / 是否超限」用的是 hub 的月度窗口，可能与此处不同"
+            >
+              <Input list="report-tz" className="w-28" value={text("report_tz")} onChange={(e) => set("report_tz", e.target.value)} />
+              {/* 下拉 + 手填**同一个控件** ✓（`<input list>` + `<datalist>` ✓）—— 下拉好用、手填兜底 ✓。 */}
+              <datalist id="report-tz">
+                {["+08:00", "+00:00", "+09:00", "-05:00", "-08:00"].map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+            </Field>
+          </section>
+      
+          {/* ⚠️ **必须有这个保存** ✗ —— 这一页的 `set` 是**草稿**（只改界面 ✓），
+              只有 `save(...)` 才落库 ✓。我第一版只用了 `set` ⇒ 开关点了会变、刷新就回退 ✗✗；
+              是**读「事件设置」那张卡的写法**才发现的 ✓（它与 Webhook 卡各有一个保存按钮 ✓）。 */}
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
+            <Button variant="ghost" onClick={reload}>
+              重置
+            </Button>
+            <Button
+              onClick={() =>
+                save({
+                  report_periods: text("report_periods"),
+                  report_time: text("report_time"),
+                  report_tz: text("report_tz"),
+                })
+              }
+            >
+              保存流量报告
+            </Button>
+          </div>
+        </Card>
       </Section>
     </div>
   )
