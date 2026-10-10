@@ -4187,7 +4187,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
         <Section
           title="IP 风险（在线库）"
-          hint="把节点 IP 发给第三方风险库评分。**默认关闭**；关闭时一个请求都不会发出去。打开后每台节点每天查一次，结果缓存在本地。"
+          hint="把节点 IP 发给第三方风险库评分。默认关闭；关闭时一个请求都不会发出去。打开后每台节点每天查一次，结果缓存在本地。"
         >
           <Card className="gap-6 p-6">
             <section className="space-y-3">
@@ -4195,7 +4195,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Field
                 row
                 label="启用"
-                hint="打开后会把**节点 IP** 发给 AbuseIPDB（第三方、国外服务）——这是本页唯一会把节点地址发出去的功能。"
+                hint="打开后会把节点 IP 发给 AbuseIPDB（第三方、国外服务）——这是本页唯一会把节点地址发出去的功能。"
               >
                 <Switch
                   checked={text("risk_enabled") === "on"}
@@ -4241,7 +4241,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
         <Section
           title="IP 数据库（本地库）"
-          hint="hub 把这几份库下载到**本地**、自己查询 —— 节点 IP 不会发给任何第三方。留空表示不下载该库。"
+          hint="hub 把这几份库下载到本地、自己查询 —— 节点 IP 不会发给任何第三方。留空表示不下载该库。"
         >
           <Card className="gap-6 p-6">
             <section className="space-y-3">
@@ -4249,7 +4249,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Field
                 row
                 label="城市库"
-                hint="厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。地址里可以写 {YYYY-MM}，下载时按当天替换 —— 有些直链带月份，写死了下个月就会 404。"
+                hint="厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。地址里可以写 {YYYY-MM}，下载时按当天替换 —— 有些直链带月份，写死了下个月就会 404。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz"
               >
                 <Input
                   value={text("geo_city_url")}
@@ -4260,7 +4260,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Field
                 row
                 label="ASN 库"
-                hint="给每台节点标出它走谁的线路（ASN + 组织）；同样支持 {YYYY-MM}。"
+                hint="给每台节点标出它走谁的线路（ASN + 组织）；同样支持 {YYYY-MM}。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz"
               >
                 <Input
                   value={text("geo_asn_url")}
@@ -4271,7 +4271,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Field
                 row
                 label="Tor 出口列表"
-                hint="纯文本清单，没有额度限制，所以刷新得比数据库勤。"
+                hint="纯文本清单，没有额度限制，所以刷新得比数据库勤。可用：https://check.torproject.org/torbulkexitlist"
               >
                 <Input
                   value={text("geo_tor_url")}
@@ -4283,6 +4283,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
             <p className="text-xs leading-relaxed text-muted-foreground">
               只接受 https 地址。已配置的库会各自按自己的节奏刷新（数据库每天一次，Tor 列表每小时）。这里的库全部在 hub
               本地查询，不涉及任何外部请求 —— 与上面的「IP 风险（在线库）」是两条完全不同的路。
+              <br />
+              两家数据源都可以用：DB-IP 不用注册（CC BY 4.0，可就地分发），MaxMind 更准一点但要先注册免费账号拿
+              license key，且它发的是 .tar.gz。两家都配也可以 —— hub 优先用 MaxMind，取不到才退回 DB-IP。
             </p>
             {/* 每节自己的保存 ✓ —— 这一页的 set 只是草稿 ✓，只有 save(…) 才落库 ✓。 */}
             <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
