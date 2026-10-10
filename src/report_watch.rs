@@ -36,6 +36,40 @@ fn offset_minutes(tz: &str) -> i32 {
     }
 }
 
+/// 严格校验：`HH:MM` ✓（**与 `offset_minutes` 不同** ✗ —— 那个是"坏值就退默认" ✓，
+/// 而校验要的是"坏值就拒绝" ✓。两者用途不同，不能共用一个函数 ✓）。
+pub fn valid_time(v: &str) -> bool {
+    match v.split_once(':') {
+        Some((h, m)) => {
+            matches!((h.trim().parse::<u32>(), m.trim().parse::<u32>()), (Ok(h), Ok(m)) if h < 24 && m < 60)
+        }
+        None => false,
+    }
+}
+
+/// 严格校验：`±HH:MM` 且在 ±14:00 内 ✓（空串表示"用默认 +08:00" ✓，所以也算合法 ✓）。
+pub fn valid_tz(v: &str) -> bool {
+    if v.trim().is_empty() {
+        return true;
+    }
+    let t = v.trim();
+    if !(t.starts_with('+') || t.starts_with('-')) {
+        return false;
+    }
+    match t[1..].split_once(':') {
+        Some((h, m)) => match (h.trim().parse::<i32>(), m.trim().parse::<i32>()) {
+            (Ok(h), Ok(m)) => h <= 14 && m < 60 && (h < 14 || m == 0),
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+/// 严格校验：逗号分隔，元素只能是那四个（**空串合法** ✓ = 一个周期都不发 ✓）。
+pub fn valid_periods(v: &str) -> bool {
+    v.split(',').all(|p| matches!(p.trim(), "" | "day" | "week" | "month" | "quarter"))
+}
+
 fn label(minutes: i32) -> String {
     let (s, m) = if minutes < 0 { ('-', -minutes) } else { ('+', minutes) };
     format!("UTC{s}{:02}:{:02}", m / 60, m % 60)

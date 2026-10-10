@@ -120,6 +120,12 @@ pub fn settings(app: &App, out: &mut serde_json::Map<String, Value>) {
     out.insert("notify_telegram_chat".into(), json!(app.db.get("notify_telegram_chat").unwrap_or_default()));
     out.insert("notify_telegram_text".into(), json!(template(app, "notify_telegram_text", DEFAULT_TEXT)));
     out.insert("notify_webhook_body".into(), json!(template(app, "notify_webhook_body", DEFAULT_BODY)));
+    // 流量报告（调度在 `report_watch` ✓）。**默认：一个周期都不发** ✓ ——
+    // 不能"默认全发" ✗：那会让升级后的机器突然开始给所有人发报告 ✓。
+    // 时间与时区给默认值 ✓（+08:00 是维护者定的 ✓）—— 否则面板会看到空串 ✗。
+    out.insert("report_periods".into(), json!(app.db.get("report_periods").unwrap_or_default()));
+    out.insert("report_time".into(), json!(app.db.get("report_time").unwrap_or_else(|| "09:00".to_string())));
+    out.insert("report_tz".into(), json!(app.db.get("report_tz").unwrap_or_else(|| "+08:00".to_string())));
     for key in SECRETS {
         out.insert(format!("{key}_set"), json!(setting(app, key).is_some()));
     }
