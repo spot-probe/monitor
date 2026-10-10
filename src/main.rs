@@ -40,6 +40,11 @@ pub type Shared = Arc<App>;
 
 pub struct App {
     pub db: Db,
+    /// IP 库（MaxMind / Tor 列表 …）放在哪 ✓ —— 与数据库同目录 ✓（推导见 `geo::data_dir` ✓）。
+    // 读它的是**下一步**的下载与刷新（`geo::watch` ✓），所以现在只被写、还没被读 ✗ ⇒ 暂标 allow，
+    // 紧跟着这条说明，接上下载后删掉 ✓（与 `geo.rs` / `report.rs` 同一处理 ✓）。
+    #[allow(dead_code)]
+    pub data_dir: std::path::PathBuf,
     /// Every connected agent: its outbound channel, the session that opened it,
     /// and its latest report. A single map, since connectivity and current
     /// figures are one fact about a node rather than two. See `agent_ws`.
@@ -107,8 +112,10 @@ impl App {
         themes: PathBuf,
         notes: tokio::sync::mpsc::Sender<notify::Note>,
         group_dropdown: bool,
+        data_dir: std::path::PathBuf,
     ) -> Self {
         Self {
+            data_dir,
             db,
             agents: RwLock::default(),
             snapshot: Mutex::new([(0, Default::default()), (0, Default::default())]),
@@ -133,14 +140,28 @@ impl App {
     #[cfg(test)]
     pub fn for_test(db: Db) -> Self {
         // Nothing delivers in tests; `notify::send` drops into the closed channel.
-        Self::new(db, String::new(), PathBuf::from("themes"), tokio::sync::mpsc::channel(1).0, false)
+        Self::new(
+            db,
+            String::new(),
+            PathBuf::from("themes"),
+            tokio::sync::mpsc::channel(1).0,
+            false,
+            std::env::temp_dir(),
+        )
     }
 
     /// As `for_test`, with the group list switched on: the only startup flag the
     /// panel can see, and so the only one worth a test of its own.
     #[cfg(test)]
     pub fn for_test_group_dropdown(db: Db) -> Self {
-        Self::new(db, String::new(), PathBuf::from("themes"), tokio::sync::mpsc::channel(1).0, true)
+        Self::new(
+            db,
+            String::new(),
+            PathBuf::from("themes"),
+            tokio::sync::mpsc::channel(1).0,
+            true,
+            std::env::temp_dir(),
+        )
     }
 
     pub fn public_page(&self) -> bool {
@@ -450,6 +471,10 @@ async fn main() -> Result<()> {
         args.themes,
         notes,
         args.group_dropdown,
+        // 与 DB 同目录 ✓（只有这里知道 DB 路径 ✓）。
+        // `--data-dir` 覆盖**还没做** ✗：要给 `parse_args` 的返回结构加一个字段 ✓，是独立一小步 ✓。
+        // 在那之前**不接这个开关** ✓ —— 绝不留"解析了却没人读"的参数 ✗（那正是我今天栽过的 ✓）。
+        crate::geo::data_dir(&args.database, None),
     ));
     // A stored window above the ceiling is read as the ceiling, and the hourly prune
     // then deletes the history past it. That is the one change here that can take
@@ -882,6 +907,7 @@ mod tests {
             PathBuf::from("themes"),
             tokio::sync::mpsc::channel(1).0,
             false,
+            std::env::temp_dir(),
         )
     }
 
