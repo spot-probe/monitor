@@ -1902,6 +1902,36 @@ impl Db {
             .filter(|d| !d.is_empty())
     }
 
+    /// 把一次 IP 查询的结论落到节点上 ✓（八个可空列 ✓）。
+    ///
+    /// **查不到的字段写 NULL，不写空串** ✓✓ —— 这一条是刻意的 ✗：
+    /// `''` 会被读成"这个国家是空的" ✓，而 `NULL` 才是"未知" ✓；
+    /// 面板与主题据此决定要不要显示那一格 ✓ —— 两者混起来就没法区分了 ✓。
+    /// （`params!` 里传 `Option` 就自然得到 NULL ✓，不必手写 `CASE` ✓。）
+    // 调用它的是**下一步**：节点连上来时按"欠一次查询"那套触发（`agent_ws.rs` 的 `country_owed` ✓）。
+    // 在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
+    #[allow(dead_code)]
+    pub fn save_quality(&self, node_id: i64, q: &crate::geo::Quality) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE node SET q_country=?2, q_city=?3, q_subdivision=?4, q_latitude=?5,
+                             q_longitude=?6, q_time_zone=?7, q_asn=?8, q_org=?9
+             WHERE id=?1",
+            params![
+                node_id,
+                q.country,
+                q.city,
+                q.subdivision,
+                q.latitude,
+                q.longitude,
+                q.time_zone,
+                q.asn,
+                q.org
+            ],
+        )?;
+        Ok(())
+    }
+
     /// 每台节点的**月度额度**（0 = 不限 ✓，与 `node.traffic_limit` 同一约定 ✓）。
     ///
     /// 报告的"超限 / 将超限"要它 ✓ —— 额度是**月度**的 ✓，所以判断看的是"本月已用"
@@ -5049,6 +5079,55 @@ mod tests {
         // 这件事在报告里失真 ✓）。
         let had = db.traffic_sums("2020-01-01", "2020-01-02");
         assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    /// 落库：有值就写值 ✓、**没有就写 NULL 而不是空串** ✓✓ —— 后者会被读成"这个国家是空的" ✓。
+    #[test]
+    fn quality_lands_as_null_when_it_is_unknown() {
+        let db = db();
+        let id = node(&db, 1);
+        // 先放一份"查到了"的 ✓
+        db.save_quality(
+            id,
+            &crate::geo::Quality {
+                country: Some("HK".into()),
+                city: Some("Hong Kong".into()),
+                latitude: Some(22.3193),
+                asn: Some(906),
+                org: Some("DMIT".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let row = |c: &str| -> Option<String> {
+            // 一律按**文本**读 ✓（`CAST` 一下 ✓）—— `q_asn` 是 INTEGER ✓，
+            // 而"它是不是 NULL"这件事与类型无关 ✓，测试只想问那个 ✓。
+            db.conn()
+                .query_row(&format!("SELECT CAST({c} AS TEXT) FROM node WHERE id=?1"), [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(row("q_country").as_deref(), Some("HK"));
+        assert_eq!(row("q_city").as_deref(), Some("Hong Kong"));
+        assert_eq!(row("q_org").as_deref(), Some("DMIT"));
+        assert_eq!(row("q_asn").as_deref(), Some("906"));
+        // 没查到的两列 **必须是 NULL** ✓（不是空串 ✗）
+        assert_eq!(row("q_subdivision"), None, "查不到 ⇒ NULL");
+        assert_eq!(row("q_time_zone"), None, "查不到 ⇒ NULL");
+
+        // 再落一份"什么都没查到"的 ✓ ⇒ 八列**全部回到 NULL** ✓（覆盖旧值 ✓）
+        db.save_quality(id, &crate::geo::Quality::default()).unwrap();
+        for c in [
+            "q_country",
+            "q_city",
+            "q_subdivision",
+            "q_latitude",
+            "q_longitude",
+            "q_time_zone",
+            "q_asn",
+            "q_org",
+        ] {
+            assert_eq!(row(c), None, "{c} 应当回到 NULL");
+        }
     }
 
     /// **升级路径的闸**：一个"16 版"的库（没有那八列）迁移后必须有它们、且戳到 17 ✓。
