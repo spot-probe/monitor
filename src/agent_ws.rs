@@ -278,17 +278,30 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
                 if let Some(source) = &owed {
                     match tokio::task::block_in_place(|| app.db.country_owed(node_id, source)) {
                         Ok(true) => {
-                            // 三路各自判断、各自节流 ✓（同一时机、同一地址 ✓）：
-                            // 国家 ✓（第三方 · 只存两字母）、本地质量 ✓（本地库 · 不外发）、
-                            // 在线风险 ✓（第三方 · **默认关** ✓、每天一次 ✓）。
+                            // 国家与在线风险挂在**国家**这套门上 ✓（前者的答案就是国家 ✓；
+                            // 后者要等地址确凿 ✓）。
                             locate(app.clone(), node_id, source.clone());
-                            qualify(app.clone(), node_id, source.clone());
                             assess(app.clone(), node_id, source.clone());
                         }
+
                         Ok(false) => owed = None,
                         Err(e) => debug!("node {node_id}: country check failed: {e:#}"),
                     }
                 }
+                    // 本地质量（IP 结论）**自己的门** ✓✓ —— 绝不挂在国家那套上 ✗✗。
+                    // 现场证据（2026-10-11 生产环境）：六台节点**早就有国家** ✓ ⇒ 国家门永久关着 ✓
+                    // ⇒ `qualify` 从未被调用 ✓，而两个 .mmdb 好好躺在数据目录里 ✓✗ ——
+                    // 面板永远显示"还没查到" ✓，且**没有任何报错** ✓。这就是那个 bug ✓。
+                    match tokio::task::block_in_place(|| {
+                        app.db
+                            .quality_source(node_id)
+                            .map(|src| app.db.quality_owed(node_id, &src).map(|owed| (src, owed)))
+                            .transpose()
+                    }) {
+                        Ok(Some((src, true))) => qualify(app.clone(), node_id, src),
+                        Ok(_) => {} // 地址挑不出来 ✓（内网 / 还没上报 ✓）或已经查过 ✓ ⇒ 什么都不做 ✓
+                        Err(e) => debug!("node {node_id}: quality check failed: {e:#}"),
+                    }
                 socket.send(Message::Ping(Vec::new().into())).await?;
             }
             inbound = socket.recv() => {

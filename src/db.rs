@@ -1979,6 +1979,38 @@ impl Db {
         Ok(())
     }
 
+    /// 这台节点**还欠一次本地质量查询吗** ✓✓。
+    ///
+    /// 判据与 `Node::quality` 判"过期"**是同一条** ✓：结论属于当前地址就不欠 ✓ ——
+    /// 一处定义、两处使用 ✓，否则"该不该查"和"算不算数"迟早会分叉 ✓
+    ///（那会变成"一直在查但永远显示未知"或者反过来 ✓，两种都很难查 ✓）。
+    pub fn quality_owed(&self, id: i64, source: &str) -> Result<bool> {
+        let conn = self.conn();
+        Ok(conn.query_row(
+            "SELECT COALESCE(q_ip, '') <> ?2 FROM node WHERE id=?1",
+            params![id, source],
+            |r| r.get::<_, bool>(0),
+        )?)
+    }
+
+    /// 这台节点**现在该拿哪个地址去查** ✓（就是面板与主题读结论时用的那个 ✓✓）。
+    ///
+    /// 刻意**不在这里再挑一遍** ✗：交给 `agent_ws::country_source` —— 挑地址的规矩只有一份 ✓。
+    /// 挑不出来（全是内网 ✓ / 还没上报 ✓）⇒ `None` ✓，调用方就什么都不做 ✓。
+    pub fn quality_source(&self, id: i64) -> Option<String> {
+        let conn = self.conn();
+        let (ip, v4, v6) = conn
+            .query_row("SELECT ip, ipv4, ipv6 FROM node WHERE id=?1", [id], |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                ))
+            })
+            .ok()?;
+        crate::agent_ws::country_source(&ip, &v4, &v6).map(|a| a.to_string())
+    }
+
     /// 读某天某来源的缓存 ✓（`None` = **今天还没查过** ⇒ 调用方该去请求 ✓）。
     ///
     /// 这一句就是"**每个 IP 每天只查一次**"的执行者 ✓✓ —— 额度爆掉与否全看它 ✓。
@@ -5309,6 +5341,33 @@ mod tests {
         assert_eq!(db.risk_cached(ip, "abuseipdb", "2026-03-15").as_deref(), Some("{}"));
         let rows: i64 = db.conn().query_row("SELECT COUNT(*) FROM risk_day", [], |r| r.get(0)).unwrap();
         assert_eq!(rows, 1, "同一天同一来源只该有一行");
+    }
+
+    /// **现场那个 bug 的单测** ✓✓（2026-10-11）：节点**已经有国家** ✓，但本地质量从来没查过 ✓。
+    ///
+    /// 我原来把"要不要查质量"挂在**国家那套欠账门**上 ✗ ⇒ 国家一查到，门就永久关上 ✓
+    /// ⇒ `q_ip` 一直是空 ✓ ⇒ 面板永远"还没查到" ✓✗。
+    /// 这条测试盯的就是这个场景 ✓：**国家已知，不影响质量自己的门** ✓✓。
+    #[test]
+    fn quality_is_still_owed_when_the_country_is_already_known() {
+        let db = db();
+        let id = node(&db, 1);
+        let src = "203.0.113.9";
+        // 国家查到了 ✓（正是那六台机器的状态 ✓）
+        db.set_country(id, "US", src).unwrap();
+        assert!(!db.country_owed(id, src).unwrap(), "国家门已关 ✓（这就是当时的处境 ✓）");
+        // ⇒ 但**质量的门仍然开着** ✓✓
+        assert!(db.quality_owed(id, src).unwrap(), "国家已知不该把质量的门也关上");
+        // 查过并落库之后 ✓ ⇒ 门才关 ✓
+        db.save_quality(
+            id,
+            &crate::geo::Quality { country: Some("US".into()), asn: Some(13335), ..Default::default() },
+            src,
+        )
+        .unwrap();
+        assert!(!db.quality_owed(id, src).unwrap(), "查过这个地址了 ⇒ 不欠 ✓");
+        // 换过地址 ⇒ 又欠了 ✓（与 `Node::quality` 判过期同一条规矩 ✓）
+        assert!(db.quality_owed(id, "198.51.100.4").unwrap(), "换地址 ⇒ 重新欠一次 ✓");
     }
 
     /// 在线结论的过期判断：与质量**同一条规矩** ✓✓（地址不符 ⇒ 当作未知 ✓）。
