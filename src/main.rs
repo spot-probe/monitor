@@ -350,6 +350,8 @@ struct Args {
     database: String,
     site: String,
     themes: PathBuf,
+    /// `--data-dir`：IP 数据库（节点质量）放哪 ✓ —— 不给就**与数据库同目录** ✓（见 `geo::data_dir` ✓）。
+    data_dir: Option<String>,
     reset_password: bool,
     /// `--group-dropdown`: offer the group names already in use under the group
     /// field in the panel. Off, that field stays a plain text box.
@@ -382,6 +384,9 @@ fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args> {
     let mut database = "monitor.db".to_owned();
     let mut site = String::new();
     let mut themes = None;
+    // IP 数据库放哪 ✓。不给 ⇒ 与 `--db` 同目录 ✓ —— 显式参数只在"想把库放在别处"时才需要 ✓
+    //（比如 db 在系统目录、库想放大盘 ✓）。
+    let mut data_dir: Option<String> = None;
     let mut reset_password = false;
     let mut group_dropdown = false;
     while let Some(arg) = it.next() {
@@ -391,6 +396,7 @@ fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args> {
             "--db" => database = value(),
             "--site" => site = value(),
             "--themes" => themes = Some(PathBuf::from(value())),
+            "--data-dir" => data_dir = Some(value()),
             "--reset-password" => reset_password = true,
             // Opt-in: the list is a help where many names are in use, and a
             // question nobody needed answered everywhere else.
@@ -398,11 +404,13 @@ fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args> {
             "-h" | "--help" => {
                 println!(
                     "monitor-hub {}\n\n\
-                     Usage: monitor-hub [--listen [::]:28080] [--db monitor.db] [--themes themes] [--site https://hub.example.com]\n       \
+                     Usage: monitor-hub [--listen [::]:28080] [--db monitor.db] [--themes themes] [--data-dir dir] [--site https://hub.example.com]\n       \
                      monitor-hub --db monitor.db --reset-password\n\n\
                      --listen defaults to [::]:28080, one socket serving IPv6 and IPv4\n\
                      both; where the kernel has no dual-stack sockets it is 0.0.0.0:28080.\n\
                      --themes defaults to a themes/ directory beside the database.\n\
+                     --data-dir defaults to the directory holding the database, which is also\n\
+                     where the IP databases (node quality) are kept.\n\
                      --site is only needed behind a reverse proxy, where the address the\n\
                      panel is reached on is not the one agents should use. Left out, the\n\
                      hub answers on whatever ip:port it is asked, and the panel builds\n\
@@ -430,6 +438,7 @@ fn parse_args_from(mut it: impl Iterator<Item = String>) -> Result<Args> {
         database,
         site: site.trim_end_matches('/').to_owned(),
         themes,
+        data_dir,
         reset_password,
         group_dropdown,
     })
@@ -472,7 +481,7 @@ async fn main() -> Result<()> {
         // 与 DB 同目录 ✓（只有这里知道 DB 路径 ✓）。
         // `--data-dir` 覆盖**还没做** ✗：要给 `parse_args` 的返回结构加一个字段 ✓，是独立一小步 ✓。
         // 在那之前**不接这个开关** ✓ —— 绝不留"解析了却没人读"的参数 ✗（那正是我今天栽过的 ✓）。
-        crate::geo::data_dir(&args.database, None),
+        crate::geo::data_dir(&args.database, args.data_dir.as_deref()),
     ));
     // A stored window above the ceiling is read as the ceiling, and the hourly prune
     // then deletes the history past it. That is the one change here that can take
@@ -920,6 +929,10 @@ mod tests {
         assert!(!args(&[]).group_dropdown, "off by default");
         assert!(args(&["--group-dropdown"]).group_dropdown);
         assert!(args(&["--db", "other.db", "--group-dropdown"]).group_dropdown);
+        // `--data-dir`：**不给就是 None** ✓（`geo::data_dir` 据此退回"与 db 同目录" ✓，
+        // 所以"没给"与"给了个空串"必须都被当成没给 ✓ —— 后者由 `geo::data_dir` 自己挡 ✓）。
+        assert_eq!(args(&["--db", "x.db"]).data_dir, None);
+        assert_eq!(args(&["--data-dir", "/mnt/geo"]).data_dir.as_deref(), Some("/mnt/geo"));
     }
 
     /// A request as a reverse proxy would forward it, or as it arrives with none
