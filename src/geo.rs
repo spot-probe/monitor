@@ -148,6 +148,9 @@ pub struct Source {
     pub key: &'static str,
     /// 小于这个字节数一定是坏的 ✓（一个 200 字节的"城市库"不可能是真的 ✓）。
     pub min_bytes: usize,
+    /// 厂商发出来的**包装** ✓ —— 免费库几乎都发压缩包 ✗（MaxMind 是 `.tar.gz` ✓、DB-IP 是 `.mmdb.gz` ✓），
+    /// 只有 Tor 列表是裸文本 ✓。所以"只收裸 .mmdb"那条老规矩行不通 ✓（`unpack` 负责解开 ✓）。
+    pub pack: Pack,
     /// **多久刷一次** ✓✓ —— 必须按来源定 ✗，不能一刀切：
     /// MaxMind 的 EULA 限**每天 30 次下载** ✗（官方页写明 ✓），而 Tor 列表随时小改、没有额度 ✓。
     pub every: std::time::Duration,
@@ -164,6 +167,7 @@ pub struct Source {
 pub const SOURCES: [Source; 3] = [
     Source {
         name: "GeoLite2-City.mmdb",
+        pack: Pack::TarGz,
         shape: Shape::Mmdb,
         key: "geo_city_url",
         min_bytes: 1 << 20,
@@ -171,6 +175,7 @@ pub const SOURCES: [Source; 3] = [
     },
     Source {
         name: "GeoLite2-ASN.mmdb",
+        pack: Pack::TarGz,
         shape: Shape::Mmdb,
         key: "geo_asn_url",
         min_bytes: 1 << 20,
@@ -178,6 +183,7 @@ pub const SOURCES: [Source; 3] = [
     },
     Source {
         name: "tor-exit.txt",
+        pack: Pack::Raw,
         shape: Shape::Text,
         key: "geo_tor_url",
         min_bytes: 1 << 10,
@@ -215,6 +221,55 @@ pub fn data_dir(db_path: &str, explicit: Option<&str>) -> std::path::PathBuf {
         .filter(|d| !d.as_os_str().is_empty())
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// 厂商文件的**包装形态** ✓。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pack {
+    /// 裸文件 ✓（Tor 列表 ✓）。
+    Raw,
+    /// `.gz` ✓（DB-IP 的 `.mmdb.gz` ✓）。
+    // 还没人用 ✗：DB-IP 就是**零注册**那条路 ✓（下一步加进 `SOURCES` ✓）——
+    // 先把解压这一层与它的往返测试做好 ✓，加来源只是各一行 ✓。
+    #[allow(dead_code)]
+    Gzip,
+    /// `.tar.gz` ✓（MaxMind 的下载包 ✓ —— 里面还带一层目录 ✓，所以要挑出那个 `.mmdb` ✓）。
+    TarGz,
+}
+
+/// 解开包装 ✓，返回**里面那个真正的库文件** ✓。
+pub fn unpack(pack: Pack, name: &str, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    match pack {
+        Pack::Raw => Ok(bytes.to_vec()),
+        Pack::Gzip => gunzip(bytes),
+        Pack::TarGz => {
+            let tar = gunzip(bytes)?;
+            let mut archive = tar::Archive::new(std::io::Cursor::new(tar));
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                // 按**后缀**挑 ✓：MaxMind 包里那句真库叫 `GeoLite2-City.mmdb` ✓，
+                // 而目录名带日期 ✓（`GeoLite2-City_20260307/` ✓）⇒ 不能按整条路径比 ✓。
+                let path = entry.path()?.to_string_lossy().into_owned();
+                if path.ends_with(".mmdb") {
+                    let mut out = Vec::with_capacity(entry.size() as usize);
+                    std::io::copy(&mut entry, &mut out)?;
+                    return Ok(out);
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{name}: the archive holds no .mmdb file"),
+            ))
+        }
+    }
+}
+
+/// 解开一层 gzip ✓。
+fn gunzip(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes).read_to_end(&mut out)?;
+    Ok(out)
 }
 
 /// 库文件的形态决定怎么校验 ✓。
@@ -318,6 +373,17 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
         }
         Err(e) => {
             tracing::warn!("geo: {}: request failed: {e:#}", source.name);
+            return false;
+        }
+    };
+    // 厂商发出来的多半是**压缩包** ✗（MaxMind 是 .tar.gz ✓、DB-IP 是 .mmdb.gz ✓）
+    // ⇒ 先解开再校验 ✓（校验器只认裸 .mmdb ✓）。
+    // ⚠️ **顺序要紧** ✗：解压失败 ⇒ 直接返回 ⇒ **旧文件一动不动** ✓
+    //（与"下载失败不覆盖"是同一道防线 ✓，只是发生在更前面一步 ✓）。
+    let bytes = match unpack(source.pack, source.name, &bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("geo: {}: cannot unpack the download: {e:#}", source.name);
             return false;
         }
     };
@@ -447,6 +513,55 @@ mod tests {
         assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
         // 两个都没有 ⇒ 全空 ✓
         assert_eq!(merge(None, None), Quality::default());
+    }
+
+    /// **解压这条路要真的被执行过** ✓✓ —— 往返测一次，而不是只测"坏包会被拒" ✗。
+    /// 这一条很重要 ✗：`lookup` 调 mmdb 那几行是"薄到不用测"的 ✓，
+    /// 于是"厂商给的包能不能解开"就成了最容易在真机上第一次才发现的事 ✓。
+    #[test]
+    fn archives_round_trip_to_the_database_inside() {
+        use std::io::Write;
+        let inner = fake_mmdb();
+
+        // ① `.gz` ✓（DB-IP 那种 ✓）
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&inner).unwrap();
+        let gz = enc.finish().unwrap();
+        assert!(looks_like_mmdb(&unpack(Pack::Gzip, "x.mmdb", &gz).unwrap()), "解出来要是那份库 ✓");
+
+        // ② `.tar.gz` ✓（MaxMind 那种 ✓ —— 而且**带一层目录** ✓，所以要按后缀挑 ✓）
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(inner.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "GeoLite2-City_20260307/GeoLite2-City.mmdb", inner.as_slice()).unwrap();
+        let tarball = tar.into_inner().unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tarball).unwrap();
+        let tgz = enc.finish().unwrap();
+        assert!(
+            looks_like_mmdb(&unpack(Pack::TarGz, "x.mmdb", &tgz).unwrap()),
+            "带日期目录的 tar.gz 也要挑出那份库 ✓"
+        );
+
+        // ③ 裸文件原样通过 ✓
+        assert_eq!(unpack(Pack::Raw, "x.txt", b"1.2.3.4\n").unwrap(), b"1.2.3.4\n");
+        // ④ 坏包/不是压缩包 ⇒ 报错 ✓（调用方据此**保留旧文件** ✓）
+        assert!(unpack(Pack::Gzip, "x.mmdb", b"not gzip at all").is_err());
+        assert!(unpack(Pack::TarGz, "x.mmdb", &gz).is_err(), "只有 gz、没有 tar ⇒ 拒绝");
+        // ⑤ tar.gz 里**没有 .mmdb** ⇒ 明说 ✓（别把一整包文档当成数据库 ✓）
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "README.md", b"hi\n".as_slice()).unwrap();
+        let plain = tar.into_inner().unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&plain).unwrap();
+        let no_db = enc.finish().unwrap();
+        assert!(unpack(Pack::TarGz, "x.mmdb", &no_db).is_err(), "包里没有 .mmdb ⇒ 拒绝");
     }
 
     /// URL 里的日期占位符 ✓✓ —— 这条测试的意义是"**不必等到下个月**"就能验 ✓：
