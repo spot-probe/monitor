@@ -18,6 +18,46 @@
 
 use std::path::Path;
 
+/// 库清单里的一个库 ✓。
+///
+/// **URL 不在代码里** ✗✓：镜像地址由设置给（默认空 ✓）—— 与 `github_proxy` 完全同形 ✓：
+/// 运维指一个自己信得过的镜像 ✓，而代码里**不编任何地址** ✗
+/// （编一个就是又一个"悄悄下不到、字段全空"的来源 ✓）。
+pub struct Source {
+    /// 落盘的名字 ✓（也是查询那一层要打开的文件名 ✓）。
+    pub name: &'static str,
+    pub shape: Shape,
+    /// 哪个设置键给它的 URL ✓（空 = 没配 ⇒ 跳过这个库 ✓，不是报错 ✗）。
+    pub key: &'static str,
+    /// 小于这个字节数一定是坏的 ✓（一个 200 字节的"城市库"不可能是真的 ✓）。
+    pub min_bytes: usize,
+}
+
+/// 现在纳入的库 ✓ —— **只放我确认过形态的** ✗：
+/// MaxMind 是 mmdb ✓、Tor 出口是纯文本 ✓；
+/// IP2Proxy LITE / DB-IP 的发布形态（mmdb ✗ BIN ✗ CSV ✗）**我没有核实** ✓，
+/// 所以先不写进来 ✓ —— 核实之后各加一行即可 ✓（它们的形态字段已经准备好 ✓）。
+pub const SOURCES: [Source; 3] = [
+    Source { name: "GeoLite2-City.mmdb", shape: Shape::Mmdb, key: "geo_city_url", min_bytes: 1 << 20 },
+    Source { name: "GeoLite2-ASN.mmdb", shape: Shape::Mmdb, key: "geo_asn_url", min_bytes: 1 << 20 },
+    Source { name: "tor-exit.txt", shape: Shape::Text, key: "geo_tor_url", min_bytes: 1 << 10 },
+];
+
+/// 库文件放哪 ✓：**显式参数优先** ✓，否则与数据库同目录 ✓。
+///
+/// 与 DB 同目录是刻意的 ✓：数据文件跟着数据走 ✓（一眼能找到 ✓，也不碰系统目录 ✓）——
+/// 与 `main.rs` 里给 DB 设权限那句用的是**同一条推导** ✓（那里已经在用 `parent()` ✓）。
+pub fn data_dir(db_path: &str, explicit: Option<&str>) -> std::path::PathBuf {
+    if let Some(d) = explicit.filter(|d| !d.trim().is_empty()) {
+        return std::path::PathBuf::from(d);
+    }
+    std::path::Path::new(db_path)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 /// 库文件的形态决定怎么校验 ✓。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
@@ -103,6 +143,27 @@ mod tests {
         v.extend_from_slice(MMDB_MARKER);
         v.extend_from_slice(b"\x00\x00");
         v
+    }
+
+    /// 数据目录：显式优先 ✓；否则与 DB 同目录 ✓；DB 就在当前目录时退回 `.` ✓。
+    #[test]
+    fn the_data_dir_follows_the_database_unless_told_otherwise() {
+        assert_eq!(data_dir("/var/lib/monitor/hub.db", None), std::path::PathBuf::from("/var/lib/monitor"));
+        assert_eq!(data_dir("hub.db", None), std::path::PathBuf::from("."));
+        assert_eq!(data_dir("/x/hub.db", Some("/mnt/geo")), std::path::PathBuf::from("/mnt/geo"));
+        // 空的显式值当作"没给" ✓ —— 命令行传了个空字符串不该把库丢到别处 ✓。
+        assert_eq!(data_dir("/x/hub.db", Some("  ")), std::path::PathBuf::from("/x"));
+    }
+
+    /// 库清单里**没有硬编码的地址** ✓✓ —— 这是刻意的 ✗：镜像由设置给（与 `github_proxy` 同形 ✓）。
+    /// 这条测试是"别哪天有人图省事塞一个 URL 进来"的护栏 ✓。
+    #[test]
+    fn no_source_carries_a_hardcoded_url() {
+        for s in SOURCES {
+            assert!(s.key.starts_with("geo_"), "URL 必须来自设置：{}", s.name);
+            assert!(s.name.ends_with(".mmdb") || s.name.ends_with(".txt"), "落盘名要能看出形态：{}", s.name);
+            assert!(s.min_bytes >= 1024, "最小尺寸太小挡不住坏下载：{}", s.name);
+        }
     }
 
     /// **下载失败/内容损坏 ⇒ 旧文件原封不动** ✓✓ —— 这一块的命门 ✓。
