@@ -1857,9 +1857,11 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
       {/* **与矩阵逐列对齐**：矩阵的格子从 `w-24` 的毫秒标签之后开始，色条也必须如此 ——
           否则整块矩阵会被右移一个标签宽，上下对不上（维护者一眼看出来的 ✓）。
           所以这里放一个等宽占位，并用**同样的 `gap-1.5`** ✓。 */}
-      <div className="flex h-2 items-center gap-1.5">
+      <div className="flex items-center gap-1.5">
         <span className="w-24 shrink-0" />
-        <div className="flex flex-1 gap-px overflow-hidden rounded-sm">
+        {/* **高度必须在格子这一层** ✗ —— 我上一改把它留在了外层 ⇒ 内层高度塌成 0 ⇒
+            整条色条看不见了（维护者截图里那条空白就是它 ✓）。外层只管居中与间距 ✓。 */}
+        <div className="flex h-2 flex-1 gap-px overflow-hidden rounded-sm">
         {points.map((p) => (
           <span
             key={p.ts}
