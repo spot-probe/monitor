@@ -1535,6 +1535,10 @@ const READABLE_SETTINGS: &[&str] = &[
     "report_periods",
     "report_time",
     "report_tz",
+    // IP 数据库的镜像地址（节点质量 ✓；空 = 没配 ✓，调度跳过 ✓）。
+    "geo_city_url",
+    "geo_asn_url",
+    "geo_tor_url",
 ];
 
 /// How long a release lookup stands before the panel asks GitHub again, and how
@@ -2667,6 +2671,13 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
         }
         "report_tz" if !crate::report_watch::valid_tz(value) => {
             Some("report time zone must look like +08:00".into())
+        }
+        // IP 库的镜像地址 ✓：**与 `github_proxy` 同一规则** —— hub 会自己去取它 ✓，
+        // 而取回的内容会被当作"IP 结论"使用 ✓ ⇒ 只允许 https ✓。
+        // **空值是合法的** ✓：表示"这个库没配" ✓ ⇒ 调度跳过它 ✓（不是报错 ✗）。
+        k if k.starts_with("geo_") && k.ends_with("_url") => {
+            (!value.is_empty() && !value.starts_with("https://"))
+                .then_some("geo database URL must start with https://".into())
         }
         k if READABLE_SETTINGS.contains(&k) || k == "github_client_secret" => None,
         _ => Some(format!("unknown setting: {key}")),
