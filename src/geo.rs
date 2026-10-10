@@ -10,12 +10,7 @@
 //! 所以：**先写临时文件 → 校验 → 原子替换** ✓✓ —— 校验不过就**原封不动** ✓。
 //! 这条是这一块的命门 ✓，所以它有自己的单测（不碰网络 ✓）。
 
-// ⚠️ **整块还没接线** ✗：下载、来源清单与 `App.data_dir` 是**下一块**的事 ✓，
-// 所以现在只有测试在调用这些函数 ⇒ clippy 会报一串 dead_code ✗。
-// 这是**欠账**，不是设计 ✓ —— 下一块接上后，这行 allow 必须删掉 ✓
-//（`report.rs` 顶部那行就是这么加的、也是这么删的 ✓✓）。
-#![allow(dead_code)]
-
+use crate::App;
 use std::path::Path;
 
 /// 库清单里的一个库 ✓。
@@ -124,6 +119,84 @@ pub fn store_atomic(dir: &Path, name: &str, shape: Shape, bytes: &[u8]) -> std::
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
+    }
+}
+
+/// 取一个库并落盘 ✓。**返回是否真的更新了** ✓。
+///
+/// 三处刻意的行为 ✓：
+/// - **URL 空 = 没配 ⇒ 跳过** ✓（不是错误 ✗ —— "没配"是正常状态 ✓，与"配了但下不来"要分开 ✓）；
+/// - **失败只记日志、保留旧文件** ✓：`store_atomic` 已经保证"坏内容不落盘" ✓，
+///   这里再保证"网络失败不动它" ✓ —— 两者合起来就是"一次抖动不能把好库写坏" ✓✓；
+/// - **不因为一个库失败就跳过其余的** ✓（它们是独立的 ✓）。
+pub async fn fetch(app: &App, source: &Source) -> bool {
+    let url = app.db.get(source.key).unwrap_or_default();
+    let url = url.trim();
+    if url.is_empty() {
+        tracing::debug!("geo: {} has no URL configured; skipped", source.name);
+        return false;
+    }
+    let got = app.http.get(url).send().await;
+    let bytes = match got {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("geo: {}: body read failed: {e:#}", source.name);
+                return false;
+            }
+        },
+        Ok(r) => {
+            tracing::warn!("geo: {}: HTTP {} from the configured mirror", source.name, r.status());
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("geo: {}: request failed: {e:#}", source.name);
+            return false;
+        }
+    };
+    if bytes.len() < source.min_bytes {
+        // 明确说出"太小" ✓：镜像返回一个 200 的错误页时，这是唯一看得见的线索 ✓。
+        tracing::warn!(
+            "geo: {}: got {} bytes, below the {} byte floor; keeping the previous file",
+            source.name,
+            bytes.len(),
+            source.min_bytes
+        );
+        return false;
+    }
+    match store_atomic(&app.data_dir, source.name, source.shape, &bytes) {
+        Ok(()) => {
+            tracing::info!("geo: {} updated ({} bytes)", source.name, bytes.len());
+            true
+        }
+        Err(e) => {
+            // `store_atomic` 已经把坏内容挡在门外 ✓，旧文件没动 ✓ —— 这里只需要说出来 ✓。
+            tracing::warn!("geo: {}: rejected and left untouched: {e:#}", source.name);
+            false
+        }
+    }
+}
+
+/// 拉一轮**全部**库 ✓。
+pub async fn refresh(app: &App) -> usize {
+    let mut updated = 0;
+    for source in SOURCES.iter() {
+        if fetch(app, source).await {
+            updated += 1;
+        }
+    }
+    updated
+}
+
+/// 启动时拉一次，然后**低频**刷新 ✓。
+///
+/// 间隔按"库本身更新很慢"来定 ✓（MaxMind 每周 ✓、Tor 列表随时小改 ✓）——
+/// 每小时一次足够 ✓，而且**没有任何额度** ✓（这些是静态文件 ✓）。
+pub async fn watch(app: crate::Shared) {
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    loop {
+        refresh(&app).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
 }
 

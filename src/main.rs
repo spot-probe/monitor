@@ -41,9 +41,6 @@ pub type Shared = Arc<App>;
 pub struct App {
     pub db: Db,
     /// IP 库（MaxMind / Tor 列表 …）放在哪 ✓ —— 与数据库同目录 ✓（推导见 `geo::data_dir` ✓）。
-    // 读它的是**下一步**的下载与刷新（`geo::watch` ✓），所以现在只被写、还没被读 ✗ ⇒ 暂标 allow，
-    // 紧跟着这条说明，接上下载后删掉 ✓（与 `geo.rs` / `report.rs` 同一处理 ✓）。
-    #[allow(dead_code)]
     pub data_dir: std::path::PathBuf,
     /// Every connected agent: its outbound channel, the session that opened it,
     /// and its latest report. A single map, since connectivity and current
@@ -536,6 +533,8 @@ async fn main() -> Result<()> {
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(notify::deliver(app.clone(), inbox));
     tokio::spawn(report_watch::watch(app.clone()));
+    // IP 库（MaxMind / Tor 列表 …）：启动后拉一次，再每小时刷一次 ✓（静态文件 ✓ 无额度 ✓）。
+    tokio::spawn(geo::watch(app.clone()));
     tokio::spawn(notify::watch(app.clone()));
     // The hub embeds a theme, so a fresh install needs no network. That copy is
     // frozen at build time, though, and this is what tells the operator a newer
