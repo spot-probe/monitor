@@ -160,6 +160,23 @@ pub const SOURCES: [Source; 3] = [
     Source { name: "tor-exit.txt", shape: Shape::Text, key: "geo_tor_url", min_bytes: 1 << 10 },
 ];
 
+/// 把配置里的 URL 展开成**这一次真正要取**的地址 ✓ —— 只替换日期占位符 ✓。
+///
+/// 支持 `{YYYY}` ✓ · `{YYYY-MM}` ✓ · `{YYYY-MM-DD}` ✓（都按给定的日期 ✓）。
+///
+/// **为什么需要它** ✗：几家免费库的直链是**带日期**的 ✓（DB-IP 那种
+/// `dbip-city-lite-2026-10.mmdb.gz` ✓）—— 把某个具体月份写进设置，
+/// **下个月就 404** ✓，而症状是"IP 质量莫名变空" ✗，
+/// 与"一次抖动把库写坏"是同一类：代价在别处、动静在这里 ✓。
+/// 让运维写 `{YYYY-MM}` ✓，每月就自动对上 ✓。
+///
+/// **纯函数** ✓（日期由调用方给 ✓）⇒ 它的边界能用测试钉死 ✓，不必等到下个月 ✓。
+pub fn expand(url: &str, now: chrono::NaiveDate) -> String {
+    url.replace("{YYYY-MM-DD}", &now.format("%Y-%m-%d").to_string())
+        .replace("{YYYY-MM}", &now.format("%Y-%m").to_string())
+        .replace("{YYYY}", &now.format("%Y").to_string())
+}
+
 /// 库文件放哪 ✓：**显式参数优先** ✓，否则与数据库同目录 ✓。
 ///
 /// 与 DB 同目录是刻意的 ✓：数据文件跟着数据走 ✓（一眼能找到 ✓，也不碰系统目录 ✓）——
@@ -258,7 +275,10 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
         tracing::debug!("geo: {} has no URL configured; skipped", source.name);
         return false;
     }
-    let got = app.http.get(url).send().await;
+    // 日期占位符在这里展开 ✓（`{YYYY-MM}` 等 ✓）—— 见 `expand` 的说明 ✓：
+    // 带月份的直链写死了就会在某个月的第一天开始 404 ✓，而症状是"IP 质量莫名变空" ✗。
+    let url = expand(url, chrono::Utc::now().date_naive());
+    let got = app.http.get(&url).send().await;
     let bytes = match got {
         Ok(r) if r.status().is_success() => match r.bytes().await {
             Ok(b) => b,
@@ -399,6 +419,24 @@ mod tests {
         assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
         // 两个都没有 ⇒ 全空 ✓
         assert_eq!(merge(None, None), Quality::default());
+    }
+
+    /// URL 里的日期占位符 ✓✓ —— 这条测试的意义是"**不必等到下个月**"就能验 ✓：
+    /// 写死月份的地址会在某个月的第一天开始 404 ✓，而那种错在事发前完全看不出来 ✓。
+    #[test]
+    fn date_placeholders_are_filled_in_from_the_given_day() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        assert_eq!(
+            expand("https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz", d),
+            "https://download.db-ip.com/free/dbip-city-lite-2026-03.mmdb.gz",
+            "**月份要补零** ✓（3 月必须写成 03 ✓ —— 少一位就是一个 404 ✓）"
+        );
+        assert_eq!(expand("https://x/{YYYY}/y.zip", d), "https://x/2026/y.zip");
+        assert_eq!(expand("https://x/{YYYY-MM-DD}/z", d), "https://x/2026-03-07/z");
+        // 没有占位符 ⇒ **原样返回** ✓（绝大多数地址是这样的 ✓）
+        assert_eq!(expand("https://example.com/City.mmdb", d), "https://example.com/City.mmdb");
+        // 两个占位符同时出现也要都对 ✓
+        assert_eq!(expand("https://x/{YYYY}/{YYYY-MM}", d), "https://x/2026/2026-03");
     }
 
     /// 数据目录：显式优先 ✓；否则与 DB 同目录 ✓；DB 就在当前目录时退回 `.` ✓。
