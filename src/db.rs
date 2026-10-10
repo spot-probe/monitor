@@ -1953,6 +1953,25 @@ impl Db {
             .collect())
     }
 
+    /// 把一次**在线**查询的结论落到节点上 ✓（两列 ✓：结论 + 它属于哪个地址 ✓）。
+    ///
+    /// **签名就要求 `Option`** ✓✓：`None` ⇒ 两列都写 `NULL` ✓ ——
+    /// 于是"没查到"在类型上就不可能被写成空串 ✗（空串会被读成"查过了、结果是空" ✓）。
+    /// 与 `save_quality` / `set_country` **同一条规矩** ✓：结论**绑定地址** ✓，
+    /// 读取那一侧据此判过期 ✓（换过出口的机器不该继续显示旧结论 ✓）。
+    pub fn save_risk_for_node(
+        &self,
+        node_id: i64,
+        r: Option<&crate::risk::Risk>,
+        source: &str,
+    ) -> Result<()> {
+        let conn = self.conn();
+        // 存**序列化后的结论** ✓（面板要的就是它 ✓）；`risk_day` 里那份**原样响应**是留给"重新解析"的 ✓。
+        let body = r.and_then(|r| serde_json::to_string(r).ok());
+        conn.execute("UPDATE node SET risk=?2, risk_ip=?3 WHERE id=?1", params![node_id, body, source])?;
+        Ok(())
+    }
+
     /// 读某天某来源的缓存 ✓（`None` = **今天还没查过** ⇒ 调用方该去请求 ✓）。
     ///
     /// 这一句就是"**每个 IP 每天只查一次**"的执行者 ✓✓ —— 额度爆掉与否全看它 ✓。
@@ -5210,6 +5229,40 @@ mod tests {
         // 这件事在报告里失真 ✓）。
         let had = db.traffic_sums("2020-01-01", "2020-01-02");
         assert!(had.is_empty(), "空区间应当是空的");
+    }
+
+    /// 在线结论落库 ✓：有就写 ✓、**没有就 NULL** ✓（而不是空串 ✗）—— 后者会被读成"查过了、结果是空" ✓。
+    #[test]
+    fn risk_lands_as_null_when_there_is_nothing_to_store() {
+        let db = db();
+        let id = node(&db, 1);
+        let r = crate::risk::Risk {
+            source: "AbuseIPDB".into(),
+            score: Some(42.0),
+            label: Some("较高风险".into()),
+            reports: Some(7),
+            usage: None,
+            tor: Some(false),
+        };
+        db.save_risk_for_node(id, Some(&r), "203.0.113.9").unwrap();
+        let got = |c: &str| -> Option<String> {
+            db.conn().query_row(&format!("SELECT {c} FROM node WHERE id=?1"), [id], |x| x.get(0)).unwrap()
+        };
+        assert_eq!(got("risk_ip").as_deref(), Some("203.0.113.9"), "**要记住它是查哪个地址得到的** ✓");
+        let stored = got("risk").expect("结论应当存下来了");
+        // 存的是**可解析的 JSON** ✓（面板直接读它 ✓ —— 不必知道 `Risk` 的内部 ✓）
+        let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(v["source"], "AbuseIPDB");
+        assert_eq!(v["score"], 42.0);
+        assert_eq!(v["reports"], 7);
+        // **没查到 ⇒ 两列回 NULL** ✓（覆盖旧结论 ✓ —— 换过地址之后旧的就不该留着 ✓）
+        db.save_risk_for_node(id, None, "198.51.100.4").unwrap();
+        assert_eq!(got("risk"), None, "没查到 ⇒ NULL，不是空串");
+        assert_eq!(
+            got("risk_ip").as_deref(),
+            Some("198.51.100.4"),
+            "地址仍要更新 ✓（它记的是『查的是谁』✓）"
+        );
     }
 
     /// 额度缓存的读写：**命中就不该再请求** ✓✓ —— 这一条是"免费额度不会当天见底"的保证 ✓。
