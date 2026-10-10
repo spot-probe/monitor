@@ -1928,6 +1928,23 @@ function BandChart({ points, height = 150 }: {
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
       <line x1="0" y1={y(0)} x2={w} y2={y(0)} stroke="currentColor" className="text-foreground/15" strokeWidth="1" vectorEffect="non-scaling-stroke" />
       <line x1="0" y1={pad} x2={w} y2={pad} stroke="currentColor" className="text-foreground/10" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+      {/* **中间的网格线** ✓：左列现在是**真正的纵轴**（5 个刻度 ✓），所以在图里把对应的
+          三条线画出来 —— 否则那些数字悬在空白里，读者没法把曲线的高度换成数值 ✗。
+          分数与左列用的是同一组（25/50/75% ✓），上界也同为 `bandTop` ✓，不会分叉 ✓。 */}
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line
+          key={f}
+          x1="0"
+          y1={pad + f * (height - pad * 2)}
+          x2={w}
+          y2={pad + f * (height - pad * 2)}
+          stroke="currentColor"
+          className="text-foreground/10"
+          strokeWidth="1"
+          strokeDasharray="3 3"
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
       {segs.map((s, i) => (
         <polygon key={`band-${i}`} points={band(s)} className="fill-primary/15" />
       ))}
@@ -2717,8 +2734,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
 					{/* 纵轴泳道：上界 / 0 —— 高度与内边距**跟图一致** ✓（150 与 14 都是 `BandChart`
 					    的默认值 ✓），于是两个数字与图里的网格线在同一条水平线上 ✓。 */}
 					<div className="flex h-[150px] flex-col justify-between py-[14px] text-right text-[9px] leading-none text-muted-foreground">
-						<span>{Math.round(bandTop(pct))} ms</span>
-						<span>0</span>
+						{/* 5 个刻度：上界 / 3/4 / 1/2 / 1/4 / 0 ✓ —— 与图里那 5 条横线（顶、3 条中间、底）
+						    一一对应 ✓。上界同样取 `bandTop` ✓（一处算、两处用 ✓）。 */}
+						{[0, 1, 2, 3, 4].map((i) => (
+							<span key={i}>{i === 4 ? "0" : `${Math.round(bandTop(pct) * (1 - i / 4))} ms`}</span>
+						))}
 					</div>
 					<BandChart points={pct} />
 					{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
