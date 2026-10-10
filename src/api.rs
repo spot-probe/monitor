@@ -1677,6 +1677,37 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
 ///
 /// 不把原始汇率表丢给前端再让它自己算 —— 那样同一条公式会有两份实现，
 /// 早晚分叉（这一整天的教训都是"不许有第二个真相"）。
+/// 热力图：一个探测任务的**延迟分布矩阵**（时间桶 × 延迟区间 → 频次）。
+///
+/// 与 `ping_series` 同一套门禁与同一套窗口推导 ✓（`HISTORY_GATE`、`sample_step`、
+/// `retention_days` 的上限）—— 两条路径对"同一个 hours"必须给出同一个 step，
+/// 否则热力图的格子与折线图的点**对不上**，而那种错在图上很难看出来 ✗。
+pub async fn ping_heatmap(State(app): State<Shared>, Query(q): Query<PingSeriesQuery>) -> Response {
+    let Ok(_permit) = HISTORY_GATE.try_acquire() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
+            .into_response();
+    };
+    let hours = q.hours.unwrap_or(24).clamp(1, app.db.retention_days() * 24);
+    let step = sample_step(hours, q.points);
+    let since = Utc::now().timestamp() - hours * 3_600;
+    let group = q.group.filter(|g| !g.is_empty());
+    let task = q.task;
+    let built =
+        tokio::task::spawn_blocking(move || app.db.ping_heatmap(task, since, step, group.as_deref())).await;
+    match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
+        Ok(h) => {
+            let buckets: Vec<Value> = h
+                .buckets
+                .into_iter()
+                .map(|b| json!({ "ts": b.ts, "counts": b.counts, "lost": b.lost }))
+                .collect();
+            Json(json!({ "hours": hours, "task": task, "edges": h.edges, "buckets": buckets }))
+                .into_response()
+        }
+        Err(e) => fail(e),
+    }
+}
+
 pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
     let Some((table, fetched_at, manual)) = crate::fx::rates(&app) else {
         // 一次都没取到过：**明确说没有**，绝不回退成 1:1。
