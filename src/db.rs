@@ -1054,6 +1054,86 @@ pub type AtRisk = (Vec<AtRiskRow>, Vec<AtRiskRow>, Vec<(String, i64)>);
 ///
 /// `counts` 的长度是 `edges.len() - 1`（由调用方保证）；`lost` 单列而不是混进
 /// `counts` —— 丢包没有延迟、落不进任何延迟区间，而它恰恰是最该看见的那一维。
+/// 报告周期：日报 / 周报 / 月报 / 季报。
+///
+/// **四个周期共用同一个区间算法** ✓ —— 它们不是四套逻辑，而是"同一张按天快照表"的
+/// 四种长度 ✓（这正是先做 `traffic_day` 换来的性质 ✓）。
+// 下一块（报告生成与调度）会构造它 ✓ —— 现在先落地基，所以暂标 allow，
+// 而不是把警告压过去就算：这处 allow 紧跟着这条说明，接上调度后一并删掉 ✓
+//（与热力图那对 struct 同一处理 ✓）。
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Period {
+    Day,
+    Week,
+    Month,
+    Quarter,
+}
+
+impl Period {
+    /// 该周期的**上一个完整周期**：返回 `(start, end, prev_start, prev_end)`，
+    /// 四个日期都是 `YYYY-MM-DD`，区间**含首不含尾**（`start <= date < end` ✓）。
+    ///
+    /// **刻意取"已结束的那一个"，而不是"至今"** ✗：报告是按时发的（默认 09:00 ✓），
+    /// 若取"至今"，今天这一截会被算进去 ✓ ⇒ 同一份日报在 09:00 与 17:00 是两个数 ✗，
+    /// 而"与上周期对比"的基准也会跟着浮动 ✓。固定成"昨天整天"才可比 ✓、也才可复现 ✓。
+    ///
+    /// 边界一律按 **ISO**（周一起算 ✓、季度 1/4/7/10 月起算 ✓）—— 与东八区的习惯一致 ✓。
+    #[allow(dead_code)]
+    pub fn last_full(self, today: chrono::NaiveDate) -> (String, String, String, String) {
+        use chrono::{Datelike, Duration, NaiveDate};
+        let (start, end) = match self {
+            Period::Day => (today - Duration::days(1), today),
+            Period::Week => {
+                // 本周一（`weekday().num_days_from_monday()`：周一 = 0 ✓）
+                let this_mon = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+                (this_mon - Duration::days(7), this_mon)
+            }
+            Period::Month => {
+                let this_first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+                let prev_first = if today.month() == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 12, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), today.month() - 1, 1).unwrap()
+                };
+                (prev_first, this_first)
+            }
+            Period::Quarter => {
+                let this_q_first_month = ((today.month() - 1) / 3) * 3 + 1; // 1 / 4 / 7 / 10
+                let this_q = NaiveDate::from_ymd_opt(today.year(), this_q_first_month, 1).unwrap();
+                let prev_q = if this_q_first_month == 1 {
+                    NaiveDate::from_ymd_opt(today.year() - 1, 10, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(today.year(), this_q_first_month - 3, 1).unwrap()
+                };
+                (prev_q, this_q)
+            }
+        };
+        // **上一周期按日历算，不按"等长后退"** ✗ —— 这一条是测试抓出来的 ✓：
+        // 月份长度不等，2024 年 2 月（闰月 29 天 ✓）若后退等长天数会落到 **2024-01-03** ✗，
+        // 而"上一个月"显然是 1 月整月 ✓。季度同理 ✓（跨年时更明显 ✓）。
+        let prev = match self {
+            Period::Day => start - Duration::days(1),
+            Period::Week => start - Duration::days(7),
+            Period::Month => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 12, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), start.month() - 1, 1).unwrap()
+                }
+            }
+            Period::Quarter => {
+                if start.month() == 1 {
+                    NaiveDate::from_ymd_opt(start.year() - 1, 10, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(start.year(), start.month() - 3, 1).unwrap()
+                }
+            }
+        };
+        (start.to_string(), end.to_string(), prev.to_string(), start.to_string())
+    }
+}
+
 pub struct HeatBucket {
     pub ts: i64,
     pub counts: Vec<i64>,
@@ -4746,6 +4826,45 @@ mod tests {
     /// **升级路径的闸**（照 1.9.12 那条搬）：一个"15 版"的库（没有 traffic_day）迁移后
     /// 必须有这张表、且戳到 16 ✓。全新库的 SCHEMA 本来就带上它 ✗ —— 所以
     /// **只有这种"从上一版升上来"的测试才碰得到真正的升级路径** ✓。
+    /// 周期 → 日期区间：四种周期的**边界**各钉一条 ✓（跨月、跨年、跨季、周一起算 ✓）。
+    /// 这类错只表现为"报表少一天/多一天"，没人看得出来 ✓ —— 所以必须靠测试 ✓。
+    #[test]
+    fn periods_cover_the_last_full_one_and_its_predecessor() {
+        use chrono::NaiveDate;
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+
+        // 日报：昨天整天；上一周期 = 前天整天。
+        assert_eq!(
+            Period::Day.last_full(d(2026, 3, 15)),
+            ("2026-03-14".into(), "2026-03-15".into(), "2026-03-13".into(), "2026-03-14".into())
+        );
+        // 周报：周一发的报告应当覆盖**上一个周一至周日**（周一起算 ✓）。
+        assert_eq!(
+            Period::Week.last_full(d(2026, 3, 16)), // 2026-03-16 是周一
+            ("2026-03-09".into(), "2026-03-16".into(), "2026-03-02".into(), "2026-03-09".into())
+        );
+        // 月报：3 月 1 日发 → 覆盖 2 月整月（**闰年 2 月是 29 天** ✓，上一周期与它等长 ✓）。
+        assert_eq!(
+            Period::Month.last_full(d(2024, 3, 1)),
+            ("2024-02-01".into(), "2024-03-01".into(), "2024-01-01".into(), "2024-02-01".into())
+        );
+        // 跨年：1 月 1 日发月报 → 上一个周期是去年 12 月 ✓。
+        assert_eq!(
+            Period::Month.last_full(d(2026, 1, 1)),
+            ("2025-12-01".into(), "2026-01-01".into(), "2025-11-01".into(), "2025-12-01".into())
+        );
+        // 季报：4 月 1 日发 → 覆盖 Q1（1–3 月 ✓）；上一周期 = 去年 Q4 ✓（跨年 ✓）。
+        assert_eq!(
+            Period::Quarter.last_full(d(2026, 4, 1)),
+            ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
+        );
+        // 季中：5 月里发 → 仍然是"上一个完整季度"（Q1 ✓），不是"进行中的 Q2" ✗。
+        assert_eq!(
+            Period::Quarter.last_full(d(2026, 5, 20)),
+            ("2026-01-01".into(), "2026-04-01".into(), "2025-10-01".into(), "2026-01-01".into())
+        );
+    }
+
     #[test]
     fn migrating_from_15_adds_the_traffic_day_table() {
         let db = Db::open(":memory:").unwrap();
