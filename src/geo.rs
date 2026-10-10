@@ -35,7 +35,6 @@ pub struct Quality {
 ///
 /// 分层是刻意的 ✓：真正调用 mmdb 的那几行保持极薄 ✓（没有便宜的样例库可造 ✗），
 /// 而"怎么解读结果"（哪些字段要 ✓、缺了怎么办 ✓、两份怎么合 ✓）留在这里被测死 ✓✓。
-#[allow(dead_code)]
 pub fn merge(city: Option<Quality>, asn: Option<Quality>) -> Quality {
     let mut out = city.unwrap_or_default();
     if let Some(a) = asn {
@@ -101,7 +100,6 @@ pub fn quality_from_json(v: &serde_json::Value) -> Quality {
 // 调用它的是**下一步**：把结论落到节点上并暴露给面板与主题（块 3 ✓）。
 // 在那之前它只有测试在用 ✗ ⇒ 暂标 allow，紧跟着这条说明，接上即删 ✓
 //（`Quality` / `merge` 的 allow 在下一轮就能删 ✓ —— 它们已经被 `lookup` 用起来了 ✓）。
-#[allow(dead_code)]
 pub fn lookup(dir: &Path, ip: std::net::IpAddr) -> Quality {
     let read = |name: &str| -> Option<Quality> {
         let path = dir.join(name);

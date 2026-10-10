@@ -277,7 +277,11 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
                 }
                 if let Some(source) = &owed {
                     match tokio::task::block_in_place(|| app.db.country_owed(node_id, source)) {
-                        Ok(true) => locate(app.clone(), node_id, source.clone()),
+                        Ok(true) => {
+                            // 国家与 IP 质量**各自判断、各自节流** ✓（同一时机、同一地址 ✓）。
+                            locate(app.clone(), node_id, source.clone());
+                            qualify(app.clone(), node_id, source.clone());
+                        }
                         Ok(false) => owed = None,
                         Err(e) => debug!("node {node_id}: country check failed: {e:#}"),
                     }
@@ -453,6 +457,11 @@ pub(crate) fn country_source(ip: &str, ipv4: &str, ipv6: &str) -> Option<IpAddr>
 /// permitted state. Returning to the last address answered before the current
 /// one is not a change: `Db::save_facts` restores that answer without asking.
 static ASKED: OnceLock<Mutex<HashMap<i64, Instant>>> = OnceLock::new();
+
+/// 与 [`ASKED`] 同一个用途，但**各自一张表** ✓：国家走第三方、IP 质量走本地库 ✓，
+/// 两者的频率与失败互不相干 ✓ —— 合成一张会让一个的失败拖住另一个 ✓。
+static QUALIFIED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, std::time::Instant>>> =
+    std::sync::OnceLock::new();
 const LOCATE_RETRY: Duration = Duration::from_secs(3_600);
 
 /// Resolves a node's lookup address (see [`country_source`]) to a country, at
@@ -487,6 +496,33 @@ fn locate(app: Shared, node_id: i64, source: String) {
         }
         if let Err(e) = app.db.set_country(node_id, &cc, &source) {
             warn!("node {node_id}: storing country {cc} failed: {e:#}");
+        }
+    });
+}
+
+/// 查一台节点的 **IP 结论**（本地库 ✓、不外发 ✓），每节点每小时最多一次 ✓。
+///
+/// 与 [`locate`] 同一套骨架：进程内节流 ✓、`spawn` 出去 ✓、失败只记日志 ✓ ——
+/// 区别只有两点 ✗：查询换成**本地** mmdb（不请求任何第三方 ✓），
+/// 落库换成 [`Db::save_quality`] ✓（并把"查的是哪个地址"一起存 ✓，供过期判断 ✓）。
+///
+/// **失败留空、下次再试** ✓：与 country 完全同一条规矩 ✓ ——
+/// 查不到就是"未知" ✓，而不是"没有质量" ✗（两者在面板上完全不同 ✓）。
+fn qualify(app: Shared, node_id: i64, source: String) {
+    let mut asked = QUALIFIED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if asked.get(&node_id).is_some_and(|at| at.elapsed() < LOCATE_RETRY) {
+        return;
+    }
+    asked.insert(node_id, Instant::now());
+    drop(asked);
+
+    tokio::spawn(async move {
+        let Ok(ip) = source.parse::<std::net::IpAddr>() else {
+            return debug!("node {node_id}: {source} is not an address to look up");
+        };
+        let q = crate::geo::lookup(&app.data_dir, ip);
+        if let Err(e) = app.db.save_quality(node_id, &q, &source) {
+            warn!("node {node_id}: storing IP quality failed: {e:#}");
         }
     });
 }

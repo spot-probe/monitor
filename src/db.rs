@@ -1937,7 +1937,6 @@ impl Db {
     /// （`params!` 里传 `Option` 就自然得到 NULL ✓，不必手写 `CASE` ✓。）
     // 调用它的是**下一步**：节点连上来时按"欠一次查询"那套触发（`agent_ws.rs` 的 `country_owed` ✓）。
     // 在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
-    #[allow(dead_code)]
     pub fn save_quality(&self, node_id: i64, q: &crate::geo::Quality, source: &str) -> Result<()> {
         let conn = self.conn();
         conn.execute(
@@ -3519,7 +3518,6 @@ impl Node {
     /// 调用方拿它来比 ✓，而不是自己再挑一遍 ✗（同一件事只该有一处实现 ✓）。
     // 调用它的是**下一步**：节点视图把结论交给面板与主题（那里才有"现在该查的地址" ✓）。
     // 在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
-    #[allow(dead_code)]
     pub fn quality(&self, source: &str) -> Option<crate::geo::Quality> {
         let ip = self.q_ip.as_deref().filter(|ip| !ip.is_empty())?;
         if ip != source {
