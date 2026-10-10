@@ -1854,7 +1854,12 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
   const worst = Math.max(...points.map((p) => p.loss))
   return (
     <div className="mt-2">
-      <div className="flex h-2 w-full gap-px overflow-hidden rounded-sm">
+      {/* **与矩阵逐列对齐**：矩阵的格子从 `w-24` 的毫秒标签之后开始，色条也必须如此 ——
+          否则整块矩阵会被右移一个标签宽，上下对不上（维护者一眼看出来的 ✓）。
+          所以这里放一个等宽占位，并用**同样的 `gap-1.5`** ✓。 */}
+      <div className="flex h-2 items-center gap-1.5">
+        <span className="w-24 shrink-0" />
+        <div className="flex flex-1 gap-px overflow-hidden rounded-sm">
         {points.map((p) => (
           <span
             key={p.ts}
@@ -1862,6 +1867,7 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
             title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
           />
         ))}
+        </div>
       </div>
       <p className="mt-0.5 flex items-baseline justify-between text-[10px] text-muted-foreground">
         <span>丢包（每一格 = 一个时间桶，取该桶里最差的那台）</span>
