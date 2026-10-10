@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS node (
   q_longitude   REAL,
   q_time_zone   TEXT,
   q_asn         INTEGER,
-  q_org         TEXT
+  q_org         TEXT,
+  q_ip          TEXT
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -601,6 +602,7 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
             ("q_time_zone", "TEXT"),
             ("q_asn", "INTEGER"),
             ("q_org", "TEXT"),
+            ("q_ip", "TEXT"),
         ] {
             // `add_column` 是 3 个参数 ✓ —— 列名与类型在**同一个字符串**里 ✓（见它自己的用法 ✓）。
             add_column(&tx, "node", &format!("{col} {ty}"))?;
@@ -5136,7 +5138,7 @@ mod tests {
     fn migrating_from_16_adds_the_node_quality_columns() {
         let db = Db::open(":memory:").unwrap();
         let conn = db.conn();
-        const COLS: [&str; 8] = [
+        const COLS: [&str; 9] = [
             "q_country",
             "q_city",
             "q_subdivision",
@@ -5145,6 +5147,7 @@ mod tests {
             "q_time_zone",
             "q_asn",
             "q_org",
+            "q_ip",
         ];
         for col in COLS {
             conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), []).unwrap();
