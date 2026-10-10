@@ -2619,20 +2619,22 @@ function Ping({ nodes }: { nodes: Node[] }) {
       							      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
       							{/* 窗口选择：x 轴**固定铺满整个窗口**，所以"长窗口 + 短事件"会把那件事压成几个像素
       							    （维护者在 24 小时窗口里看到的那团锯齿就是它）。热力图治的是"一眼看全景"，两者不冲突。 */}
-      							<div className="flex items-center gap-0.5 rounded-md bg-muted/60 p-0.5">
+      							<div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5">
       							  {[1, 6, 24, 168].map((h) => (
       							    <button
       							      key={h}
       							      type="button"
       							      onClick={() => setSpan(h)}
-      							      className={`rounded px-2 py-0.5 text-xs transition-colors ${span === h ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+      							      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+        span === h ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+      }`}
       							    >
       							      {h < 24 ? `${h} 小时` : h === 24 ? "24 小时" : "7 天"}
       							    </button>
       							  ))}
       							</div>
       						</div>
-      						<div className="rounded-lg bg-muted p-3">
+      						<div className="mt-3 rounded-lg bg-muted p-3">
 				<BandChart points={pct} />
 				<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
 			</div>
