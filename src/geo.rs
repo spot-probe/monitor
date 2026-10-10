@@ -383,7 +383,11 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     let url = app.db.get(source.key).unwrap_or_default();
     let url = url.trim();
     if url.is_empty() {
-        tracing::debug!("geo: {} has no URL configured; skipped", source.name);
+        // ⚠️ 原来是 `debug!` ✗ —— 那等于**故意让它沉默** ✓：
+        // 2026-10-11 现场排查时，日志里"一条 geo 都没有" ✓，
+        // 而真相是"两个库都没配" ✓ ⇒ 于是**无从判断**它到底跑没跑 ✓✗。
+        // 这类"什么都没发生"的状态必须**说得出来** ✓ —— 否则运维只能看到一个安静的系统 ✓。
+        tracing::info!("geo: {} has no URL configured; skipped", source.name);
         return false;
     }
     // 日期占位符在这里展开 ✓（`{YYYY-MM}` 等 ✓）—— 见 `expand` 的说明 ✓：
@@ -455,6 +459,11 @@ pub async fn watch(app: crate::Shared) {
         std::collections::HashMap::new();
     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     loop {
+        // 每轮**先把家底说清楚** ✓：几个库、几个配了地址 ✓ ——
+        // 这样"任务活没活""配没配上"一眼可判 ✓，不必再从"有没有别的日志"去推 ✓。
+        let configured =
+            SOURCES.iter().filter(|s| !app.db.get(s.key).unwrap_or_default().trim().is_empty()).count();
+        tracing::info!("geo: {} of {} databases configured", configured, SOURCES.len());
         for source in SOURCES.iter() {
             // 第一次必然到点 ✓（表是空的 ✓）⇒ 启动后 30 秒那一轮会把该拉的都拉了 ✓。
             let due = last.get(source.name).is_none_or(|t| t.elapsed() >= source.every);
