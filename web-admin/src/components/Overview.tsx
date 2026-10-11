@@ -646,6 +646,26 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   }
   const nodes = group ? allNodes.filter((n) => n.group === group) : allNodes
 
+  // ⭐ IP 质量表的**筛选** ✓（用户要求 ✓）：一个"只看有数据"开关 ✓ + 一个搜索框 ✓。
+  // 判据"有数据" = 这台节点**有 `quality`** ✓（即 hub 到底查没查过它 ✓）。
+  const [onlyData, setOnlyData] = useState(false)
+  const [q, setQ] = useState("")
+  // ⚠️ **不能去过滤 `nodes`** ✗ —— 资源与成本两个视图也在用它 ✓，
+  // 过滤了会让那两个视图**悄悄少几台** ✓✗（而且没人会立刻发现 ✓）。
+  // ⇒ 只派生一份**质量表专用**的列表 ✓✓。
+  // ⚠️ 名字避开 `shown` ✗（这个组件里**已经有一个同名变量** ✓ —— 我上一版就撞上了 ✓）。
+  // ⚠️ 也**不用 `useMemo`** ✗：几十台节点的过滤，memo 的收益近乎零 ✓，却要多一个导入与依赖数组 ✓。
+  const needle = q.trim().toLowerCase()
+  const qualityRows = nodes.filter((n) => {
+    if (onlyData && !n.quality) return false
+    if (!needle) return true
+    // 名称 / IP / ASN / 组织 / 城市 / 国家 都能搜 ✓（都是人真会拿来定位一台机器的字段 ✓）
+    return [n.name, n.ipv4, n.ip, n.quality?.asn, n.quality?.org, n.quality?.city, n.quality?.country]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(needle))
+  })
+  const hiddenRows = nodes.length - qualityRows.length
+
   // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
   // 按「已用 ÷ 额度」降序：运维要的就是"谁离上限最近"。
   // 口径用 `monthUsage()`（面板已有的那个），所以与「近期事项」里的"流量已达额度"
@@ -1074,6 +1094,28 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </button>
           ))}
         </div>
+        {/* 筛选控件 ✓（用户要求 ✓）—— 放在同一行的右端 ✓（`ml-auto` ✓），不新起一行 ✓
+            （免得又多一条横向带 ✓）。
+            ⚠️ 只在「IP 质量」这一栏显示 ✗：另外两栏没有『有数据 / 无数据』这个概念 ✓，
+            放上去会让人以为它对资源与成本也生效 ✓。 */}
+        {page === "quality" ? (
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setOnlyData((v) => !v)}
+              aria-pressed={onlyData}
+              className={pill(onlyData)}
+            >
+              只看有数据
+            </button>
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="搜名称 / IP / ASN / 城市"
+              className="h-7 w-56 text-xs"
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* ⭐ 「IP 质量」视图 ✓ —— 用户要的：把 IP 质量/风险从"逐台点开编辑框"搬到一个
@@ -1095,7 +1137,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <span>地理位置</span>
                 <span>安全态势</span>
               </div>
-              {nodes.map((n) => (
+              {qualityRows.map((n) => (
                 <div
                   key={n.id}
                   className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1.6fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
@@ -1185,6 +1227,23 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               ))}
             </div>
           </div>
+          {/* ⚠️ **筛掉的东西必须说出来** ✗✓：不说的话，『3 台』看起来就像『整个机队只有 3 台』✓ ——
+              这与『空单元格被读成没问题』是同一类错 ✓（**沉默的省略 = 假信息** ✓）。 */}
+          {hiddenRows > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              按当前筛选隐藏了 {hiddenRows} 台（共 {nodes.length} 台）
+              <button
+                type="button"
+                className="ml-2 text-primary hover:underline"
+                onClick={() => {
+                  setOnlyData(false)
+                  setQ("")
+                }}
+              >
+                显示全部
+              </button>
+            </p>
+          ) : null}
           {/* 表下声明 ✓✓ —— **不能省** ✗：一个彩色 Badge 很容易被当成
               "服务商的官方结论" ✓，而档位文字（低/较高/高 ✓）**是本面板按 25/75 划的** ✓。
               同理，四列数据来自**三条不同的路** ✓（本地库 ✓ 在线库 ✓ 官方清单 ✓），
