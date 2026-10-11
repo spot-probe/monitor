@@ -367,6 +367,31 @@ pub fn sniff_inner(first_bytes: &[u8]) -> Pack {
     }
 }
 
+/// 某个来源**在磁盘上的现状** ✓✓：文件多大、以及**多久之前**拉的（秒 ✓）。
+///
+/// 用**候选名里第一个存在的** ✓ —— 一个来源可能落成 MaxMind 的名字或 DB-IP 的名字 ✓
+///（哪个由内容决定 ✓，见 [`Source::names`] ✓）。
+///
+/// ⚠️ **为什么这个函数存在** ✗：面板此前只能显示"已配置/未配置" ✓ ——
+/// 而"配了"与"**生效了**"是两件事 ✓✗：地址可能填错 ✓、下载可能一直失败 ✓、
+/// 也可能刚配好还没到抓取时间 ✓。用户要的"呼吸灯"若只是"配了就亮" ✗，
+/// 那就是一个**假信号** ✓ —— 灯亮着，而库其实没下来 ✓，正是他要抱怨的那种处境 ✓。
+/// ⇒ 让灯反映**文件本身**：够新才呼吸 ✓，没下来就静止 ✓。
+///
+/// 纯函数 ✓（目录由调用方给 ✓）⇒ 边界可测 ✓（文件不在 ✓ / 刚写好 ✓ / 很久以前 ✓）。
+pub fn state(dir: &Path, names: &[&str]) -> Option<(u64, u64)> {
+    let (meta, _) = names.iter().find_map(|n| {
+        std::fs::metadata(dir.join(n)).ok().map(|m| (m, *n))
+    })?;
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some((meta.len(), age))
+}
+
 /// 当前生效的 Tor 出口集合 ✓✓ —— **按文件 mtime 缓存** ✓。
 ///
 /// 为什么这样而不是存进数据库 ✗：它就是**那个文件的影子** ✓ ——
@@ -902,6 +927,26 @@ mod tests {
         assert_eq!(set.len(), 2);
         // 再问一次 ⇒ 走缓存 ✓（返回的是同一份 ✓ —— 用指针相等来断言"没重读" ✓）
         assert!(std::sync::Arc::ptr_eq(&set, &tor_exits(&dir)), "文件没变 ⇒ 复用同一份 ✓");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 磁盘现状：文件在 ⇒ 报得出**大小与年龄** ✓；不在 ⇒ `None` ✓（"没配"或"还没拉" ✓，不是错误 ✓）。
+    /// ⚠️ 这条测试就是"呼吸灯不能是假信号"的地基 ✓：灯要靠它决定亮不亮 ✓。
+    #[test]
+    fn the_on_disk_state_reports_size_and_age_or_nothing_at_all() {
+        let dir = tmpdir("state");
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["GeoLite2-City.mmdb", "dbip-city-lite.mmdb"];
+        // 一个都不在 ⇒ None ✓（面板据此**不画灯** ✓，而不是画一个灰点假装知道 ✓）
+        assert!(state(&dir, &names).is_none(), "都没有 ⇒ 什么都报不出来 ✓");
+        // 第二个候选名存在（DB-IP 那种情形 ✓）⇒ 也要找得到 ✓
+        std::fs::write(dir.join("dbip-city-lite.mmdb"), b"hello").unwrap();
+        let (bytes, age) = state(&dir, &names).expect("候选名里第二个存在也要认 ✓");
+        assert_eq!(bytes, 5, "报的是**真实字节数** ✓（面板要显示它 ✓）");
+        assert!(age < 60, "刚写的文件年龄应当是几秒 ✓（实际 {age}s）");
+        // 第一个候选名存在 ⇒ 优先它 ✓（与 `lookup` 的优先级一致 ✓）
+        std::fs::write(dir.join("GeoLite2-City.mmdb"), b"0123456789").unwrap();
+        assert_eq!(state(&dir, &names).unwrap().0, 10, "第一个优先 ✓（与读库的规矩一致 ✓）");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

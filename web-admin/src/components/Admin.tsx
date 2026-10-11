@@ -4315,13 +4315,30 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
                     一眼扫下来就知道哪个库配了 ✓，不必逐行去读输入框 ✓。 */}
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm font-medium">城市库</span>
-                  {text("geo_city_url") ? (
-                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                      已配置
-                    </span>
-                  ) : (
+                  {/* ⭐ **三态** ✓✓ —— 不是"配了就亮" ✗（那是假信号 ✓）：灯由 hub 报的
+                      文件现状决定 ✓（`geo_city_url_live` / `_age` ✓ —— 判断在 hub 一侧做 ✓，
+                      面板只负责画 ✓，两处都算一遍迟早分叉 ✓）。
+                      呼吸 = 这个库**真的在工作** ✓；灰点 = 配了但还没拉到或已过期 ✓。 */}
+                  {!text("geo_city_url") ? (
                     <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
+                    </span>
+                  ) : s["geo_city_url_live"] ? (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      <span className="relative flex size-1.5">
+                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" />
+                        <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
+                      </span>
+                      已生效
+                    </span>
+                  ) : (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                      <span className="inline-flex size-1.5 rounded-full bg-muted-foreground/50" />
+                      {/* ⚠️ **两种情形要分开说** ✗：从没拉到过 ✓ vs 拉过但已经旧了 ✓ ——
+                          都写成"等待首次拉取"会对后者说假话 ✓（用户会以为它从没成功过 ✓，
+                          而其实是**成功过、只是没跟上刷新** ✓，处置完全不同 ✓）。
+                          hub 有没有报 `_bytes` 正好区分这两者 ✓（不报 = 文件不在 ✓）。 */}
+                      {typeof s[`geo_city_url_bytes`] === "undefined" ? "等待首次拉取" : "已过期，等待刷新"}
                     </span>
                   )}
                 </div>
@@ -4351,13 +4368,27 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 <div className="space-y-1.5 py-4 last:pb-0">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm font-medium">ASN 库</span>
-                  {text("geo_asn_url") ? (
-                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                      已配置
-                    </span>
-                  ) : (
+                  {/* 三态 ✓（与城市库同一套 ✓）：呼吸 = 真的在工作 ✓ · 灰点 = 配了但还没拉到/已过期 ✓ */}
+                  {!text("geo_asn_url") ? (
                     <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
+                    </span>
+                  ) : s["geo_asn_url_live"] ? (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      <span className="relative flex size-1.5">
+                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" />
+                        <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
+                      </span>
+                      已生效
+                    </span>
+                  ) : (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                      <span className="inline-flex size-1.5 rounded-full bg-muted-foreground/50" />
+                      {/* ⚠️ **两种情形要分开说** ✗：从没拉到过 ✓ vs 拉过但已经旧了 ✓ ——
+                          都写成"等待首次拉取"会对后者说假话 ✓（用户会以为它从没成功过 ✓，
+                          而其实是**成功过、只是没跟上刷新** ✓，处置完全不同 ✓）。
+                          hub 有没有报 `_bytes` 正好区分这两者 ✓（不报 = 文件不在 ✓）。 */}
+                      {typeof s[`geo_asn_url_bytes`] === "undefined" ? "等待首次拉取" : "已过期，等待刷新"}
                     </span>
                   )}
                 </div>
@@ -4381,13 +4412,27 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 <div className="space-y-1.5 py-4 last:pb-0">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-sm font-medium">Tor 出口列表</span>
-                  {text("geo_tor_url") ? (
-                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                      已配置
-                    </span>
-                  ) : (
+                  {/* 三态 ✓（与城市库同一套 ✓）：呼吸 = 真的在工作 ✓ · 灰点 = 配了但还没拉到/已过期 ✓ */}
+                  {!text("geo_tor_url") ? (
                     <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
+                    </span>
+                  ) : s["geo_tor_url_live"] ? (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      <span className="relative flex size-1.5">
+                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" />
+                        <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
+                      </span>
+                      已生效
+                    </span>
+                  ) : (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                      <span className="inline-flex size-1.5 rounded-full bg-muted-foreground/50" />
+                      {/* ⚠️ **两种情形要分开说** ✗：从没拉到过 ✓ vs 拉过但已经旧了 ✓ ——
+                          都写成"等待首次拉取"会对后者说假话 ✓（用户会以为它从没成功过 ✓，
+                          而其实是**成功过、只是没跟上刷新** ✓，处置完全不同 ✓）。
+                          hub 有没有报 `_bytes` 正好区分这两者 ✓（不报 = 文件不在 ✓）。 */}
+                      {typeof s[`geo_tor_url_bytes`] === "undefined" ? "等待首次拉取" : "已过期，等待刷新"}
                     </span>
                   )}
                 </div>

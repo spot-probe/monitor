@@ -2635,6 +2635,21 @@ pub async fn settings(_: Admin, State(app): State<Shared>) -> Json<Value> {
     for key in READABLE_SETTINGS {
         out.insert((*key).to_owned(), json!(app.db.get(key).unwrap_or_default()));
     }
+    // IP 数据库**到底在不在工作** ✓✓ —— 面板那个"呼吸灯"靠这几个字段 ✓。
+    // ⚠️ 刻意**不只报"配没配"** ✗：配了 ≠ 生效 ✓（地址可能填错 ✓、下载可能一直失败 ✓、
+    // 也可能刚配好还没到抓取时间 ✓）。只报"配了"的灯**是假信号** ✓ ——
+    // 它会在库根本没下来的时候照样亮着 ✓，正是用户要抱怨的那种处境 ✓。
+    // ⇒ 报文件**真实的大小与年龄** ✓，以及"**够不够新**"这个判断本身 ✓
+    //（判断放 hub 一侧 ✓ —— 间隔是 hub 的知识 ✓，面板不该自己算一遍 ✗，否则两处会分叉 ✓）。
+    for source in crate::geo::SOURCES.iter() {
+        if let Some((bytes, age)) = crate::geo::state(&app.data_dir, source.names) {
+            out.insert(format!("{}_bytes", source.key), json!(bytes));
+            out.insert(format!("{}_age", source.key), json!(age));
+            // 够新 = 没过两个刷新周期 ✓（留一倍余量 ✓：偶尔错过的调度不该让灯变灰 ✓）。
+            let live = age <= source.every.as_secs().saturating_mul(2);
+            out.insert(format!("{}_live", source.key), json!(live));
+        }
+    }
     // The one readable key with a default that also rejects the empty string:
     // `setting_error` below refuses "" and `save_settings` writes nothing when any
     // key fails, so a hub where this was never set returned "" here and then
