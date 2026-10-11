@@ -3932,18 +3932,26 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
     // Wider gaps between sections than within them: the two groups answer different
     // questions, and a single rhythm made the page read as one long form.
     <div className="space-y-6">
-      {/* 页签 ✓ —— 样式对齐**总览/节点页那套胶囊控件** ✓（用户要求 ✓）：
-          容器 `rounded-full bg-muted p-0.5` ✓ · 每一项 `rounded-full px-2.5 py-0.5 text-xs font-medium` ✓ ·
-          选中 `bg-primary text-primary-foreground` ✓ —— 与那一套**逐类相同** ✓，没有自创观感 ✓。
-          位置在页面**最上面**（第一个区块之前 ✓）：这一页的所有内容都属于这两个页签之一 ✓。 */}
-      <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 w-fit">
+      {/* 页签（分段控制器）✓ —— 按前端同事的意见做了三处微调 ✓，**没加语义图标** ✗（用户明确不要 ✓）：
+          ① **底座槽** ✓：`h-9 rounded-lg bg-muted p-1` —— 两项被收进一个统一跑道 ✓，
+             不再是"浮在半空的两颗小药丸" ✓；
+          ② **质感反差** ✓：激活项保持**蓝底白字**（用户要求 ✓）但补足内边距与圆角 ✓
+             `rounded-md px-3.5 py-1 text-sm font-medium` ✓ + 微阴影 ✓；
+             未激活项 `text-muted-foreground` ✓ + 悬浮反馈 `hover:bg-muted` ✓；
+          ④ **垂直节奏** ✓：`mb-6` ✓ —— 与下方「推送渠道」之间留出主次分明的呼吸 ✓。
+          ⚠️ **颜色一律走 token** ✗（同事给的 `bg-slate-100/80`/`bg-blue-600`/`text-slate-600` 是写死的 ✓）：
+             这个面板的主题系统要能换肤 ✓ ⇒ 结构与尺寸照抄 ✓、颜色映射到 `muted`/`primary` ✓✓。
+             否则换一套主题，这一处就会是唯一不跟着变的 ✓（那种"局部漏色"很难被发现 ✓）。 */}
+      <div className="mb-6 inline-flex h-9 items-center rounded-lg bg-muted p-1">
         {([["notify", "通知"], ["ip", "IP 信息"]] as const).map(([k, label]) => (
           <button
             key={k}
             type="button"
             onClick={() => setTab(k)}
-            className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
-              tab === k ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            className={`rounded-md px-3.5 py-1 text-sm font-medium transition-all ${
+              tab === k
+                ? "bg-primary text-primary-foreground shadow-xs"
+                : "text-muted-foreground hover:bg-muted-foreground/10 hover:text-foreground"
             }`}
           >
             {label}
