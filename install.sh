@@ -483,6 +483,14 @@ fi
 # 而那正是这个功能的定义 —— 且只在打开开关的机器上给。
 [ -n "${ALLOW_UPGRADE:-}" ] && chown monitor-agent "$(dirname "$BIN")"
 
+# ⚠️⚠️ **下面这个 heredoc 的分隔符没有加引号** ✗ —— 那是**故意的** ✓（unit 里的
+# `$BIN` / `$INTERVAL` / `${ALLOW_UPGRADE:+…}` 都要展开 ✓）。
+# ⭐ 而代价是 ✓：**它正文里（包括注释里）的每一个 `$` 都是代码** ✗✗ ——
+# 想写一个"美元号"给人看，就必须写成别的样子（比如直接写变量名 ✓）。
+# ⚠️ 线上已经因此挂过一次 ✓：注释里的 `$STATE_DIRECTORY` 在 set -u 下未设置 ⇒
+# **整个安装脚本中止** ✓✗（`sh -n` 查不出来 ✓ —— 那是运行期的事 ✓）。
+# ⇒ 改这个 heredoc 之后，请跑一遍：`awk '/<<UNIT/,/^UNIT$/' install.sh | grep -n '\$'`
+#    并确认每一个 `$` 都是**你真想展开**的 ✓✓。
 cat >"$UNIT_FILE" <<UNIT
 [Unit]
 Description=monitor agent
@@ -522,7 +530,10 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
 # （hub 那次 OOM 崩溃循环正是这个形状 ✓）。
 # ProtectSystem=strict 让整个文件系统只读 ✓，所以这一步要一个**明确的可写目录** ✓：
 # StateDirectory= 是 systemd 的标准做法 ✓ —— 它建目录、归服务用户、并自动加进 ReadWritePaths ✓，
-# 还把路径放进 $STATE_DIRECTORY ✓（agent 读那个变量 ✓）。
+# 还把路径放进环境变量 STATE_DIRECTORY ✓（agent 读它 ✓ —— 这里**不能写那个美元号** ✓✗：
+# 本 heredoc 的分隔符没有加引号 ✓ ⇒ 里面任何**美元号加变量名**都会被 shell 展开 ✓，
+# 而注释里的美元号**同样是代码** ✓ —— 展开一个未设置的变量在 set -u 下会**中止整个脚本** ✓✗，
+# 线上已经因此挂过一次 ✓（报错：STATE_DIRECTORY: parameter not set ✓）。）
 # ⚠️ 这**只对新装/重装的机器生效** ✓ ⇒ 老机器上 agent 会退回内存并**警告一次** ✓（如实降级 ✓，
 # 不假装写成功 ✓）；重跑一次安装命令即可拿到这个目录 ✓。
 StateDirectory=monitor-agent
