@@ -380,15 +380,8 @@ pub fn sniff_inner(first_bytes: &[u8]) -> Pack {
 ///
 /// 纯函数 ✓（目录由调用方给 ✓）⇒ 边界可测 ✓（文件不在 ✓ / 刚写好 ✓ / 很久以前 ✓）。
 pub fn state(dir: &Path, names: &[&str]) -> Option<(u64, u64)> {
-    let (meta, _) = names.iter().find_map(|n| {
-        std::fs::metadata(dir.join(n)).ok().map(|m| (m, *n))
-    })?;
-    let age = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let (meta, _) = names.iter().find_map(|n| std::fs::metadata(dir.join(n)).ok().map(|m| (m, *n)))?;
+    let age = meta.modified().ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_secs()).unwrap_or(0);
     Some((meta.len(), age))
 }
 
