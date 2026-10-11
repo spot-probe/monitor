@@ -27,6 +27,7 @@ INTERVAL=""
 INSECURE=""
 UNINSTALL=""
 UPGRADE=""
+QUALITY=""
 
 while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
@@ -50,6 +51,11 @@ while [ $# -gt 0 ]; do
 	# 于是 "0" 会被当成"开了" —— 那会让 --no-allow-remote-upgrade **关不掉**（参数被加回去、
 	# ReadWritePaths 也照样写出来）。空 = 关，非空 = 开，三处就全对了。
 	--no-allow-remote-upgrade) ALLOW_UPGRADE=""; ALLOW_UPGRADE_SET=1; shift ;;
+	# 允许这台节点做 IP 质量检测（**含把它的 IP 发给在线风险库** ✓）。
+	# 与 --allow-remote-upgrade 同一套做法 ✓（不在机队共用的批量命令里 ✓ · 可显式关闭 ✓ ·
+	# 关闭同样写**空**而不是 "0" ✓ —— 下面用的是 ${ALLOW_QUALITY:+…}，只判"有没有设置" ✓）。
+	--allow-ip-quality) ALLOW_QUALITY=1; shift ;;
+	--no-allow-ip-quality) ALLOW_QUALITY=""; ALLOW_QUALITY_SET=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
 	--upgrade) UPGRADE=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
@@ -100,8 +106,8 @@ fi
 # as one test rather than `A && B || C`, which reads as the same thing but is not:
 # the third command runs whenever the second fails, including when the first did.
 if [ -z "$SERVER" ] || { [ -z "$TOKEN" ] && [ -z "$REGISTER" ]; }; then
-	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure] [--allow-remote-upgrade]" >&2
-	echo "       install.sh --upgrade [--iface LIST] [--interval SECONDS] [--allow-remote-upgrade | --no-allow-remote-upgrade]" >&2
+	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--iface LIST] [--insecure] [--allow-remote-upgrade] [--allow-ip-quality]" >&2
+	echo "       install.sh --upgrade [--iface LIST] [--interval SECONDS] [--allow-remote-upgrade | --no-allow-remote-upgrade] [--allow-ip-quality | --no-allow-ip-quality]" >&2
 	echo "       install.sh --uninstall" >&2
 	exit 2
 fi
@@ -110,6 +116,17 @@ fi
 # the service definition the last install wrote; a first install takes 1.
 # 是否允许被远程升级：**这台机器的决定**，与机队共用的批量命令无关，所以与 --interval
 # 完全同一套做法 —— 没给参数就从上次写的 unit 里读回；给了就以此为准（含显式关闭）。
+# 同上：IP 质量检测的许可也是**这台机器的决定** ✓，重装不该把它弄丢 ✓。
+if [ -z "${ALLOW_QUALITY_SET:-}" ]; then
+	KEPT_Q=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
+		-e 's/^ExecStart=.*--allow-ip-quality.*/1/p' \
+		-e 's/^command_args=".*--allow-ip-quality.*/1/p' | tail -n 1)
+	if [ -n "$KEPT_Q" ]; then
+		ALLOW_QUALITY=1
+		echo "keeping --allow-ip-quality from the previous install"
+	fi
+fi
+
 if [ -z "${ALLOW_UPGRADE_SET:-}" ]; then
 	KEPT=$(cat "$UNIT_FILE" "$RC_FILE" 2>/dev/null | sed -n \
 		-e 's/^ExecStart=.*--allow-remote-upgrade.*/1/p' \
@@ -422,7 +439,7 @@ if [ "$INIT" = openrc ]; then
 #!/sbin/openrc-run
 description="monitor agent"
 command="$BIN"
-command_args="--interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}"
+command_args="--interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}${ALLOW_QUALITY:+ --allow-ip-quality}"
 supervisor="supervise-daemon"
 respawn_delay=5
 output_log="$LOG_FILE"
@@ -475,7 +492,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$ENV_FILE
-ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}
+ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}${ALLOW_UPGRADE:+ --allow-remote-upgrade}${ALLOW_QUALITY:+ --allow-ip-quality}
 Restart=always
 RestartSec=5
 # A fixed user rather than DynamicUser=: when the mount namespace cannot be
