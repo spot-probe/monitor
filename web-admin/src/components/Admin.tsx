@@ -589,7 +589,7 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
                           坐标{" "}
                           <a
                             className="font-mono text-primary underline underline-offset-2"
-                            href={`https://check.place/${q.latitude},${q.longitude},15,cn`}
+                            href={`https://www.openstreetmap.org/?mlat=${q.latitude}&mlon=${q.longitude}#map=15/${q.latitude}/${q.longitude}`}
                             target="_blank"
                             rel="noreferrer"
                           >

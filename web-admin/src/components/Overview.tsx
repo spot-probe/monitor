@@ -1141,7 +1141,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       {n.quality?.latitude != null && n.quality?.longitude != null ? (
                         <a
                           className="font-mono text-primary underline underline-offset-2"
-                          href={`https://check.place/${n.quality.latitude},${n.quality.longitude},15,cn`}
+                          href={`https://www.openstreetmap.org/?mlat=${n.quality.latitude}&mlon=${n.quality.longitude}#map=15/${n.quality.latitude}/${n.quality.longitude}`}
                           target="_blank"
                           rel="noreferrer"
                         >
