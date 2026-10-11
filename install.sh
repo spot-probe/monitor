@@ -517,6 +517,15 @@ PrivateDevices=yes
 # AF_NETLINK is how getifaddrs(3) obtains this host's own addresses from the
 # kernel; without it the agent reports none.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+# 流媒体探测要记住"上次什么时候探的" ✓ —— ⚠️ 而这**必须落盘** ✗：
+# 只放内存的话，agent 崩溃重启循环（Restart=always ✓）就会变成**探测风暴** ✓✗
+# （hub 那次 OOM 崩溃循环正是这个形状 ✓）。
+# ProtectSystem=strict 让整个文件系统只读 ✓，所以这一步要一个**明确的可写目录** ✓：
+# StateDirectory= 是 systemd 的标准做法 ✓ —— 它建目录、归服务用户、并自动加进 ReadWritePaths ✓，
+# 还把路径放进 $STATE_DIRECTORY ✓（agent 读那个变量 ✓）。
+# ⚠️ 这**只对新装/重装的机器生效** ✓ ⇒ 老机器上 agent 会退回内存并**警告一次** ✓（如实降级 ✓，
+# 不假装写成功 ✓）；重跑一次安装命令即可拿到这个目录 ✓。
+StateDirectory=monitor-agent
 MemoryMax=64M
 
 [Install]
