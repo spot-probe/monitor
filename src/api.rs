@@ -667,6 +667,23 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
     // `admin` is included so the panel's first fetch and its stream share one
     // cached frame.
     let mut payload = json!({"nodes": nodes, "admin": full});
+
+    // Tor 出口 ✓✓ —— **在这里补**，而不是在 `node_view` 里 ✗：
+    // 后者是**纯函数**（只吃 node 与实时数据 ✓，每秒每台都要跑 ✓），拿不到 `data_dir` ✓，
+    // 也不该为它去读盘 ✓。这里是"每份快照拼一次" ✓ ⇒ 一次读缓存（按 mtime ✓）就够所有节点用 ✓。
+    // 与「在线风险」那条路**互不相干** ✗：这条**默认就有效** ✓、不外发 ✓、不需要开关 ✓。
+    let tor = crate::geo::tor_exits(&app.data_dir);
+    if let Some(arr) = payload.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+        for v in arr.iter_mut() {
+            // 节点地址仍用 `country_source` 挑 ✓（规矩只有一份 ✓）—— 它读的是视图里已有的三个字段 ✓
+            let addr = crate::agent_ws::country_source(
+                v.get("ip").and_then(|x| x.as_str()).unwrap_or_default(),
+                v.get("ipv4").and_then(|x| x.as_str()).unwrap_or_default(),
+                v.get("ipv6").and_then(|x| x.as_str()).unwrap_or_default(),
+            );
+            v["tor_exit"] = json!(addr.is_some_and(|a| tor.contains(&a)));
+        }
+    }
     // The version the per-node `agent_old` flags were decided against, for the
     // tooltip that says what to upgrade to. Only the admin frame: the public one
     // is pushed to every viewer every tick and a visitor has no use for it.

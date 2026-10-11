@@ -367,6 +367,57 @@ pub fn sniff_inner(first_bytes: &[u8]) -> Pack {
     }
 }
 
+/// 当前生效的 Tor 出口集合 ✓✓ —— **按文件 mtime 缓存** ✓。
+///
+/// 为什么这样而不是存进数据库 ✗：它就是**那个文件的影子** ✓ ——
+/// 每小时换一份 ✓、内容只有几千行 ✓、随时可以从文件重建 ✓ ⇒
+/// 加一张表、一次迁移、一列，都是**为一个派生值付存储的代价** ✓。
+/// 缓存键用 **mtime** ✓（而不是"上次读了多久"✗）：文件一换就必然重读 ✓，
+/// 文件没换就一次都不读 ✓ —— 与 `recently_fetched` 是同一个思路 ✓。
+///
+/// 文件不在（没配这个库 ✓）⇒ 空集合 ✓ —— **不是错误** ✓（与别处同一条规矩 ✓）。
+pub fn tor_exits(dir: &Path) -> std::sync::Arc<std::collections::HashSet<std::net::IpAddr>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    // 抽个名字 ✓ —— clippy 说这个类型"太复杂" ✓，而它说得对 ✓：
+    // 一行里塞四层泛型，读的人得从里往外数 ✓。
+    type TorSet = Arc<std::collections::HashSet<std::net::IpAddr>>;
+    static CACHE: OnceLock<Mutex<Option<(std::time::SystemTime, TorSet)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let path = dir.join("tor-exit.txt");
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let (Some(m), Some((cached, set))) = (mtime, slot.as_ref()) {
+        if *cached == m {
+            return set.clone(); // 文件没变 ⇒ 一次盘都不读 ✓
+        }
+    }
+    let set = Arc::new(
+        std::fs::read_to_string(&path).map(|t| parse_tor_list(&t)).unwrap_or_default(), // 文件不在 / 读不动 ⇒ 空集合 ✓（不是错误 ✓）
+    );
+    *slot = Some((mtime.unwrap_or(std::time::UNIX_EPOCH), set.clone()));
+    set
+}
+
+/// 解析 Tor 出口清单 ✓✓ —— **纯函数** ✓，所以那些"现实里的脏输入"能全测死 ✓。
+///
+/// Tor 官方的批量清单（`torbulkexitlist` ✓）就是**一行一个 IP** ✓（v4 与 v6 混着 ✓），
+/// 可能带 `#` 注释与空行 ✓，也可能哪天多出别的列 ✓ —— 所以这里**只认能解析成 IP 的行** ✓，
+/// 其余一律**跳过** ✓（而不是报错 ✓：一份清单里有一行看不懂，不该让整份作废 ✓）。
+///
+/// **为什么要它** ✗（2026-10-11 的欠账 ✓）：这份列表此前**下载了但没人读** ✓ ——
+/// 而"这个 IP 是不是 Tor 出口"本来**默认就该看得到** ✓；在线风险库也能给这一项 ✓，
+/// 但它**默认关着** ✗、并且要把节点 IP **发给第三方** ✗。本地这份则**离线、免费、不外发** ✓✓。
+pub fn parse_tor_list(text: &str) -> std::collections::HashSet<std::net::IpAddr> {
+    text.lines()
+        .map(|l| l.trim())
+        // 注释与空行 ✓（Tor 的清单里有 `#` 开头的说明 ✓）
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        // 有的清单会写成 `ip  port` 之类的多列 ✓ ⇒ **只取第一段** ✓，而不是整行解析 ✓
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|ip| ip.parse::<std::net::IpAddr>().ok())
+        .collect()
+}
+
 /// 只读一个文件**尾部的一段**（默认 128 KB ✓）✓ —— 校验 mmdb 只需要这一段 ✓✓。
 ///
 /// **为什么必须这样** ✗✗：现场的 OOM（2026-10-11）是"整份文件进内存"造成的 ✓ ——
@@ -834,6 +885,49 @@ mod tests {
         assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
         // 两个都没有 ⇒ 全空 ✓
         assert_eq!(merge(None, None), Quality::default());
+    }
+
+    /// 加载器：文件在 ⇒ 读得到 ✓；文件不在 ⇒ **空集合而且不报错** ✓（"没配"是正常状态 ✓）。
+    #[test]
+    fn the_tor_set_comes_from_the_file_and_an_absent_file_is_simply_empty() {
+        let dir = tmpdir("tor");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 文件不在 ⇒ 空 ✓（别处都按这条规矩办 ✓）
+        assert!(tor_exits(&dir).is_empty(), "没配这个库 ⇒ 空集合 ✓，不是错误 ✓");
+        // 放一份清单 ⇒ 读得到 ✓
+        std::fs::write(dir.join("tor-exit.txt"), "# c\n1.2.3.4\n2001:db8::1\n").unwrap();
+        let set = tor_exits(&dir);
+        assert!(set.contains(&"1.2.3.4".parse().unwrap()));
+        assert!(set.contains(&"2001:db8::1".parse().unwrap()));
+        assert_eq!(set.len(), 2);
+        // 再问一次 ⇒ 走缓存 ✓（返回的是同一份 ✓ —— 用指针相等来断言"没重读" ✓）
+        assert!(std::sync::Arc::ptr_eq(&set, &tor_exits(&dir)), "文件没变 ⇒ 复用同一份 ✓");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Tor 清单的解析** ✓✓ —— 这条测试的价值在于：真实清单里**混着 v4 与 v6** ✓，
+    /// 还可能带注释、空行、多余的列 ✓，而**有一行看不懂不该让整份作废** ✓。
+    #[test]
+    fn the_tor_list_takes_what_it_can_and_ignores_the_rest() {
+        let text = "\
+# Tor exit list\n\
+1.2.3.4\n\
+\n\
+  5.6.7.8  \n\
+2001:db8::1\n\
+# 下面这行是别人加的注释\n\
+not-an-ip\n\
+9.9.9.9 9030\n\
+";
+        let set = parse_tor_list(text);
+        assert!(set.contains(&"1.2.3.4".parse().unwrap()), "普通一行 ✓");
+        assert!(set.contains(&"5.6.7.8".parse().unwrap()), "两侧空白要去掉 ✓");
+        assert!(set.contains(&"2001:db8::1".parse().unwrap()), "**v6 也要收** ✓（Tor 清单里有 ✓）");
+        assert!(set.contains(&"9.9.9.9".parse().unwrap()), "多列时只取第一段 ✓");
+        assert_eq!(set.len(), 4, "注释 / 空行 / 看不懂的行都不该进来 ✓");
+        // 空清单与纯注释 ⇒ 空集合 ✓（不是错误 ✓）
+        assert!(parse_tor_list("").is_empty());
+        assert!(parse_tor_list("# 只有注释\n").is_empty());
     }
 
     /// **按内容判包装** ✓✓ —— 这条测试就是"两支 WARN"的解药 ✓：
