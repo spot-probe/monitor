@@ -1655,7 +1655,9 @@ impl Db {
         let owed = self
             .conn()
             .query_row(
-                "SELECT country = '' FROM node WHERE id=?1 AND country_ip=?2",
+                // ⚠️ **门 A 的另一半** ✗：国家这一路是**另一条**查询 ✓ —— 只改 quality_owed 会漏掉它 ✓，
+                // 于是"没允许检测"的节点仍会被查一次国家 ✓（那也是一次本地查询与一次落库 ✓）。
+                "SELECT country = '' FROM node WHERE id=?1 AND country_ip=?2 AND allow_ip_quality <> 0",
                 params![id, source],
                 |r| r.get(0),
             )
@@ -2027,7 +2029,9 @@ impl Db {
     pub fn quality_owed(&self, id: i64, source: &str) -> Result<bool> {
         let conn = self.conn();
         Ok(conn.query_row(
-            "SELECT COALESCE(q_ip, '') <> ?2 FROM node WHERE id=?1",
+            // ⚠️ **门 A** ✓：没允许检测的节点，hub 连"要不要查"都不问 ✓。
+            // 条件写在 SQL 里 ✓ ⇒ `quality_pending` 那条巡检也自动跟着 ✓（一处生效 ✓）。
+            "SELECT COALESCE(q_ip, '') <> ?2 AND allow_ip_quality <> 0 FROM node WHERE id=?1",
             params![id, source],
             |r| r.get::<_, bool>(0),
         )?)
@@ -5447,7 +5451,9 @@ mod tests {
             let id = db
                 .create_node(&Node { name: name.into(), ..Default::default() }, &format!("token-{name}"))
                 .unwrap();
-            db.conn().execute("UPDATE node SET ipv4=?2 WHERE id=?1", rusqlite::params![id, v4]).unwrap();
+            db.conn()
+                .execute("UPDATE node SET ipv4=?2, allow_ip_quality=1 WHERE id=?1", rusqlite::params![id, v4])
+                .unwrap();
             id
         };
         // ⚠️ 别再用 `203.0.113.x` / `198.51.100.x` ✗ —— 那是**文档保留段**（TEST-NET ✓），
@@ -5491,10 +5497,47 @@ mod tests {
     /// 我原来把"要不要查质量"挂在**国家那套欠账门**上 ✗ ⇒ 国家一查到，门就永久关上 ✓
     /// ⇒ `q_ip` 一直是空 ✓ ⇒ 面板永远"还没查到" ✓✗。
     /// 这条测试盯的就是这个场景 ✓：**国家已知，不影响质量自己的门** ✓✓。
+    /// 把一台节点标成**允许 IP 质量检测** ✓（这类测试的 fixture 用 ✓）。
+    /// ⚠️ 默认是**不允许**的 ✓ —— 所以凡是测"owed 判据"的测试都得先过这道门 ✓，
+    /// 否则失败信息会指向错误的地方 ✓（见下面两条测试里的注释 ✓）。
+    fn allow(db: &Db, id: i64) {
+        db.conn().execute("UPDATE node SET allow_ip_quality=1 WHERE id=?1", [id]).unwrap();
+    }
+
+    /// ⭐ **门本身** ✓✓：没允许检测的节点，**国家与质量两样都不欠** ✓ ——
+    /// 也就是说 hub **连一次本地查询都不会为它做** ✓（用户定的：不是所有节点默认打开 ✓）。
+    /// ⚠️ 这条测试与上面那条**故意成对** ✓：一个证明"允许了就会查" ✓，
+    /// 一个证明"没允许就一样都不查" ✓ —— 两者都少不得 ✓。
+    #[test]
+    fn a_node_that_is_not_allowed_owes_neither_country_nor_quality() {
+        let db = db();
+        let id = node(&db, 1);
+        let src = "1.1.1.1";
+        // 默认：不允许 ✓（`allow_ip_quality` 列默认 0 ✓）
+        assert!(!db.country_owed(id, src).unwrap(), "没允许 ⇒ 国家也不欠 ✓");
+        assert!(!db.quality_owed(id, src).unwrap(), "没允许 ⇒ 质量也不欠 ✓");
+        // 连"待查清单"里都不该出现 ✓（面板与巡检都靠它 ✓）
+        assert!(!db.quality_pending().iter().any(|(i, _)| *i == id), "没允许 ⇒ 也不该出现在待查清单里 ✓");
+        // 标成允许之后 ⇒ 立刻开始欠 ✓（说明门是**唯一**的原因 ✓，而不是别的东西挡住了 ✓）
+        allow(&db, id);
+        // ⚠️ 这里断言的是 **`quality_owed`** ✓ 而不是 `country_owed` ✗ ——
+        // 后者除了"没查过"还要求 **`country_ip` 正好等于这个地址** ✓（它是随 agent 上报的地址变的 ✓），
+        // 而本测试**没有**设过 `country_ip` ✓ ⇒ 它会永远为 false ✓，
+        // 与这道门**毫无关系** ✓（我第一版就是这么写错的 ✓，失败信息还指向"门" ✓）。
+        assert!(db.quality_owed(id, src).unwrap(), "允许之后就该欠了 ✓");
+        // 国家那一路要走通，得先让 `country_ip` 记下这个地址 ✓（照别的测试用 `set_country` ✓）。
+        db.set_country(id, "US", src).unwrap();
+        assert!(!db.country_owed(id, src).unwrap(), "已经查到了 ⇒ 国家不再欠 ✓（这与门无关 ✓）");
+    }
+
     #[test]
     fn quality_is_still_owed_when_the_country_is_already_known() {
         let db = db();
         let id = node(&db, 1);
+        // ⚠️ 本测试验的是 **owed 的判据** ✓，所以要先把"允许检测"这道门打开 ✓ ——
+        // 否则它会因为**另一条**规则（没允许 ⇒ 什么都不欠 ✓）而失败 ✓，
+        // 而那个失败信息看起来像"质量门坏了" ✓ —— 与这里要测的事毫无关系 ✗✓。
+        allow(&db, id);
         let src = "203.0.113.9";
         // 国家查到了 ✓（正是那六台机器的状态 ✓）
         db.set_country(id, "US", src).unwrap();
