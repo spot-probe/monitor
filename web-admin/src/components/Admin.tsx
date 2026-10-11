@@ -826,13 +826,17 @@ function BillingForm({ node, onClose, onSaved }: {
 // Built here rather than fetched: the node list already carries the token, so
 // viewing an install command is a read rather than an action. Reissuing one to
 // display it would take the running agent offline.
-function installCommand(site: string, token: string, seconds: number, allowRemoteUpgrade = false) {
+function installCommand(site: string, token: string, seconds: number, allowRemoteUpgrade = false, allowIpQuality = false) {
   site = provisioningSite(site)
   if (!site) return ""
   const args = [`--server ${site}`, `--token ${token}`, `--interval ${seconds}`]
   // **默认不带**：不勾选时生成的命令与从前**逐字相同**，而且 install.sh 也认这个参数
   // （它会把开关写进 unit 的 ExecStart，并在 --upgrade 时读回保留 —— 否则会被静默抹掉）。
   if (allowRemoteUpgrade) args.push("--allow-remote-upgrade")
+  // ⚠️ **顺序闸** ✓：这个参数**旧版 agent 会当成未知参数并退出** ✗✗
+  //（`parse_args` 的 `other => bail!("unknown argument")` ✓）——
+  // 所以只有当那台机器上的 agent 已经升到**认识它的版本**之后，才该勾这个框 ✓。
+  if (allowIpQuality) args.push("--allow-ip-quality")
   return `curl -fsSL ${site}/install.sh | sh -s -- ${args.join(" ")}`
 }
 
@@ -1195,9 +1199,11 @@ function InstallDialog({ node, site, onClose, onRotated }: {
   const [confirmRotate, setConfirmRotate] = useState(false)
   // **默认不勾**：不勾时生成的命令与从前逐字相同，机器也保持"仅手动升级"。
   const [allowUpgrade, setAllowUpgrade] = useState(false)
+  // ⚠️ 同上：**本机决定、hub 改不了** ✓（写进 unit 的 ExecStart ✓）。默认不勾 ✓。
+  const [allowQuality, setAllowQuality] = useState(false)
 
   const seconds = Math.min(3600, Math.max(1, Math.round(Number(interval) || 1)))
-  const command = token ? installCommand(site, token, seconds, allowUpgrade) : ""
+  const command = token ? installCommand(site, token, seconds, allowUpgrade, allowQuality) : ""
 
   async function rotate() {
     setRotating(true)
@@ -1243,6 +1249,25 @@ function InstallDialog({ node, site, onClose, onRotated }: {
                 onChange={(e) => setAllowUpgrade(e.target.checked)}
               />
               在这台机器上开启（命令里会加上 --allow-remote-upgrade）
+            </label>
+          </Field>
+          {/* 同上一族 ✓：**本机决定**、hub 改不了、默认不勾 ✓。
+              ⚠️⚠️ **顺序闸** ✗✗：这个勾选框**必须等 agent 新版铺开之后再用** ——
+              旧的 agent 不认识 `--allow-ip-quality` ✓，它会 `bail!("unknown argument")` ✓
+              ⇒ 那台机器上的 agent **起不来** ✗✗（而"升级"这个动作本身就会重跑安装器 ✓）。
+              ⇒ 这也是为什么提示里把版本要求写在脸上 ✓：勾之前先确认那台的 agent 版本 ✓。 */}
+          <Field
+            label="允许 IP 质量检测"
+            hint="勾选后 hub 才会为这台节点查 IP 归属与风险（含把它的 IP 发给在线风险库）；不勾则一次查询都不做，也不会外发。⚠️ 需要 agent 已升级到认识该参数的版本，否则 agent 会因未知参数启动失败。"
+          >
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="size-4 accent-primary"
+                checked={allowQuality}
+                onChange={(e) => setAllowQuality(e.target.checked)}
+              />
+              在这台机器上开启（命令里会加上 --allow-ip-quality）
             </label>
           </Field>
           <div className="space-y-2">
