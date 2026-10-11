@@ -4399,6 +4399,23 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Button variant="ghost" onClick={reload}>
                 重置
               </Button>
+              {/* ⭐ **一键填入** ✓✓（用户要求 ✓）—— 那些地址写在 `hint` 里、
+                  而 hint 是**字符串** ✗（放不进按钮 ✓），且输入框那列只有 7rem 宽 ✓
+                  ⇒ 与其让用户去"选中再复制"（在 label 里很难拖选 ✓），
+                  不如**一次点好** ✓✓：城市库与 ASN 库用 DB-IP（**不需要注册** ✓），
+                  Tor 用官方清单 ✓ —— 三个都是一句话能说明白的公开地址 ✓。
+                  ⚠️ 只**填进输入框**（草稿 ✓），**不自动保存** ✗ —— 用户仍要按保存 ✓，
+                  这样"点了什么"与"存了什么"不会在他不知情时分叉 ✓。 */}
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  set("geo_city_url", "https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz")
+                  set("geo_asn_url", "https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz")
+                  set("geo_tor_url", "https://check.torproject.org/torbulkexitlist")
+                }}
+              >
+                填入示例地址
+              </Button>
               <Button
                 onClick={() =>
                   save({
