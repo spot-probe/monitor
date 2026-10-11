@@ -744,6 +744,18 @@ pub struct Node {
     /// 以及大量测试里手写的节点 ✓）都会被读成"不允许" ✗✓ —— 与上面那条政策正好相反 ✓。
     #[serde(default = "quality_allowed_by_default")]
     pub allow_ip_quality: bool,
+    /// 这个 agent **会不会**做流媒体探测 ✓（**能力** ✓，不是许可 ✗ —— 由它的版本决定 ✓）。
+    /// ⚠️⚠️ **缺席时按 false** ✓✓ —— 与上面那个许可**正好相反** ✗✗：
+    /// 老 agent 手里**真的没有那段代码** ✓ ⇒ 这里的 false 描述的是**事实** ✓，
+    /// 不是"暂不允许" ✓。面板据此把「版本不支持」与「还没测过」分开 ✓✓。
+    ///
+    /// ⚠️ 这里**只要一个普通的 `#[serde(default)]`** ✓✓（它给的就是 `false` ✓）——
+    /// 而 `allow_ip_quality` 那边必须用**自定义的**默认函数 ✓（它要的是 `true` ✓）。
+    /// ⇒ 两个字段长得一样、默认值相反、写法也就不同 ✓ —— 这不是不一致 ✓，是各自正确 ✓。
+    /// （缺了它，任何不带这个字段的节点 JSON 都会让**反序列化直接失败** ✓✗ ——
+    ///  今天在 `allow_ip_quality` 那一步已经栽过一次，6 条测试当场倒下 ✓。）
+    #[serde(default)]
+    pub stream_probe: bool,
     /// 流媒体探测的结果 ✓（**已校验过的 JSON 文本** ✓，见 `agent_ws::sanitize_probe` ✓）。
     /// ⚠️ 这里存的是**文本** ✓（SQLite 里就是 TEXT ✓），视图那边再解析成 JSON ✓ ——
     /// 库这一层不该替调用方决定"它是不是合法 JSON" ✓。
@@ -1650,6 +1662,9 @@ impl Db {
                              -- 但下面读 hello 的那一步会把它翻成 1 = 允许 ✓，
                              -- 因为这条政策的决定是向后兼容、老节点不断 ✓）。
                              , allow_ip_quality=?18
+                             -- 同样追加在最后 ✓（编号一个都不动 ✓）。
+                             -- ⚠️ 这个缺席按 **false** ✓（与上面那个相反 ✓）：老 agent 真的不会探 ✓。
+                             , stream_probe=?19
              WHERE id=?1",
             params![
                 id,
@@ -1673,7 +1688,13 @@ impl Db {
                 // 老 agent 不上报 ⇒ 这里给 true ⇒ 老节点继续被查询 ✓、行为不变 ✓。
                 // ⚠️ 别顺手把它改成 false ✗：那会让**所有老节点**一夜之间变成"未允许检测" ✓✗，
                 // 而它们的 IP 质量数据此前一直是好的 ✓（用户明确要求不断 ✓）。
-                i64::from(f.get("allow_ip_quality").and_then(|v| v.as_bool()).unwrap_or(true))
+                i64::from(f.get("allow_ip_quality").and_then(|v| v.as_bool()).unwrap_or(true)),
+                // ⚠️⚠️ **`unwrap_or(false)`** ✓✓ —— 与上面那行的 `true` **正好相反**，而这是刻意的 ✗✗：
+                // 上面那个是**许可**（缺席 = 老 agent 没听说这件事 ✓ ⇒ 按"允许"办 ✓ 免得老节点断掉 ✓）；
+                // 这个是**能力**（缺席 = 老 agent **手里没有这段代码** ✓ ⇒ 按"不会"办 ✓✓）。
+                // ⇒ 把这里的 false 改成 true 会让面板对**所有旧节点**说"它还没测过" ✓✗，
+                //   而真相是"它根本不会测" ✓ —— 用户会去等一个永远不会来的结果 ✓✗。
+                i64::from(f.get("stream_probe").and_then(|v| v.as_bool()).unwrap_or(false))
             ],
         )?;
         let blank: bool = conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?;
@@ -3838,6 +3859,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         private_remark: s("private_remark"),
         allow_remote_upgrade: n("allow_remote_upgrade") != 0,
         allow_ip_quality: n("allow_ip_quality") != 0,
+        stream_probe: n("stream_probe") != 0,
         // ⚠️ 两列都可空 ✓（没探测过就是 NULL ✓）⇒ 用 `get(..).ok()` 而不是 `unwrap_or_default` ✗：
         // 空字符串与"没探测过"是两件事 ✓（前者会在视图里变成一个空的 probe 对象 ✓✗）。
         probe: r.get::<_, Option<String>>("probe").ok().flatten(),
