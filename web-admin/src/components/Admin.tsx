@@ -607,6 +607,16 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
                         </a>
                         （或 MaxMind GeoLite2，视配置而定）
                       </p>
+                                    {/* Tor 出口（**本地清单**）✓ —— 与上面「在线风险」里的 `isTor` **是两条路** ✗：
+                                        这一条**默认就有效** ✓（读那份每小时更新的官方清单 ✓）、**不外发** ✓、不需要开关 ✓；
+                                        那一条要开着开关 ✓、且会把节点 IP 发给第三方 ✓。两者**可能不一致** ✓
+                                        （第三方口径会滞后 ✓）—— 所以这里把差别写出来 ✓，否则会让人以为其中一个错了 ✓。 */}
+                                    {node.tor_exit != null && (
+                                      <p className="pt-1 text-[10px] leading-relaxed opacity-70">
+                                        Tor 出口（本地清单）：
+                                        {node.tor_exit ? "是 —— 这个地址在 Tor 官方出口清单里" : "否 —— 不在 Tor 官方出口清单里"}
+                                      </p>
+                                    )}
                     </div>
                   ) : (
                     <p className="mt-1.5 text-xs text-muted-foreground">
