@@ -1275,17 +1275,24 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           className={
                             n.probe.netflix.status === "unlocked"
                               ? "font-medium text-ok"
-                              : n.probe.netflix.status === "blocked"
-                                ? "font-medium text-destructive"
-                                : "text-muted-foreground"
+                              : n.probe.netflix.status === "idc"
+                                ? "font-medium text-warn"
+                                : n.probe.netflix.status === "blocked"
+                                  ? "font-medium text-destructive"
+                                  : "text-muted-foreground"
                           }
                         >
                           {/* ⚠️ 面板只说**自己的话** ✓（线上报文仍是 `unlocked` 等 ✓ —— 那套字符串由 hub 的测试钉住 ✓） */}
+                          {/* ⚠️ **四档** ✓（用户定"甲" ✓）：`idc` = 解锁、但被识别成**机房** ✓ ——
+                              它与"解锁"不是一回事 ✓（机房 IP 在很多服务上吃亏 ✓），
+                              也与"未解锁"不同 ✓ ⇒ 必须单独说 ✓✗（否则它会落进"没读明白" ✓ = 又一个假信息 ✓）。 */}
                           {n.probe.netflix.status === "unlocked"
                             ? "解锁"
-                            : n.probe.netflix.status === "blocked"
-                              ? "未解锁"
-                              : "没读明白"}
+                            : n.probe.netflix.status === "idc"
+                              ? "解锁（机房）"
+                              : n.probe.netflix.status === "blocked"
+                                ? "未解锁"
+                                : "没读明白"}
                         </span>
                         {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
                       </span>

@@ -702,8 +702,13 @@ fn probe(app: &App, node_id: i64, params: &serde_json::Value) -> Result<()> {
 
 fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
     const MAX_BYTES: usize = 4 * 1024;
-    const SERVICES: [&str; 1] = ["netflix"]; // 第一期只有它 ✓（加服务只改这一行 ✓）
-    const STATUSES: [&str; 3] = ["unlocked", "blocked", "unknown"];
+    // ⚠️ 加服务**只改这一行** ✓ —— 而它必须**早于** agent 开始发那个服务 ✗✓
+    //（"绝不给对方发它还不能处理的东西" ✓ ⇒ hub 先能收 ✓）。加一个没人发的服务是无害的 ✓。
+    const SERVICES: [&str; 2] = ["netflix", "tiktok"];
+    // ⚠️ 四个 ✓：`idc` 是"**解锁了、但对方把这个地址识别成机房**" ✓✓ ——
+    // 它与"解锁"**不是一回事** ✓（机房 IP 在很多服务上吃亏 ✓，而这正是运维想知道的 ✓），
+    // 也与"未解锁"不同 ✓ ⇒ 单独一档 ✓（用户定的"甲" ✓）。
+    const STATUSES: [&str; 4] = ["unlocked", "blocked", "unknown", "idc"];
 
     // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
     let raw = serde_json::to_string(params).ok()?;
@@ -1436,5 +1441,18 @@ mod tests {
         // ⚠️ **整体大小上限** ✓：一个巨物不该能进库（也不该被解析成一堆键 ✓）
         let huge = json!({"netflix": {"status": "unlocked", "junk": "x".repeat(8 * 1024)}});
         assert_eq!(sanitize_probe(&huge), None, "超大报文 ⇒ 当没有 ✓");
+    }
+    /// ⭐ `idc` 是**第四档** ✓✓（用户定"甲" ✓）：解锁了、但对方把这个地址识别成**机房** ✓。
+    /// ⚠️ 它与"解锁"不是一回事 ✓（机房 IP 在很多服务上吃亏 ✓，而这正是运维想知道的 ✓），
+    /// 也与"未解锁"不同 ✓ —— 所以它必须**能被收下** ✓，且**不能被降级**成别的档 ✓。
+    #[test]
+    fn an_idc_verdict_survives_the_whitelist() {
+        assert_eq!(
+            sanitize_probe(&json!({"tiktok": {"status": "idc", "region": "JP"}})),
+            Some(json!({"tiktok": {"status": "idc", "region": "JP"}})),
+            "idc 必须被原样收下 ✓（它是一档结论 ✓，不是噪声 ✓）"
+        );
+        // 而真的读不懂的状态**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
+        assert_eq!(sanitize_probe(&json!({"tiktok": {"status": "maybe"}})), None);
     }
 }
