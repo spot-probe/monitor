@@ -552,6 +552,16 @@ fn locate(app: Shared, node_id: i64, source: String) {
 /// 开关、key、以及"今天是否已经查过"都由 [`crate::risk::check`] 自己判 ✓ ——
 /// 这里只管**什么时候问一次** ✓（与 `qualify` 同一时机 ✓、同一套节流 ✓）。
 fn assess(app: Shared, node_id: i64, source: String) {
+    // ⭐ **门 B** ✓✓：这台节点没允许检测 ⇒ **一个请求都不发** ✗ —— 直接返回 ✓。
+    // ⚠️ 这是整个许可旗子存在的**最大理由** ✗：在此之前，只要开关与 key 配好 ✓，
+    // 每台节点的 IP 都会被发给第三方 ✓（用户要的是"可配置、不是所有节点都默认打开" ✓）。
+    // ⚠️ 语义与既有的 `Checked::Skipped` **完全一致** ✓（没去查 ⇒ **什么都不动** ✓）：
+    // 这里**不落库、不写节流表** ✓ —— "没允许"不是关于这个 IP 的结论 ✓，
+    // 把它写成"查空"会覆盖掉它以前（允许时）查到的结论 ✓✗。
+    // ⚠️ 放在**节流判断之前** ✓：不然它的 id 会白占一个节流条目 ✓（下一轮还得等一小时 ✓）。
+    if !app.db.quality_allowed(node_id) {
+        return;
+    }
     let mut asked = ASSESSED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if asked.get(&node_id).is_some_and(|at| at.elapsed() < LOCATE_RETRY) {
         return;

@@ -2026,6 +2026,18 @@ impl Db {
     /// 判据与 `Node::quality` 判"过期"**是同一条** ✓：结论属于当前地址就不欠 ✓ ——
     /// 一处定义、两处使用 ✓，否则"该不该查"和"算不算数"迟早会分叉 ✓
     ///（那会变成"一直在查但永远显示未知"或者反过来 ✓，两种都很难查 ✓）。
+    /// 这台节点是否**允许做 IP 质量检测** ✓✓（agent 在 hello 里上报 ✓，hub 只读 ✓）。
+    ///
+    /// ⚠️ **它是"要不要把 IP 发出去"的唯一开关** ✗ —— 在线风险库那一支必须问它 ✓：
+    /// 没允许就**一个请求都不发** ✓（不是"发了但结果丢掉" ✗ —— 那 IP 已经出去了 ✓，收不回来 ✓）。
+    ///
+    /// 读不到这台节点（id 不存在 ✓）⇒ **false** ✓：宁可少查，不可误发 ✓。
+    pub fn quality_allowed(&self, id: i64) -> bool {
+        self.conn()
+            .query_row("SELECT allow_ip_quality <> 0 FROM node WHERE id=?1", [id], |r| r.get(0))
+            .unwrap_or(false)
+    }
+
     pub fn quality_owed(&self, id: i64, source: &str) -> Result<bool> {
         let conn = self.conn();
         Ok(conn.query_row(
@@ -5528,6 +5540,22 @@ mod tests {
         // 国家那一路要走通，得先让 `country_ip` 记下这个地址 ✓（照别的测试用 `set_country` ✓）。
         db.set_country(id, "US", src).unwrap();
         assert!(!db.country_owed(id, src).unwrap(), "已经查到了 ⇒ 国家不再欠 ✓（这与门无关 ✓）");
+    }
+
+    /// ⭐ **门 B 的地基** ✓✓：没允许的节点，`quality_allowed` 必须说 false ✓ ——
+    /// 而在线风险那一支**只认这一个判断** ✓（`assess` 里先问它 ✓，false 就直接返回 ✓）。
+    /// ⚠️ 反过来也要断言 ✓（允许之后为 true ✓）：一个**永远返回 false** 的实现也能通过前半条 ✓，
+    /// 而那会把在线风险彻底关死 ✓ —— 那种失败会很久以后才被发现 ✓。
+    ///
+    /// 也断言**不存在的节点**为 false ✓：宁可少查，不可误发 ✓（ID 用 99999 ✓）。
+    #[test]
+    fn quality_is_allowed_only_for_nodes_marked_allowed() {
+        let db = db();
+        let id = node(&db, 1);
+        assert!(!db.quality_allowed(id), "默认不允许 ✓（新装的要在安装命令里勾选 ✓）");
+        allow(&db, id);
+        assert!(db.quality_allowed(id), "标成允许之后必须为 true ✓（否则在线风险会被彻底关死 ✓）");
+        assert!(!db.quality_allowed(99999), "不存在的节点 ⇒ false ✓（宁可少查，不可误发 ✓）");
     }
 
     #[test]
