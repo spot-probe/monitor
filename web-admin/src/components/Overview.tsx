@@ -123,6 +123,28 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 // 颜色一律走 token ✓（`muted` / `primary` / `muted-foreground` ✓）—— 换肤时不会漏色 ✓。
 // ⚠️ **不写死高度** ✗：原来写的是 `h-9`(36px) ✓，而"36 = p-1×2 + 项高 28"只在 `text-sm` 时成立 ✓；
 // 字号一调（比如 13px ✓），那 2px 就会变成**槽里的缝** ✓ —— 让内容自己撑高才不会露馅 ✓。
+/// 国家码 → 国旗 emoji ✓✓（两个 ASCII 字母映射到"区域指示符"两个码点 ✓）。
+/// ⚠️ **不是处处能显示** ✗：macOS 与 Win11 出旗子 ✓，Win10 与部分 Linux 出的是两个字母（`AU` ✓）——
+/// 两种都**读得出来** ✓，所以它是一次"多数人更好、少数人不坏"的增强 ✓（用户已确认要 ✓）。
+/// 非两位字母一律返回空串 ✓（空国家码、`T1` 这类特殊码 ✓）—— 宁可不出旗，也不出错码 ✓。
+/// 风险档位 → 观感 ✓✓。⚠️ **按 hub 给的档位文字映射** ✗，而**不是**在这里按分数重判一次 ✓：
+/// 阈值只写在 hub 的 `risk.rs` 里 ✓ —— 面板再判一遍就会有**两处阈值** ✓，
+/// 而"两处各写一份"今天已经吃过好几次亏 ✓（改一处忘一处，且不报错 ✓）。
+/// 认不出的档位一律走中性色 ✓（不猜 ✓）。
+const riskTone = (label?: string | null) =>
+  label === "高风险"
+    ? "bg-destructive/10 text-destructive"
+    : label === "较高风险"
+      ? "bg-warn/10 text-warn"
+      : label === "低风险"
+        ? "bg-ok/10 text-ok"
+        : "bg-muted text-muted-foreground"
+
+const flag = (cc?: string | null) =>
+  cc && /^[A-Za-z]{2}$/.test(cc)
+    ? String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
+    : ""
+
 const TRACK = "inline-flex items-center rounded-lg bg-muted p-1"
 const pill = (on: boolean) =>
   // 字号 **13px** ✓（用户要"小一点点"✓）—— 不回到 `text-xs`(12px ✓)：那是**一整级** ✓，不是一点点 ✓。
@@ -1100,6 +1122,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   <span className="truncate">
                     {n.quality?.city || n.quality?.country ? (
                       <>
+                        {flag(n.quality?.country) ? flag(n.quality?.country) + " " : null}
                         {n.quality?.city ?? ""}
                         {n.quality?.city && n.quality?.country ? " · " : null}
                         {n.quality?.country ?? ""}
@@ -1131,19 +1154,27 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   </span>
                   <span className="truncate">
                     {n.risk ? (
-                      <>
-                        <span className="font-mono text-xs">{n.risk.score ?? "—"}</span>
-                        {n.risk.label ? ` · ${n.risk.label}` : ""}
-                      </>
+                      <span
+                        className={`inline-flex items-baseline gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${riskTone(n.risk.label)}`}
+                      >
+                        <span className="font-mono">{n.risk.score ?? "—"}</span>
+                        {/* 档位文字来自 hub ✓（它按同一份阈值算 ✓）⇒ 这里只显示，**不再判一次** ✓ */}
+                        {n.risk.label ?? "未分档"}
+                      </span>
                     ) : (
                       <span className="text-muted-foreground">未启用或未查到</span>
                     )}
                   </span>
                   <span>
+                    {/* ⚠️ **三种情形都要能分辨** ✗（同事建议"否就不展示" ✓ —— 但那样"未知"会跟着消失 ✓✗）：
+                        是 ⇒ 高亮徽标 ✓（这一列里唯一的强信号 ✓）；否 ⇒ **很淡** ✓（一列全是"否"确实是噪音 ✓）；
+                        未知 ⇒ 破折号 ✓ —— 这一列现在只在"是"的时候抢眼 ✓，却**没有丢信息** ✓。 */}
                     {n.tor_exit === true ? (
-                      <span className="text-primary">是</span>
+                      <span className="inline-flex rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+                        Tor 出口
+                      </span>
                     ) : n.tor_exit === false ? (
-                      "否"
+                      <span className="text-muted-foreground/50">否</span>
                     ) : (
                       <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
                     )}
@@ -1152,6 +1183,14 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               ))}
             </div>
           </div>
+          {/* 表下声明 ✓✓ —— **不能省** ✗：一个彩色 Badge 很容易被当成
+              "服务商的官方结论" ✓，而档位文字（低/较高/高 ✓）**是本面板按 25/75 划的** ✓。
+              同理，四列数据来自**三条不同的路** ✓（本地库 ✓ 在线库 ✓ 官方清单 ✓），
+              它们的隐私与开关行为都不一样 ✓ —— 一句话说清，比事后再解释便宜得多 ✓。 */}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            档位文字由本面板给出（按分数 25 / 75 划档），各家口径不同 · 风险来自在线库（第三方，需要开关）·
+            ASN 与位置来自本地库（不外发）· Tor 出口来自官方出口清单（不外发，每小时更新）。
+          </p>
           {/* ③ 块：**预留** ✓（用户要求 ✓）—— 只放一句诚实的说明 ✓，
               **不编任何字段** ✗：探哪些服务、多久一次、谁触发都还没定 ✓，
               现在硬编格子只会得到"看起来支持、其实空着"的假信号 ✓。 */}
