@@ -733,6 +733,13 @@ pub struct Node {
     /// 以及大量测试里手写的节点 ✓）都会被读成"不允许" ✗✓ —— 与上面那条政策正好相反 ✓。
     #[serde(default = "quality_allowed_by_default")]
     pub allow_ip_quality: bool,
+    /// 流媒体探测的结果 ✓（**已校验过的 JSON 文本** ✓，见 `agent_ws::sanitize_probe` ✓）。
+    /// ⚠️ 这里存的是**文本** ✓（SQLite 里就是 TEXT ✓），视图那边再解析成 JSON ✓ ——
+    /// 库这一层不该替调用方决定"它是不是合法 JSON" ✓。
+    pub probe: Option<String>,
+    /// 那次探测**什么时候**做的 ✓（Unix 秒 ✓，**由 hub 盖** ✓✓）。
+    /// ⚠️ 与 `probe` 分开存 ✓：它是"新不新"的唯一依据 ✓，不该埋在 JSON 里让人各处解析 ✓。
+    pub probe_at: Option<i64>,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -3820,6 +3827,10 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         private_remark: s("private_remark"),
         allow_remote_upgrade: n("allow_remote_upgrade") != 0,
         allow_ip_quality: n("allow_ip_quality") != 0,
+        // ⚠️ 两列都可空 ✓（没探测过就是 NULL ✓）⇒ 用 `get(..).ok()` 而不是 `unwrap_or_default` ✗：
+        // 空字符串与"没探测过"是两件事 ✓（前者会在视图里变成一个空的 probe 对象 ✓✗）。
+        probe: r.get::<_, Option<String>>("probe").ok().flatten(),
+        probe_at: r.get::<_, Option<i64>>("probe_at").ok().flatten(),
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,

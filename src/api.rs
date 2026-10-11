@@ -411,6 +411,16 @@ fn node_view(
         // 「未允许检测」与「允许了但暂无数据」✓✗（这两件事长得完全不同 ✓）：
         // 前者该显示"未允许检测" ✓，后者才是"暂无解析数据" ✓。
         view["allow_ip_quality"] = json!(node.allow_ip_quality);
+        // 流媒体探测的结果 ✓（第一期：Netflix ✓）。⚠️ **在 hub 侧解析成 JSON** ✗✓：
+        // 面板拿到的应当是结构化对象 ✓（而不是一个要自己 parse 的字符串 ✓ ——
+        // 那样每个用它的地方都得处理"解析失败" ✓，迟早有一处忘了 ✓）。
+        // ⚠️ 解析不了就当**没有** ✓（不编一个空对象 ✗ —— 那会让面板显示"探测过了、什么都没有" ✓✗）。
+        view["probe"] = node
+            .probe
+            .as_deref()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .unwrap_or(serde_json::Value::Null);
+        view["probe_at"] = json!(node.probe_at);
         // 最近一次远程升级的结论（agent 回报的）。它挂在**会话**上，所以只在节点在线时有；
         // 这也正是它的语义：一次升级只可能发生在节点在线的时候。
         view["upgrade"] = json!(current.and_then(|a| a.upgrade.as_ref()));
