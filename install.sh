@@ -27,7 +27,7 @@ INTERVAL=""
 INSECURE=""
 UNINSTALL=""
 UPGRADE=""
-QUALITY=""
+ALLOW_QUALITY=""
 
 while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
