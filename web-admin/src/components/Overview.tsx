@@ -1100,13 +1100,29 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             放上去会让人以为它对资源与成本也生效 ✓。 */}
         {page === "quality" ? (
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            {/* ⚠️ **它原来是个"看起来像文字"的按钮** ✗（用户报的 ✓）：
+                用的是 `pill(false)` —— 未激活态只有灰字、**没有边框也没有底色** ✓ ⇒
+                与旁边一串说明文字长得一样 ✓，一眼看不出能点 ✓。
+                ⇒ 改成**标准外框按钮** ✓：常驻边框 ✓ · 激活时蓝底 ✓ · 前缀点指示状态 ✓ ·
+                带**计数徽章**（当前会显示几台 ✓）· 高度 `h-7` 与右侧搜索框**对齐** ✓。 */}
             <button
               type="button"
               onClick={() => setOnlyData((v) => !v)}
               aria-pressed={onlyData}
-              className={pill(onlyData)}
+              className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${
+                onlyData
+                  ? "border-primary bg-primary/10 font-medium text-primary"
+                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
             >
+              {/* 前缀点 ✓：亮 = 正在筛选 ✓、暗 = 未启用 ✓（同事说的"前缀点"正是这个作用 ✓） */}
+              <span className={`size-1.5 rounded-full ${onlyData ? "bg-primary" : "bg-muted-foreground/40"}`} />
               只看有数据
+              {/* 计数徽章 ✓（用户要求 ✓）—— 只在激活时显示 ✓：
+                  它顺便回答了"筛掉了几台" ✓，与表下那句"已隐藏 N 台"是同一个数 ✓（`qualityRows` ✓）。 */}
+              {onlyData ? (
+                <span className="rounded bg-primary/15 px-1 font-mono text-[11px]">{qualityRows.length}</span>
+              ) : null}
             </button>
             <Input
               value={q}
