@@ -4306,116 +4306,131 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           hint="hub 把这几份库下载到本地、自己查询 —— 节点 IP 不会发给任何第三方。留空表示不下载该库。"
         >
           <Card className="gap-6 p-6">
-            <section className="space-y-3">
-              <h4 className="text-sm font-medium">镜像地址</h4>
-              <Field
-                row
-                label="城市库"
-                hint="厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。地址里可以写 {YYYY-MM}，下载时按当天替换 —— 有些直链带月份，写死了下个月就会 404。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz"
-              >
-                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
-                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
-                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
-                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    value={text("geo_city_url")}
-                    onChange={(e) => set("geo_city_url", e.target.value)}
-                    placeholder="未配置（跳过这个库）"
-                  />
+            {/* 行与行之间用**分隔线**分块 ✓（同事第一条 ✓）—— 此前三行只靠间距 ✓，
+                看上去像"三张小卡叠在一起"而不是"一张表单的三行" ✓。 */}
+            <section className="divide-y divide-border">
+              <h4 className="pb-3 text-sm font-medium">镜像地址</h4>
+<div className="space-y-1.5 py-4 first:pt-0">
+                {/* 标题在左、状态在右 ✓ —— 状态贴着标题 ✓，三行会落在同一列上 ✓，
+                    一眼扫下来就知道哪个库配了 ✓，不必逐行去读输入框 ✓。 */}
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium">城市库</span>
                   {text("geo_city_url") ? (
-                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                       已配置
                     </span>
                   ) : (
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
                     </span>
                   )}
                 </div>
-              </Field>
-              <Field
-                row
-                label="ASN 库"
-                hint="给每台节点标出它走谁的线路（ASN + 组织）；同样支持 {YYYY-MM}。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz"
-              >
-                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
-                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
-                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
-                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    value={text("geo_asn_url")}
-                    onChange={(e) => set("geo_asn_url", e.target.value)}
-                    placeholder="未配置（跳过这个库）"
-                  />
+                {/* 输入框**整行铺满** ✓（同事第一条 ✓）：URL 动辄七八十个字符 ✓，
+                    挤在半列里既看不清也难改 ✓；等宽字体让 URL 与 {{YYYY-MM}} 更好认 ✓。 */}
+                <Input
+                  className="w-full font-mono text-xs"
+                  value={text("geo_city_url")}
+                  onChange={(e) => set("geo_city_url", e.target.value)}
+                  placeholder="留空表示不下载该库"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="text-xs text-muted-foreground">
+                    厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。
+                  </span>
+                  {/* 「填入」做成**行内浅链接** ✓（同事第二条 ✓）：示例就贴在它自己的字段旁边 ✓，
+                      "到底填哪一个"的歧义自然消失 ✓。⚠️ 只填草稿 ✓，仍要按保存才落库 ✓。 */}
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-primary hover:underline"
+                    onClick={() => set("geo_city_url", "https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz")}
+                  >
+                    填入 DB-IP 推荐地址
+                  </button>
+                </div>
+              </div>
+<div className="space-y-1.5 py-4 last:pb-0">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium">ASN 库</span>
                   {text("geo_asn_url") ? (
-                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                       已配置
                     </span>
                   ) : (
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
                     </span>
                   )}
                 </div>
-              </Field>
-              <Field
-                row
-                label="Tor 出口列表"
-                hint="纯文本清单，没有额度限制，所以刷新得比数据库勤。可用：https://check.torproject.org/torbulkexitlist"
-              >
-                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
-                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
-                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
-                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    value={text("geo_tor_url")}
-                    onChange={(e) => set("geo_tor_url", e.target.value)}
-                    placeholder="未配置（跳过这个库）"
-                  />
+                <Input
+                  className="w-full font-mono text-xs"
+                  value={text("geo_asn_url")}
+                  onChange={(e) => set("geo_asn_url", e.target.value)}
+                  placeholder="留空表示不下载该库"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="text-xs text-muted-foreground">标注每台节点走谁的线路（ASN + 组织）。</span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-primary hover:underline"
+                    onClick={() => set("geo_asn_url", "https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz")}
+                  >
+                    填入 DB-IP 推荐地址
+                  </button>
+                </div>
+              </div>
+<div className="space-y-1.5 py-4 last:pb-0">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium">Tor 出口列表</span>
                   {text("geo_tor_url") ? (
-                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                    <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                       已配置
                     </span>
                   ) : (
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
                       未配置
                     </span>
                   )}
                 </div>
-              </Field>
+                <Input
+                  className="w-full font-mono text-xs"
+                  value={text("geo_tor_url")}
+                  onChange={(e) => set("geo_tor_url", e.target.value)}
+                  placeholder="留空表示不下载该库"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span className="text-xs text-muted-foreground">纯文本清单，按小时刷新。</span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-primary hover:underline"
+                    onClick={() => set("geo_tor_url", "https://check.torproject.org/torbulkexitlist")}
+                  >
+                    填入官方默认源
+                  </button>
+                </div>
+              </div>
             </section>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              只接受 https 地址。已配置的库会各自按自己的节奏刷新（数据库每天一次，Tor 列表每小时）。这里的库全部在 hub
-              本地查询，不涉及任何外部请求 —— 与上面的「IP 风险（在线库）」是两条完全不同的路。
-              <br />
-              两家数据源都可以用：DB-IP 不用注册（CC BY 4.0，可就地分发），MaxMind 更准一点但要先注册免费账号拿
-              license key，且它发的是 .tar.gz。两家都配也可以 —— hub 优先用 MaxMind，取不到才退回 DB-IP。
-            </p>
+            {/* 底部长文收进一个**浅色说明槽** ✓（前端同事第三条 ✓）：此前它直接躺在按钮上方 ✓、
+                与表单同权重 ✓ ⇒ 读的人分不清"这是必读规则"还是"参考说明" ✓。
+                现在整成 2 组、共 4 条 ✓，一眼能扫完 ✓。
+                ⚠️ 颜色映射到 token ✗（同事给的 bg-slate-50/border-slate-100/text-slate-500 是写死值 ✓）
+                —— 这个面板要能换肤 ✓，写死色会在深色主题下变成一块孤岛 ✓。 */}
+            <div className="mt-4 space-y-2 rounded-lg border border-border bg-muted/40 p-3.5 text-xs leading-relaxed text-muted-foreground">
+              <p className="font-medium text-foreground">调度与隐私</p>
+              <ul className="list-disc space-y-0.5 pl-4">
+                <li>库全部在 hub 本地查询，节点 IP 不发给任何第三方 —— 与上面的「IP 风险（在线库）」是两条完全不同的路。</li>
+                <li>只接受 https 地址；已配置的库各自按自己的节奏刷新：数据库每天一次，Tor 列表每小时。</li>
+                <li>DB-IP 不需要注册（CC BY 4.0，可就地分发）；MaxMind 更准一点，但要先注册免费账号拿 license key，且它发的是 .tar.gz。</li>
+                <li>两家都配也可以 —— hub 优先用 MaxMind，取不到才退回 DB-IP。</li>
+              </ul>
+            </div>
             {/* 每节自己的保存 ✓ —— 这一页的 set 只是草稿 ✓，只有 save(…) 才落库 ✓。 */}
             <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
               <Button variant="ghost" onClick={reload}>
                 重置
               </Button>
-              {/* ⭐ **一键填入** ✓✓（用户要求 ✓）—— 那些地址写在 `hint` 里、
-                  而 hint 是**字符串** ✗（放不进按钮 ✓），且输入框那列只有 7rem 宽 ✓
-                  ⇒ 与其让用户去"选中再复制"（在 label 里很难拖选 ✓），
-                  不如**一次点好** ✓✓：城市库与 ASN 库用 DB-IP（**不需要注册** ✓），
-                  Tor 用官方清单 ✓ —— 三个都是一句话能说明白的公开地址 ✓。
-                  ⚠️ 只**填进输入框**（草稿 ✓），**不自动保存** ✗ —— 用户仍要按保存 ✓，
-                  这样"点了什么"与"存了什么"不会在他不知情时分叉 ✓。 */}
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  set("geo_city_url", "https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz")
-                  set("geo_asn_url", "https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz")
-                  set("geo_tor_url", "https://check.torproject.org/torbulkexitlist")
-                }}
-              >
-                填入示例地址
-              </Button>
+              {/* ⚠️ 页脚那个「填入示例地址」**去掉了** ✓（同事第四条 ✓）：
+                  每一行现在都有自己的"填入"链接 ✓ ⇒ 页脚再放一个会让人犹豫"到底填哪一个" ✓。
+                  底栏回到最标准的两颗：重置（ghost）与保存（primary）✓。 */}
               <Button
                 onClick={() =>
                   save({
