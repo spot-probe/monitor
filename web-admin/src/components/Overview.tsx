@@ -1066,19 +1066,21 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       {page === "quality" ? (
         <div className="space-y-4">
           <div className="overflow-x-auto rounded-lg border border-border">
-            <div className="min-w-[52rem]">
-              <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+            <div className="min-w-[68rem]">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
                 <span>IP</span>
                 <span>ASN / 组织（本地库）</span>
                 <span>位置（本地库）</span>
+                <span>坐标</span>
+                <span>时区</span>
                 <span>风险（在线库）</span>
                 <span>Tor 出口</span>
               </div>
               {nodes.map((n) => (
                 <div
                   key={n.id}
-                  className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] items-baseline gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
+                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] items-baseline gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
                 >
                   <span className="truncate font-medium">{n.name}</span>
                   <span className="truncate font-mono text-xs text-muted-foreground">
@@ -1105,6 +1107,27 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     ) : (
                       <span className="text-muted-foreground">未知</span>
                     )}
+                  </span>
+                  {/* 坐标 ✓：**可点开地图** ✓ —— 与编辑框里那个链接同一形式 ✓（`check.place` ✓），
+                      一处改了另一处也要改的那种地方 ⇐ 记在这里 ✓。 */}
+                  <span className="truncate">
+                    {n.quality?.latitude != null && n.quality?.longitude != null ? (
+                      <a
+                        className="font-mono text-xs text-primary underline underline-offset-2"
+                        href={`https://check.place/${n.quality.latitude},${n.quality.longitude},15,cn`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {n.quality.latitude.toFixed(2)}, {n.quality.longitude.toFixed(2)}
+                      </a>
+                    ) : (
+                      <span className="text-muted-foreground">未知</span>
+                    )}
+                  </span>
+                  {/* 时区 ✓ —— ⚠️ **DB-IP 的 City 库没有这一项** ✗ ⇒ 用 DB-IP 时这一列会**全是"未知"** ✓。
+                      那不是坏了 ✓，是那份库确实不提供 ✓（空比错好 ✓；编辑框那边也是这么显示的 ✓）。 */}
+                  <span className="truncate">
+                    {n.quality?.time_zone ?? <span className="text-muted-foreground">未知</span>}
                   </span>
                   <span className="truncate">
                     {n.risk ? (
