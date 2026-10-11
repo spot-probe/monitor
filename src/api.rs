@@ -398,6 +398,10 @@ fn node_view(
         // 「这台机器是否允许被 hub 远程升级」属于**安全姿态**，与备注同层：只给管理员看。
         // 面板据此显示「可远程升级 / 仅手动升级」—— 三个月后一眼看清哪几台开着。
         view["allow_remote_upgrade"] = json!(node.allow_remote_upgrade);
+        // 同上，「允许 IP 质量检测」也是安全姿态 ✓ —— 面板据此分出
+        // 「未允许检测」与「允许了但暂无数据」✓✗（这两件事长得完全不同 ✓）：
+        // 前者该显示"未允许检测" ✓，后者才是"暂无解析数据" ✓。
+        view["allow_ip_quality"] = json!(node.allow_ip_quality);
         // 最近一次远程升级的结论（agent 回报的）。它挂在**会话**上，所以只在节点在线时有；
         // 这也正是它的语义：一次升级只可能发生在节点在线的时候。
         view["upgrade"] = json!(current.and_then(|a| a.upgrade.as_ref()));

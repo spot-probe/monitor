@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS node (
   -- agent 是否允许被 hub 远程升级（它在 hello 里如实上报；老 agent 不上报 → 0 ✓）。
   -- **只能由这台机器自己打开**：hub 不给写这个列的能力，升级必须由本机重跑安装命令。
   allow_remote_upgrade INTEGER NOT NULL DEFAULT 0,
+  -- 是否允许这台节点做 **IP 质量检测** ✓（含把它的 IP 发给在线风险库 ✓），
+  -- 将来也是**流媒体检测**的门 ✓。同样由这台机器自己决定 ✓（agent 在 hello 里上报 ✓）。
+  -- ⚠️ 与上面那列**有一处关键不同** ✗：**老 agent 不报这个字段，而那时要当作"允许"** ✓ ——
+  -- 这是"向后兼容、老节点不断"的决定 ✓（见读 hello 那一处 ✓）。
+  allow_ip_quality INTEGER NOT NULL DEFAULT 0,
   -- 节点质量（IP 结论 ✓）：由 hub 用**本地**库查出 ✓，不是 agent 上报的 ✗ ——
   -- agent 依旧零改动 ✓，也不把节点 IP 发给第三方 ✓（除非以后显式打开在线库 ✓）。
   -- 八个列**全部可空** ✓：查不到就是空 ✓ —— "未知"与"美国"是两件事 ✗（`''` 会被读成后者 ✓）。
@@ -294,7 +299,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -647,6 +652,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         add_column(&tx, "node", "risk TEXT")?;
         add_column(&tx, "node", "risk_ip TEXT")?;
     }
+    if from < 20 {
+        // IP 质量检测的许可 ✓。**默认 0** ✓（新装要在安装命令里勾选 ✓）；
+        // ⚠️ 老 agent 不上报这个字段 ⇒ 读 hello 时按**允许**处理 ✓（见 `save_facts` 那一处 ✓）——
+        // 所以库里这一列的 0 只代表"明确不允许" ✓，"没上报"在入库前就变成 1 了 ✓。
+        add_column(&tx, "node", "allow_ip_quality INTEGER NOT NULL DEFAULT 0")?;
+    }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
@@ -699,6 +710,16 @@ pub struct Node {
     /// agent 是否允许被远程升级。**只能由那台机器自己打开**，hub 只读不写。
     #[serde(default)]
     pub allow_remote_upgrade: bool,
+    /// 是否**允许这台节点做 IP 质量检测** ✓（含把它的 IP 发给在线风险库 ✓），
+    /// 将来也是**流媒体检测**的门 ✓。由 agent 在 hello 里上报 ✓，hub 改不了 ✓。
+    /// ⚠️ **老 agent 不报这个字段 ⇒ 按"允许"处理** ✓（用户定的向后兼容 ✓）——
+    /// 那一步翻译在下面读 hello 的地方 ✓，库里存的只是结果 ✓。
+    ///
+    /// 这里也要 `serde(default = …)` ✗ 而不是光 `#[serde(default)]` ✓：
+    /// 后者给的是 `false` ✓ ⇒ 任何**没带这个字段**的节点 JSON（老 agent 的 hello ✓、
+    /// 以及大量测试里手写的节点 ✓）都会被读成"不允许" ✗✓ —— 与上面那条政策正好相反 ✓。
+    #[serde(default = "quality_allowed_by_default")]
+    pub allow_ip_quality: bool,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -846,6 +867,16 @@ pub struct TrafficPatch {
 fn usd() -> String {
     "USD".into()
 }
+/// "节点 JSON 里没有 `allow_ip_quality`" 时按**允许**算 ✓✓。
+///
+/// ⚠️ 这个函数**就是那条政策的载体** ✗：用户定的"向后兼容、老节点不断" ✓ ——
+/// 老 agent 不上报 ⇒ 它继续被查询 ✓、行为与升级前完全一致 ✓。
+/// **别把它改成 false** ✗：那会让所有老节点一夜之间变成"未允许检测" ✓✗，
+/// 而它们的 IP 质量数据此前一直是好的 ✓。
+fn quality_allowed_by_default() -> bool {
+    true
+}
+
 fn monthly() -> String {
     "monthly".into()
 }
@@ -1584,6 +1615,10 @@ impl Db {
                              -- 追加在最后：已有 16 个编号一个都不动（同 1.9.12 那次的做法）。
                              -- 老 agent 不发这个字段 → false → 落库 0 = 「仅手动升级」✓
                              allow_remote_upgrade=?17
+                             -- 同样追加在最后 ✓（老 agent 不发这个字段 ✓ ——
+                             -- 但下面读 hello 的那一步会把它翻成 1 = 允许 ✓，
+                             -- 因为这条政策的决定是向后兼容、老节点不断 ✓）。
+                             , allow_ip_quality=?18
              WHERE id=?1",
             params![
                 id,
@@ -1602,7 +1637,12 @@ impl Db {
                 s("ipv4"),
                 s("ipv6"),
                 source,
-                i64::from(f.get("allow_remote_upgrade").and_then(|v| v.as_bool()).unwrap_or(false))
+                i64::from(f.get("allow_remote_upgrade").and_then(|v| v.as_bool()).unwrap_or(false)),
+                // ⭐ **`unwrap_or(true)` 就是"向后兼容"这条政策的全部实现** ✓✓ ——
+                // 老 agent 不上报 ⇒ 这里给 true ⇒ 老节点继续被查询 ✓、行为不变 ✓。
+                // ⚠️ 别顺手把它改成 false ✗：那会让**所有老节点**一夜之间变成"未允许检测" ✓✗，
+                // 而它们的 IP 质量数据此前一直是好的 ✓（用户明确要求不断 ✓）。
+                i64::from(f.get("allow_ip_quality").and_then(|v| v.as_bool()).unwrap_or(true))
             ],
         )?;
         let blank: bool = conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?;
@@ -3736,6 +3776,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         remark: s("remark"),
         private_remark: s("private_remark"),
         allow_remote_upgrade: n("allow_remote_upgrade") != 0,
+        allow_ip_quality: n("allow_ip_quality") != 0,
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,
@@ -5648,6 +5689,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(notnull, 0, "两列都必须可空");
+    }
+
+    /// **升级路径的闸**：一个"19 版"的库迁移后必须有 allow_ip_quality、且戳到 20 ✓。
+    /// ⚠️ 这一列**不是可空**的 ✗（与上面 risk 那两列**形状不同** ✓）：它是
+    /// `NOT NULL DEFAULT 0` ✓ —— 所以这里断言的是**默认值 0** ✓。
+    /// 理由 ✓：老 agent 没上报这件事，**在 hub 读 hello 那一步就被翻成 1 了** ✓
+    ///（用户定的向后兼容 ✓），库里**不该出现 NULL** ✓ 来表达"没上报" ✗。
+    #[test]
+    fn migrating_from_19_adds_the_allow_ip_quality_column() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE node DROP COLUMN allow_ip_quality", []).unwrap();
+        conn.execute("PRAGMA user_version = 19", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"allow_ip_quality".to_string()), "前提：列已删掉");
+        migrate(&conn, 19).unwrap();
+        assert!(cols(&conn).contains(&"allow_ip_quality".to_string()));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // 形状：NOT NULL ✓ + 默认 0 ✓（"没上报"由读 hello 那一步负责翻成 1 ✓）
+        let (notnull, dflt): (i64, String) = conn
+            .query_row(
+                "SELECT \"notnull\", COALESCE(dflt_value,'') FROM pragma_table_info('node') WHERE name='allow_ip_quality'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(notnull, 1, "必须 NOT NULL ✓（库里的 0 只代表『明确不允许』✓）");
+        assert_eq!(dflt, "0", "默认必须是 0 ✓（新装要勾选才允许 ✓）");
     }
 
     #[test]
