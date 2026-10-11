@@ -692,8 +692,10 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     match outcome {
         Ok(()) => {
             // 报**落盘之后**的大小 ✓（压缩包的大小没有意义 ✓，而且现在也不再拿得到它 ✓）
-            let on_disk =
-                std::fs::metadata(app.data_dir.join(source.name)).map(|m| m.len()).unwrap_or_default();
+            // ⚠️ 按 **target** 取 ✓（那个**真实落盘的名字** ✓）—— 按 `source.name` 取会怎样 ✓：
+            // 它是标签（"城市库" ✓）⇒ 路径不存在 ⇒ 打出 `updated (0 bytes)` ✗ ——
+            // 而任何人看到"0 bytes"都会以为**下载到了空文件** ✓。假信息比没信息更糟 ✓。
+            let on_disk = std::fs::metadata(app.data_dir.join(target)).map(|m| m.len()).unwrap_or_default();
             tracing::info!("geo: {} updated ({} bytes)", source.name, on_disk);
             true
         }
