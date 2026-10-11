@@ -335,6 +335,49 @@ pub fn store_streamed(
     }
 }
 
+// 调用它的是**下一步的接线** ✓：下载完先读头部 → 认出包装 → 再决定目标文件名 ✓
+//（见 `sniff` 的说明 ✓）。在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
+#[allow(dead_code)]
+/// **按内容**判断这是哪种包装 ✓✓ —— 不再靠"哪个来源配了哪个键" ✗。
+///
+/// ⚠️ **为什么必须这样** ✗✗（2026-10-11 现场）：MaxMind 与 DB-IP **共用同一个设置键** ✓
+/// ⇒ 运维填了 DB-IP 的 `.mmdb.gz` ✓ ⇒ MaxMind 那两个来源也去下**同一个文件** ✗
+/// ⇒ 拿 `.mmdb.gz` **当 tar.gz 解** ⇒ 日志里两条 `cannot unpack` 的 WARN ✓✓ ——
+/// 无害 ✓（DB-IP 照常成功 ✓），但**把"配置正确"与"配置错误"变得长得一样** ✓，极误导 ✓。
+/// 判据改成看**内容**之后 ✓：填哪个地址都能认出来 ✓，也不必再为两家各配一个键 ✓✓。
+///
+/// 只看**头部几百字节** ✓（gzip 魔数 ✓ + tar 的 `ustar` 标记在偏移 257 ✓）——
+/// 于是它天然是流式的 ✓，与 [`store_streamed`] 那条低内存的路径合得来 ✓。
+pub fn sniff(head: &[u8]) -> Pack {
+    // 裸 mmdb：头两个字节就是魔数段之前的二进制树 ✓，但**尾部**才有 `\xab\xcd\xefMaxMind.com` ✓
+    // ⇒ 在这里只能按"不是 gzip 也不是 tar"来判 ✓（那正是 Raw ✓）。
+    if head.len() >= 2 && head[0] == 0x1f && head[1] == 0x8b {
+        // gzip ✓ —— 里面是 tar 还是单个文件？tar 的 magic 在偏移 257 ✓（`ustar` ✓）
+        if head.len() >= 262 && &head[257..262] == b"ustar" {
+            return Pack::TarGz;
+        }
+        // ⚠️ 只看得到 gzip 头部时**不要急着下结论** ✗：gzip 的压缩流前面还有头部与文件名 ✓，
+        // 真正的内容在更后面 ✓ ⇒ 由调用方多读一点再问一次 ✓（见 `sniff_decompressed` ✓）。
+        return Pack::Gzip;
+    }
+    Pack::Raw
+}
+
+// 调用它的是**下一步的接线** ✓：下载完先读头部 → 认出包装 → 再决定目标文件名 ✓
+//（见 `sniff` 的说明 ✓）。在那之前只有测试在用 ✗ ⇒ 暂标 allow，接上即删 ✓。
+#[allow(dead_code)]
+/// 已经把 gzip **解开一层**之后，再判断里面是 tar 还是单个文件 ✓。
+///
+/// 与 [`sniff`] 分开是刻意的 ✓：gzip 的头部里看不到压缩内容 ✓，
+/// 所以"是不是 tar"必须**解压之后**才知道 ✓ —— 纯函数 ✓，两个都能单独测 ✓。
+pub fn sniff_inner(first_bytes: &[u8]) -> Pack {
+    if first_bytes.len() >= 262 && &first_bytes[257..262] == b"ustar" {
+        Pack::TarGz
+    } else {
+        Pack::Raw
+    }
+}
+
 /// 只读一个文件**尾部的一段**（默认 128 KB ✓）✓ —— 校验 mmdb 只需要这一段 ✓✓。
 ///
 /// **为什么必须这样** ✗✗：现场的 OOM（2026-10-11）是"整份文件进内存"造成的 ✓ ——
@@ -755,6 +798,45 @@ mod tests {
         assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
         // 两个都没有 ⇒ 全空 ✓
         assert_eq!(merge(None, None), Quality::default());
+    }
+
+    /// **按内容判包装** ✓✓ —— 这条测试就是"两支 WARN"的解药 ✓：
+    /// 填 MaxMind 的 `.tar.gz` 还是 DB-IP 的 `.mmdb.gz`，都该被认出**它到底是什么** ✓。
+    #[test]
+    fn the_packing_is_recognised_from_the_bytes_not_from_the_setting_key() {
+        use std::io::Write;
+        let inner = fake_mmdb();
+
+        // 裸 mmdb ⇒ Raw ✓（它头两个字节是二进制树，没有固定签名 ✗ —— 靠"不是 gzip"来判 ✓）
+        assert_eq!(sniff(&inner), Pack::Raw);
+        assert_eq!(sniff(b""), Pack::Raw);
+
+        // .gz（DB-IP 那种 ✓）⇒ 认出 gzip ✓
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&inner).unwrap();
+        let gz = enc.finish().unwrap();
+        assert_eq!(sniff(&gz), Pack::Gzip);
+
+        // .tar.gz（MaxMind 那种 ✓）⇒ 认出 TarGz ✓（**解压一层之后**看 tar 的 magic ✓）
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(inner.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "GeoLite2-City_20260307/GeoLite2-City.mmdb", inner.as_slice()).unwrap();
+        let tarball = tar.into_inner().unwrap();
+        assert_eq!(sniff_inner(&tarball), Pack::TarGz, "tar 的 magic 在偏移 257 ✓");
+        assert_eq!(sniff_inner(&inner), Pack::Raw, "不是 tar ⇒ 单文件 ✓");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tarball).unwrap();
+        let tgz = enc.finish().unwrap();
+        assert_eq!(sniff(&tgz), Pack::Gzip, "只看头部时只能到 gzip ✓（内容要解压后才看得见 ✓）");
+
+        // ⚠️ 短输入不许 panic ✓（网络半截、空文件 ✓ —— 这些是**常态**不是意外 ✓）
+        for n in 0..300 {
+            let _ = sniff(&vec![0u8; n]);
+            let _ = sniff_inner(&vec![0u8; n]);
+        }
     }
 
     /// ⭐ **流式与"攒成 Vec"必须逐字节相同** ✓✓ ——
