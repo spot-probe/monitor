@@ -1164,7 +1164,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         此前只有悬停 title ✓✗，而你明确说过不该只活在悬停里 ✓。
                         ⚠️ 措辞**只说事实** ✗：面板分不清"没查过 / 查了没收录 / 库没配" ✓
                         ⇒ 只写"暂无解析数据" ✓，**不编原因** ✗（同事写的"待探针上报"就是编的 ✓）。 */}
-                    {n.quality ? null : <div className="text-xs text-muted-foreground/70">暂无解析数据</div>}
+                    {/* ⚠️⚠️ **两种"没有"必须分开说** ✗✗（这是第三处同类的地方 ✓）：
+                      ① **没允许检测** ✓ ⇒ 显示"未允许检测" ✓ —— 那是**人可以处置**的状态 ✓
+                         （去纳管对话框勾上 ✓，或在那台机器上重跑安装命令 ✓）；
+                      ② **允许了、但 hub 还没查到** ✓ ⇒ 才是"暂无解析数据" ✓ —— 那要**等 hub 干活** ✓。
+                      ⇒ 都写成"暂无解析数据"会让人以为"查过了、结果是空" ✓✗，
+                        而那会让人去做**完全无关**的排查 ✓（查库、查网络 ✓ —— 其实只是没允许 ✓）。 */}
+                  {n.allow_ip_quality === false ? (
+                    <div className="text-xs text-warn">未允许检测</div>
+                  ) : n.quality ? null : (
+                    <div className="text-xs text-muted-foreground/70">暂无解析数据</div>
+                  )}
                   </div>
                   <div className="min-w-0 space-y-0.5">
                     <div className="truncate font-mono text-xs">{n.ipv4 || n.ip || "未知"}</div>
