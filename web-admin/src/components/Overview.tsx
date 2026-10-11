@@ -1089,96 +1089,98 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         <div className="space-y-4">
           <div className="overflow-x-auto rounded-lg border border-border">
             <div className="min-w-[68rem]">
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1.6fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
-                <span>IP</span>
-                <span>ASN / 组织（本地库）</span>
-                <span>位置（本地库）</span>
-                <span>坐标</span>
-                <span>时区</span>
-                <span>风险（在线库）</span>
-                <span>Tor 出口</span>
+                <span>IP 与归属</span>
+                <span>地理位置</span>
+                <span>安全态势</span>
               </div>
               {nodes.map((n) => (
                 <div
                   key={n.id}
-                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] items-baseline gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
+                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1.6fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
                 >
-                  <span className="truncate font-medium">{n.name}</span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {n.ipv4 || n.ip || "未知"}
-                  </span>
-                  <span className="truncate">
-                    {n.quality?.asn || n.quality?.org ? (
-                      <>
-                        {n.quality?.asn ? <span className="font-mono text-xs">AS{n.quality.asn}</span> : null}
-                        {n.quality?.asn && n.quality?.org ? " · " : null}
-                        {n.quality?.org ?? ""}
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
-                    )}
-                  </span>
-                  <span className="truncate">
-                    {n.quality?.city || n.quality?.country ? (
-                      <>
-                        {flag(n.quality?.country) ? flag(n.quality?.country) + " " : null}
-                        {n.quality?.city ?? ""}
-                        {n.quality?.city && n.quality?.country ? " · " : null}
-                        {n.quality?.country ?? ""}
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
-                    )}
-                  </span>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="truncate font-medium">{n.name}</div>
+                    {/* ⭐ **"为什么没有"第一次看得见** ✓（同事 mock 里那句的位置 ✓）——
+                        此前只有悬停 title ✓✗，而你明确说过不该只活在悬停里 ✓。
+                        ⚠️ 措辞**只说事实** ✗：面板分不清"没查过 / 查了没收录 / 库没配" ✓
+                        ⇒ 只写"暂无解析数据" ✓，**不编原因** ✗（同事写的"待探针上报"就是编的 ✓）。 */}
+                    {n.quality ? null : <div className="text-xs text-muted-foreground/70">暂无解析数据</div>}
+                  </div>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="truncate font-mono text-xs">{n.ipv4 || n.ip || "未知"}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {n.quality?.asn || n.quality?.org ? (
+                        <>
+                          {n.quality?.asn ? <span className="font-mono">AS{n.quality.asn}</span> : null}
+                          {n.quality?.asn && n.quality?.org ? " · " : null}
+                          {n.quality?.org ?? ""}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="truncate">
+                      {n.quality?.city || n.quality?.country ? (
+                        <>
+                          {flag(n.quality?.country) ? flag(n.quality?.country) + " " : null}
+                          {n.quality?.city ?? ""}
+                          {n.quality?.city && n.quality?.country ? " · " : null}
+                          {n.quality?.country ?? ""}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
+                      )}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {n.quality?.time_zone ?? null}
+                      {n.quality?.time_zone && n.quality?.latitude != null ? " · " : null}
+                      {n.quality?.latitude != null && n.quality?.longitude != null ? (
+                        <a
+                          className="font-mono text-primary underline underline-offset-2"
+                          href={`https://check.place/${n.quality.latitude},${n.quality.longitude},15,cn`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {n.quality.latitude.toFixed(2)}, {n.quality.longitude.toFixed(2)}
+                        </a>
+                      ) : null}
+                      {n.quality && !n.quality.time_zone && n.quality.latitude == null ? (
+                        <span className="text-muted-foreground/40">—</span>
+                      ) : null}
+                    </div>
+                  </div>
                   {/* 坐标 ✓：**可点开地图** ✓ —— 与编辑框里那个链接同一形式 ✓（`check.place` ✓），
                       一处改了另一处也要改的那种地方 ⇐ 记在这里 ✓。 */}
-                  <span className="truncate">
-                    {n.quality?.latitude != null && n.quality?.longitude != null ? (
-                      <a
-                        className="font-mono text-xs text-primary underline underline-offset-2"
-                        href={`https://check.place/${n.quality.latitude},${n.quality.longitude},15,cn`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {n.quality.latitude.toFixed(2)}, {n.quality.longitude.toFixed(2)}
-                      </a>
-                    ) : (
-                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
-                    )}
-                  </span>
                   {/* 时区 ✓ —— ⚠️ **DB-IP 的 City 库没有这一项** ✗ ⇒ 用 DB-IP 时这一列会**全是"未知"** ✓。
                       那不是坏了 ✓，是那份库确实不提供 ✓（空比错好 ✓；编辑框那边也是这么显示的 ✓）。 */}
-                  <span className="truncate">
-                    {n.quality?.time_zone ?? <span className="text-muted-foreground/40" title="未查到或未启用">—</span>}
-                  </span>
-                  <span className="truncate">
-                    {n.risk ? (
-                      <span
-                        className={`inline-flex items-baseline gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${riskTone(n.risk.label)}`}
-                      >
-                        <span className="font-mono">{n.risk.score ?? "—"}</span>
-                        {/* 档位文字来自 hub ✓（它按同一份阈值算 ✓）⇒ 这里只显示，**不再判一次** ✓ */}
-                        {n.risk.label ?? "未分档"}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">未启用或未查到</span>
-                    )}
-                  </span>
-                  <span>
-                    {/* ⚠️ **三种情形都要能分辨** ✗（同事建议"否就不展示" ✓ —— 但那样"未知"会跟着消失 ✓✗）：
-                        是 ⇒ 高亮徽标 ✓（这一列里唯一的强信号 ✓）；否 ⇒ **很淡** ✓（一列全是"否"确实是噪音 ✓）；
-                        未知 ⇒ 破折号 ✓ —— 这一列现在只在"是"的时候抢眼 ✓，却**没有丢信息** ✓。 */}
-                    {n.tor_exit === true ? (
-                      <span className="inline-flex rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
-                        Tor 出口
-                      </span>
-                    ) : n.tor_exit === false ? (
-                      <span className="text-muted-foreground/50">否</span>
-                    ) : (
-                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
-                    )}
-                  </span>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="truncate">
+                      {n.risk ? (
+                        <span className={`inline-flex items-baseline gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${riskTone(n.risk.label)}`}>
+                          <span className="font-mono">{n.risk.score ?? "—"}</span>
+                          {n.risk.label ?? "未分档"}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">未启用或未查到</span>
+                      )}
+                    </div>
+                    {/* 第二行 = Tor 出口 ✓（**本地清单** ✓ 与上面的在线库**不是一条路** ✓ —— 表下声明说清了 ✓）。
+                        ⚠️ **三种情形都保留** ✗：是 ⇒ 高亮 ✓ · 否 ⇒ 很淡 ✓ · 未知 ⇒ 明说"未知" ✓
+                        （同事建议"否就不展示" ✓ —— 但那样"未知"会跟着消失 ✗✓，而那是两件事 ✓）。 */}
+                    <div className="truncate text-xs">
+                      {n.tor_exit === true ? (
+                        <span className="font-medium text-destructive">Tor 出口</span>
+                      ) : n.tor_exit === false ? (
+                        <span className="text-muted-foreground/50">非 Tor 出口</span>
+                      ) : (
+                        <span className="text-muted-foreground/40">Tor 未知</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
