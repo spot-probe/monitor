@@ -87,7 +87,14 @@ const NUMBERS: [(&str, i64, i64, i64); 3] = [
 
 /// Credentials, reported to the panel only as set or unset. A webhook URL is
 /// commonly the credential itself (Discord, Slack, DingTalk, WeCom, Bark).
-const SECRETS: [&str; 3] = ["notify_telegram_token", "notify_webhook_url", "notify_webhook_headers"];
+const SECRETS: [&str; 4] = [
+    "notify_telegram_token",
+    "notify_webhook_url",
+    "notify_webhook_headers",
+    // 在线风险库的 key ✓ —— **它是凭据** ✓：面板只该知道"设没设" ✓，
+    // 不该把它回显出来 ✓（2026-10-11 记下的欠账 ✓，现在按通知那套同一处理 ✓）。
+    "risk_abuseipdb_key",
+];
 
 fn number(app: &App, key: &str) -> i64 {
     let (_, min, max, default) =

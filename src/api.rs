@@ -1556,9 +1556,10 @@ const READABLE_SETTINGS: &[&str] = &[
     "geo_city_url",
     "geo_asn_url",
     "geo_tor_url",
-    // 在线风险库（默认关 ✓；key 空 = 没配该家 ✓）。
+    // 在线风险库（默认关 ✓）。⚠️ **key 不在白名单里** ✗：它是凭据 ✓，
+    // 由 `notify::SECRETS` 那一套处理 ✓（只报"设没设" ✓，不回显 ✓）——
+    // 而写入仍然允许 ✓：`setting_error` 里那一条更靠前 ✓，会先命中 ✓。
     "risk_enabled",
-    "risk_abuseipdb_key",
 ];
 
 /// How long a release lookup stands before the panel asks GitHub again, and how
