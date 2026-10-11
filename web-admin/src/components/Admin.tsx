@@ -3883,6 +3883,10 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
 
 function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   const { s, set, save, reload } = useSettings()
+  // 页签状态 ✓（用户要求把运维的动作收拢到这一页 ✓）。
+  // **必须和别的 hook 放在一起** ✗ —— 塞进 JSX 里会被 rules-of-hooks 拦下 ✓
+  //（今天已经在别处栽过一次 ✓）。
+  const [tab, setTab] = useState<"notify" | "ip">("notify")
   const [testing, setTesting] = useState(false)
   if (!s) {
   	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
@@ -4012,6 +4016,27 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       </ChannelCard>
       </Section>
 
+      {/* 页签 ✓ —— 用户要求：把『运维的动作』收拢到这一页 ✓。
+          「通知」继承原来的全部内容 ✓（含流量报告 ✓）；「IP 信息」放 IP 风险库与 IP 数据库 ✓。
+          做成页签而不是再开一个菜单 ✓，是为了后续新增的运维项能**继续加页签** ✓
+          —— 菜单项不涨 ✓，而这一页可以一直长 ✓（面向扩展 ✓）。 */}
+      <div className="flex gap-1 rounded-lg bg-muted p-1">
+        {([["notify", "通知"], ["ip", "IP 信息"]] as const).map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setTab(k)}
+            className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
+              tab === k ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "notify" ? (
+        <>
       <Section title="触发规则" hint="离线通知在下面按节点打开；流量和到期提醒对填了额度、到期日的节点生效。">
         <OfflineNodes nodes={nodes} refresh={refresh} />
       </Section>
@@ -4185,6 +4210,11 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         </Card>
       </Section>
 
+          </>
+        ) : (
+          <>
+
+
         <Section
           title="IP 风险（在线库）"
           hint="把节点 IP 发给第三方风险库评分。默认关闭；关闭时一个请求都不会发出去。打开后每台节点每天查一次，结果缓存在本地。"
@@ -4318,6 +4348,8 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
             </div>
           </Card>
         </Section>
+          </>
+        )}
 
     </div>
   )
