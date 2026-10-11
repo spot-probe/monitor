@@ -611,10 +611,14 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const chips = !overflow || topGroups.includes(group) ? topGroups : group ? [...topGroups.slice(0, 2), group] : topGroups
   // 顶层视图。**故意不叫 `tab`**：趋势卡内部已经用 `tab`/`setTab` 表示"流量/带宽/资源"，
   // 同名会撞车。选择记在 localStorage，和 `overview-auto` 同一个习惯。
-  const [page, setPage] = useState<"resource" | "cost">(() =>
-    localStorage.getItem("overview-page") === "cost" ? "cost" : "resource",
-  )
-  const pickPage = (p: "resource" | "cost") => {
+  // 视图选择存在 localStorage ✓（**不经 hub** ✓ —— 它是"我这台浏览器看哪一栏"的偏好 ✓，
+  // 不是机队级的设置 ✓）。加了第三项之后，读取要从**两路**改成**三路** ✗：
+  // 原来写的是 `=== "cost" ? "cost" : "resource"` ✓ ⇒ 第三项会被**静默读成 resource** ✓✗。
+  const [page, setPage] = useState<"resource" | "cost" | "quality">(() => {
+    const saved = localStorage.getItem("overview-page")
+    return saved === "cost" || saved === "quality" ? saved : "resource"
+  })
+  const pickPage = (p: "resource" | "cost" | "quality") => {
     setPage(p)
     localStorage.setItem("overview-page", p)
   }
@@ -1042,7 +1046,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         <span className="text-muted-foreground">视图</span>
         <span aria-hidden className="h-4 w-px bg-border" />
         <div className={TRACK}>
-          {([["resource", "资源"], ["cost", "成本"]] as const).map(([k, label]) => (
+          {([["resource", "资源"], ["cost", "成本"], ["quality", "IP 质量"]] as const).map(([k, label]) => (
             <button key={k} type="button" onClick={() => pickPage(k)} aria-pressed={page === k} className={pill(page === k)}>
               {label}
             </button>
@@ -1050,7 +1054,93 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </div>
       </div>
 
-      {page === "resource" ? (
+      {/* ⭐ 「IP 质量」视图 ✓ —— 用户要的：把 IP 质量/风险从"逐台点开编辑框"搬到一个
+          **能横向比较**的地方 ✓（"哪几台同 ASN / 哪个风险高"在单台对话框里根本比不出来 ✓）。
+          ⚠️ 插在资源分支**之前** ✓ ⇒ 不必去动那个三元的长尾巴 ✓（一个插入点 ✓）。
+
+          列只放 6 个 ✓：全放会到 9+ 列、屏幕装不下 ✓；坐标与时区留在编辑框 ✓
+          （那本来就是"点开看细节"的东西 ✓）。
+          ⚠️ **空单元格一律写"未知"** ✓✗：留空会被读成"没问题" ✓ —— 与今天修过的两处假信息同类 ✓。
+          ⚠️ 风险与 Tor **各自标明来源** ✓：风险是在线库（第三方 · 要开关）✓、
+          Tor 是本地清单（默认有效 · 不外发）✓ —— 两者说的可能是同一件事，但**不是同一条路** ✓。 */}
+      {page === "quality" ? (
+        <div className="space-y-4">
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <div className="min-w-[52rem]">
+              <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+                <span>节点</span>
+                <span>IP</span>
+                <span>ASN / 组织（本地库）</span>
+                <span>位置（本地库）</span>
+                <span>风险（在线库）</span>
+                <span>Tor 出口</span>
+              </div>
+              {nodes.map((n) => (
+                <div
+                  key={n.id}
+                  className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1.1fr)_minmax(0,1.1fr)_5rem] items-baseline gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
+                >
+                  <span className="truncate font-medium">{n.name}</span>
+                  <span className="truncate font-mono text-xs text-muted-foreground">
+                    {n.ipv4 || n.ip || "未知"}
+                  </span>
+                  <span className="truncate">
+                    {n.quality?.asn || n.quality?.org ? (
+                      <>
+                        {n.quality?.asn ? <span className="font-mono text-xs">AS{n.quality.asn}</span> : null}
+                        {n.quality?.asn && n.quality?.org ? " · " : null}
+                        {n.quality?.org ?? ""}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">未知</span>
+                    )}
+                  </span>
+                  <span className="truncate">
+                    {n.quality?.city || n.quality?.country ? (
+                      <>
+                        {n.quality?.city ?? ""}
+                        {n.quality?.city && n.quality?.country ? " · " : null}
+                        {n.quality?.country ?? ""}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">未知</span>
+                    )}
+                  </span>
+                  <span className="truncate">
+                    {n.risk ? (
+                      <>
+                        <span className="font-mono text-xs">{n.risk.score ?? "—"}</span>
+                        {n.risk.label ? ` · ${n.risk.label}` : ""}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">未启用或未查到</span>
+                    )}
+                  </span>
+                  <span>
+                    {n.tor_exit === true ? (
+                      <span className="text-primary">是</span>
+                    ) : n.tor_exit === false ? (
+                      "否"
+                    ) : (
+                      <span className="text-muted-foreground">未知</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* ③ 块：**预留** ✓（用户要求 ✓）—— 只放一句诚实的说明 ✓，
+              **不编任何字段** ✗：探哪些服务、多久一次、谁触发都还没定 ✓，
+              现在硬编格子只会得到"看起来支持、其实空着"的假信号 ✓。 */}
+          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-3.5 text-xs leading-relaxed text-muted-foreground">
+            <p className="font-medium text-foreground">节点实测（预留）</p>
+            <p className="mt-1">
+              流媒体检测等待 agent 支持。这一类结论只能**从节点发出探测**才能得到（hub 代不了），
+              而且**带时效**（今天解锁不等于下周解锁）⇒ 它会单独成一块，并显示"什么时候测的"。
+            </p>
+          </div>
+        </div>
+      ) : page === "resource" ? (
         <>
       {/* 宽屏两栏：这两张卡都不高，单列平铺会把右半边整片留白。 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
