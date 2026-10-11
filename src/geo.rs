@@ -295,13 +295,13 @@ pub fn store_streamed(
     shape: Shape,
     pack: Pack,
     min_bytes: usize,
-    bytes: &[u8],
+    src: impl std::io::Read,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
     let unpacked = {
         let mut out = std::fs::File::create(&tmp)?;
-        match unpack_to(pack, name, bytes, &mut out) {
+        match unpack_to(pack, name, src, &mut out) {
             Ok(n) => n,
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
@@ -371,14 +371,14 @@ pub fn looks_valid_file(path: &std::path::Path, shape: Shape) -> std::io::Result
 pub fn unpack_to(
     pack: Pack,
     name: &str,
-    bytes: &[u8],
+    mut src: impl std::io::Read,
     out: &mut impl std::io::Write,
 ) -> std::io::Result<u64> {
     match pack {
-        Pack::Raw => Ok(std::io::copy(&mut &bytes[..], out)?),
-        Pack::Gzip => Ok(std::io::copy(&mut flate2::read::GzDecoder::new(bytes), out)?),
+        Pack::Raw => Ok(std::io::copy(&mut src, out)?),
+        Pack::Gzip => Ok(std::io::copy(&mut flate2::read::GzDecoder::new(src), out)?),
         Pack::TarGz => {
-            let tar = flate2::read::GzDecoder::new(bytes);
+            let tar = flate2::read::GzDecoder::new(src);
             let mut archive = tar::Archive::new(tar);
             for entry in archive.entries()? {
                 let mut entry = entry?;
@@ -537,14 +537,60 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     // 带月份的直链写死了就会在某个月的第一天开始 404 ✓，而症状是"IP 质量莫名变空" ✗。
     let url = expand(url, chrono::Utc::now().date_naive());
     let got = app.http.get(&url).send().await;
+    // ⚠️ **边收边写盘** ✗✓ —— 绝不把 127 MB 攒在内存里 ✓：
+    // hub 的包线是 **256M** ✓（安装脚本写死 ✓），而"整份进内存 + 在内存里解压"正是现场 OOM 的成因 ✓。
+    // 顺带加一道**体积上限** ✓：万一 URL 指错（指到一个巨物 ✓），在这里就停 ✓，而不是把机器拖垮 ✓。
+    const BODY_CAP: u64 = 512 << 20;
+    let dl = app.data_dir.join(format!(".{}.{}.dl", source.name, std::process::id()));
+    let mut received: u64 = 0;
     let bytes = match got {
-        Ok(r) if r.status().is_success() => match r.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("geo: {}: body read failed: {e:#}", source.name);
+        Ok(mut r) if r.status().is_success() => {
+            if let Err(e) = std::fs::create_dir_all(&app.data_dir) {
+                tracing::warn!("geo: {}: cannot use the data directory: {e:#}", source.name);
                 return false;
             }
-        },
+            let mut f = match std::fs::File::create(&dl) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("geo: {}: cannot open a temporary file: {e:#}", source.name);
+                    return false;
+                }
+            };
+            loop {
+                match r.chunk().await {
+                    Ok(Some(chunk)) => {
+                        received += chunk.len() as u64;
+                        if received > BODY_CAP {
+                            tracing::warn!(
+                                "geo: {}: the download passed {BODY_CAP} bytes; giving up",
+                                source.name
+                            );
+                            let _ = std::fs::remove_file(&dl);
+                            return false;
+                        }
+                        if let Err(e) = std::io::Write::write_all(&mut f, &chunk) {
+                            tracing::warn!("geo: {}: writing the download failed: {e:#}", source.name);
+                            let _ = std::fs::remove_file(&dl);
+                            return false;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("geo: {}: body read failed: {e:#}", source.name);
+                        let _ = std::fs::remove_file(&dl);
+                        return false;
+                    }
+                }
+            }
+            std::mem::drop(f);
+            match std::fs::File::open(&dl) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("geo: {}: cannot reopen the download: {e:#}", source.name);
+                    return false;
+                }
+            }
+        }
         Ok(r) => {
             tracing::warn!("geo: {}: HTTP {} from the configured mirror", source.name, r.status());
             return false;
@@ -561,19 +607,17 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     // ⚠️ 这里**不再**先解开成一个 Vec ✗ —— 那正是现场 OOM 的成因（City 解压后几百 MB ✓，
     // 而 hub 的包线是 256M ✓）。改成**流式**：解开直接写临时文件 ✓，校验只看文件 ✓，
     // 最后原子替换 ✓ ⇒ 峰值与文件大小**脱钩** ✓✓（见 `store_streamed` ✓）。
-    if bytes.len() < source.min_bytes {
-        // 明确说出"太小" ✓：镜像返回一个 200 的错误页时，这是唯一看得见的线索 ✓。
-        tracing::warn!(
-            "geo: {}: got {} bytes, below the {} byte floor; keeping the previous file",
-            source.name,
-            bytes.len(),
-            source.min_bytes
-        );
-        return false;
-    }
-    match store_streamed(&app.data_dir, source.name, source.shape, source.pack, source.min_bytes, &bytes) {
+    // ⚠️ 临时下载文件必须删 ✗ —— 它是 127 MB 级的 ✓，而 pid 每次都变 ✓
+    // ⇒ 忘了删就会**慢慢攒满磁盘** ✓（那种失败几周后才显形 ✓，且没人会想到是这里 ✓）。
+    let outcome =
+        store_streamed(&app.data_dir, source.name, source.shape, source.pack, source.min_bytes, &bytes);
+    let _ = std::fs::remove_file(&dl);
+    match outcome {
         Ok(()) => {
-            tracing::info!("geo: {} updated ({} bytes)", source.name, bytes.len());
+            // 报**落盘之后**的大小 ✓（压缩包的大小没有意义 ✓，而且现在也不再拿得到它 ✓）
+            let on_disk =
+                std::fs::metadata(app.data_dir.join(source.name)).map(|m| m.len()).unwrap_or_default();
+            tracing::info!("geo: {} updated ({} bytes)", source.name, on_disk);
             true
         }
         Err(e) => {
@@ -738,14 +782,21 @@ mod tests {
 
         for (pack, blob) in [(Pack::Gzip, &gz), (Pack::TarGz, &tgz), (Pack::Raw, &inner)] {
             let mut streamed = Vec::new();
-            let n = unpack_to(pack, "x.mmdb", blob, &mut streamed).unwrap();
+            let n = unpack_to(pack, "x.mmdb", blob.as_slice(), &mut streamed).unwrap();
             assert_eq!(n as usize, streamed.len(), "返回的字节数要和写出去的一致 ✓");
-            assert_eq!(streamed, unpack(pack, "x.mmdb", blob).unwrap(), "{pack:?}: 两条路必须一致 ✓");
+            assert_eq!(
+                streamed,
+                unpack(pack, "x.mmdb", blob.as_slice()).unwrap(),
+                "{pack:?}: 两条路必须一致 ✓"
+            );
         }
         // 坏包在两条路上**都要失败** ✓（否则流式那条会把半截文件当成库 ✓✗）
         let mut sink = Vec::new();
-        assert!(unpack_to(Pack::Gzip, "x.mmdb", b"not gzip", &mut sink).is_err());
-        assert!(unpack_to(Pack::TarGz, "x.mmdb", &gz, &mut sink).is_err(), "只有 gz 没有 tar ⇒ 拒绝 ✓");
+        assert!(unpack_to(Pack::Gzip, "x.mmdb", &b"not gzip"[..], &mut sink).is_err());
+        assert!(
+            unpack_to(Pack::TarGz, "x.mmdb", gz.as_slice(), &mut sink).is_err(),
+            "只有 gz 没有 tar ⇒ 拒绝 ✓"
+        );
     }
 
     /// 磁盘校验：只读尾部就够了 ✓✓（这条保证"校验不再整份读"是真的事实 ✓）。
