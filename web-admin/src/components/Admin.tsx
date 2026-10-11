@@ -5011,7 +5011,10 @@ export const ADMIN_SECTIONS = [
   	group: "系统运维",
   	// 这一组是「把它维持好」：出问题谁知道（通知）、谁能进来（安全）、跑的是哪个版本（更新）。
   	items: [
-  		{ path: "/admin/notify", label: "通知", icon: Bell },
+  		// 「通知」改成「通用」✓（用户要求 ✓）：这一页不再只放通知 ✓ ——
+    // 它会有**页签**：通知（继承原来的全部内容 ✓ 含流量报告）· IP 信息（IP 风险库 + IP 数据库 ✓）。
+    // 图标也从铃铛换掉 ✓（铃铛会让人以为这一页只有通知 ✓）。
+    { path: "/admin/notify", label: "通用", icon: SlidersHorizontal },
   		{ path: "/admin/security", label: "安全", icon: Shield },
   		{ path: "/admin/update", label: "更新", icon: ArrowUpCircle },
   	],
