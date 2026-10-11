@@ -113,12 +113,20 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 /// 「多选一」控件的**唯一**样子：灰底轨道 + 选中项实心。
 /// 这类控件本来散在各处、各写一遍，就会慢慢长出第二种样子 —— 所以提到模块级，共用。
 /// （**开关**不在此列：那是"开/关"，不是"多选一"，硬塞进轨道才是错的。）
-const TRACK = "flex items-center rounded-full bg-muted p-0.5"
+// 分段控制器的两个原语 ✓ —— 全页 4 处 `TRACK`、8 处 `pill(...)` 共用 ✓✓，
+// 所以**改这里就等于整页统一** ✓（不必一处一处改 ✓，也就不会改漏 ✓）。
+//
+// ⚠️ 尺寸是**对齐**过的 ✗：`h-9`(36px) 的槽 = `p-1`(8px) + 项高 28px ✓，
+//    而项高 = `text-sm`(20px 行高) + `py-1`(8px) ✓ ⇒ 正正好，没有多余的缝 ✓。
+//    （"浮在半空的两颗小药丸"那个观感，根子是**没有底座槽** ✓：两项直接躺在页面白底上 ✓。）
+//
+// 颜色一律走 token ✓（`muted` / `primary` / `muted-foreground` ✓）—— 换肤时不会漏色 ✓。
+const TRACK = "inline-flex h-9 items-center rounded-lg bg-muted p-1"
 const pill = (on: boolean) =>
-  `tnum rounded-full px-3 py-1 text-xs transition-colors ${
+  `tnum rounded-md px-3.5 py-1 text-sm transition-all ${
     on
-      ? "bg-primary font-medium text-primary-foreground"
-      : "text-muted-foreground hover:text-foreground"
+      ? "bg-primary font-medium text-primary-foreground shadow-xs"
+      : "text-muted-foreground hover:bg-muted-foreground/10 hover:text-foreground"
   }`
 
 /// 悬停浮层：一条竖准星 + 一张跟随鼠标的小卡。
