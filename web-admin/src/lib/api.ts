@@ -94,6 +94,14 @@ export type Node = {
    * `!undefined` 会把"不知道"当成"没允许" ✓✗（那是我们要避免的假信息 ✓）。
    */
   allow_ip_quality?: boolean
+  /**
+   * **hub 实际按哪个地址做的查询** ✓ —— 面板要显示的是它，不是 `ipv4` ✗✓。
+   * ⚠️ 生产上踩过 ✗：节点 `ipv4` 是内网 `10.x` ✓，而旁边写着「Los Angeles · US」✓
+   * ⇒ 看起来像"内网地址查出了洛杉矶" ✓✗（其实 hub 按规则选了公网地址去查 ✓，
+   * 面板却把另一个地址显示在旁边 ✓）。**并排放两样不同地址的东西 = 撒谎** ✓。
+   * 没有它时（老 hub ✓）退回 `ipv4 || ip` ✓。
+   */
+  lookup_ip?: string | null
   tor_exit?: boolean
   risk?: {
     source: string

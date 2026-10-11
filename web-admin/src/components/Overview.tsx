@@ -1177,7 +1177,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   )}
                   </div>
                   <div className="min-w-0 space-y-0.5">
-                    <div className="truncate font-mono text-xs">{n.ipv4 || n.ip || "未知"}</div>
+                    {/* ⚠️ 显示 **hub 实际查询的那个地址** ✓（`lookup_ip` ✓），不是 `ipv4` ✗✓ ——
+                        生产上见过：`ipv4` 是内网 `10.x` ✓，而右边写着「Los Angeles」✓
+                        ⇒ 看起来像"内网地址查出了洛杉矶" ✓✗。没有这个字段时（老 hub ✓）才退回 `ipv4 || ip` ✓。 */}
+                    <div className="truncate font-mono text-xs">
+                      {n.lookup_ip || n.ipv4 || n.ip || "未知"}
+                    </div>
                     <div className="truncate text-xs text-muted-foreground">
                       {n.quality?.asn || n.quality?.org ? (
                         <>
