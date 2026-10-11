@@ -77,6 +77,25 @@ pub fn abuseipdb_url(ip: &str) -> String {
     format!("https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90")
 }
 
+/// 一次在线查询的**去向** ✓✓ —— 刻意**不是** `Option` ✗。
+///
+/// ⚠️ **为什么必须三态** ✗（2026-10-11 记下的欠账 ✓）：原本 `None` 同时表示
+/// "**没去查**"（开关关着 ✓ / 没配 key ✓ / 今天查过且缓存是空的 ✓）与
+/// "**查了但这家不认识这个 IP**" ✗ —— 两者在调用方**无法区分** ✓ ⇒
+/// 于是"查空"也会走"什么都不写"那条路 ✓ ⇒ **旧结论会一直留着** ✗✗：
+/// 一台机器换了出口之后，面板上会显示**上一个地址**的风险分 ✓，而且看不出来 ✓。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Checked {
+    /// **没去查** ✓（开关关着 / 没配 key ✓）⇒ 调用方**什么都不该动** ✓✓
+    /// —— 把旧结论抹掉就等于"从来没查过" ✓，那是另一件事 ✓。
+    Skipped,
+    /// **查到了** ✓。
+    Found(Risk),
+    /// **查了，但这家不认识它** ✓（或响应无法解析 ✓）⇒ 这也要**如实落库** ✓✓，
+    /// 覆盖掉旧地址的结论 ✓ —— "查空"是一个**结论** ✓，不是一个"无操作" ✓。
+    Nothing,
+}
+
 /// 查一个 IP 的**在线**风险结论 ✓（AbuseIPDB ✓）。
 ///
 /// **三处"不发请求"都是刻意的** ✗：
@@ -86,15 +105,20 @@ pub fn abuseipdb_url(ip: &str) -> String {
 ///
 /// 顺序是「**先落库、再解析**」✓✓：解析失败（改了字段名 / 服务换了口径 ✓）
 /// 也不该把**那一次额度**丢掉 ✓（额度比一次解析贵得多 ✓）。
-pub async fn check(app: &crate::App, ip: &str, day: &str) -> Option<Risk> {
+pub async fn check(app: &crate::App, ip: &str, day: &str) -> Checked {
     let enabled = app.db.get("risk_enabled").unwrap_or_default();
     let key = app.db.get("risk_abuseipdb_key").unwrap_or_default();
     if !active(&enabled, &key) {
-        return None;
+        return Checked::Skipped; // 开关关着 / 没配 key ⇒ **没去查** ✓（调用方什么都不动 ✓）
     }
     // 今天的缓存命中 ⇒ **不再请求** ✓（额度就省在这里 ✓）
     if let Some(body) = app.db.risk_cached(ip, "abuseipdb", day) {
-        return serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb);
+        // 缓存命中 ✓ —— 解析不出来也算"查过而不得" ✓（**不再重复请求** ✓，额度已经花过了 ✓）
+        return match serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb)
+        {
+            Some(r) => Checked::Found(r),
+            None => Checked::Nothing,
+        };
     }
     let sent = app
         .http
@@ -109,22 +133,25 @@ pub async fn check(app: &crate::App, ip: &str, day: &str) -> Option<Risk> {
             Err(e) => {
                 return {
                     tracing::warn!("risk: abuseipdb body read failed: {e:#}");
-                    None
-                }
+                    Checked::Skipped // 请求/读取失败**不是查空** ✗：什么都不动 ✓（抖动不丢数据 ✓）
+                };
             }
         },
         Err(e) => {
             return {
                 tracing::warn!("risk: abuseipdb request failed: {e:#}");
-                None
-            }
+                Checked::Skipped // 请求/读取失败**不是查空** ✗：什么都不动 ✓（抖动不丢数据 ✓）
+            };
         }
     };
     // **先落库** ✓✓（哪怕这次解析不出来，额度也没白花 ✓；而且不必为此重查 ✓）
     if let Err(e) = app.db.save_risk(ip, "abuseipdb", day, &body) {
         tracing::warn!("risk: caching the abuseipdb answer failed: {e:#}");
     }
-    serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb)
+    match serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb) {
+        Some(r) => Checked::Found(r),
+        None => Checked::Nothing, // 请求**发出去了** ✓ 但没解析出结论 ⇒ 如实作"查空" ✓
+    }
 }
 
 #[cfg(test)]

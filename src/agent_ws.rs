@@ -563,10 +563,23 @@ fn assess(app: Shared, node_id: i64, source: String) {
         // 日子按 **UTC** 取 ✓ —— 这一层只用来"每天一次"去重 ✓，
         // 与报告那种"按东八区切"的口径无关 ✓（跨零点前后各查一次，无害 ✓）。
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        if let Some(r) = crate::risk::check(&app, &source, &day).await {
-            if let Err(e) = app.db.save_risk_for_node(node_id, Some(&r), &source) {
-                warn!("node {node_id}: storing IP risk failed: {e:#}");
+        // 三态各自的做法**不同** ✓✓（见 `risk::Checked` 的说明 ✓）：
+        match crate::risk::check(&app, &source, &day).await {
+            crate::risk::Checked::Found(r) => {
+                if let Err(e) = app.db.save_risk_for_node(node_id, Some(&r), &source) {
+                    warn!("node {node_id}: storing IP risk failed: {e:#}");
+                }
             }
+            // ⭐ **查空也要落库** ✓✓ —— 它是一个**结论** ✓（"这家不认识它" ✓），
+            // 覆盖旧地址的结论 ✓；留着旧的会让面板显示**上一个地址**的风险分 ✓，且看不出来 ✓。
+            crate::risk::Checked::Nothing => {
+                if let Err(e) = app.db.save_risk_for_node(node_id, None, &source) {
+                    warn!("node {node_id}: clearing IP risk failed: {e:#}");
+                }
+            }
+            // **没去查** ⇒ 什么都不动 ✓（开关关着不该把上次的结果抹掉 ✓；
+            // 请求失败也走这里 ✓ —— 一次网络抖动不该丢数据 ✓）。
+            crate::risk::Checked::Skipped => {}
         }
         // ⚠️ `None` 时**什么都不写** ✗ —— 刻意如此 ✓：
         // 开关关着 / 没配 key 时，上一次的结论**不该被抹掉** ✓（它仍然是"上次查到的事实" ✓，
