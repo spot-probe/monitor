@@ -4313,33 +4313,78 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
                 label="城市库"
                 hint="厂商发出来的通常是压缩包（.tar.gz / .mmdb.gz），hub 会自己解开。地址里可以写 {YYYY-MM}，下载时按当天替换 —— 有些直链带月份，写死了下个月就会 404。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.mmdb.gz"
               >
-                <Input
-                  value={text("geo_city_url")}
-                  onChange={(e) => set("geo_city_url", e.target.value)}
-                  placeholder="未配置（跳过这个库）"
-                />
+                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
+                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
+                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
+                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={text("geo_city_url")}
+                    onChange={(e) => set("geo_city_url", e.target.value)}
+                    placeholder="未配置（跳过这个库）"
+                  />
+                  {text("geo_city_url") ? (
+                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                      已配置
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      未配置
+                    </span>
+                  )}
+                </div>
               </Field>
               <Field
                 row
                 label="ASN 库"
                 hint="给每台节点标出它走谁的线路（ASN + 组织）；同样支持 {YYYY-MM}。DB-IP 不需要注册，直接粘：https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz"
               >
-                <Input
-                  value={text("geo_asn_url")}
-                  onChange={(e) => set("geo_asn_url", e.target.value)}
-                  placeholder="未配置（跳过这个库）"
-                />
+                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
+                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
+                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
+                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={text("geo_asn_url")}
+                    onChange={(e) => set("geo_asn_url", e.target.value)}
+                    placeholder="未配置（跳过这个库）"
+                  />
+                  {text("geo_asn_url") ? (
+                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                      已配置
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      未配置
+                    </span>
+                  )}
+                </div>
               </Field>
               <Field
                 row
                 label="Tor 出口列表"
                 hint="纯文本清单，没有额度限制，所以刷新得比数据库勤。可用：https://check.torproject.org/torbulkexitlist"
               >
-                <Input
-                  value={text("geo_tor_url")}
-                  onChange={(e) => set("geo_tor_url", e.target.value)}
-                  placeholder="未配置（跳过这个库）"
-                />
+                {/* 状态徽标 ✓✓ —— 用户的原话："作为一个使用者我无法知道我的配置是否生效" ✓。
+                    所以**不要只靠占位符**去暗示 ✗：占位符只在空的时候出现 ✓，
+                    而"已配置"这个状态此前**完全没有显示** ✓ —— 加上它之后，
+                    打开这一页就能一眼看出哪一个库配了、哪一个没配 ✓。 */}
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={text("geo_tor_url")}
+                    onChange={(e) => set("geo_tor_url", e.target.value)}
+                    placeholder="未配置（跳过这个库）"
+                  />
+                  {text("geo_tor_url") ? (
+                    <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+                      已配置
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      未配置
+                    </span>
+                  )}
+                </div>
               </Field>
             </section>
             <p className="text-xs leading-relaxed text-muted-foreground">
