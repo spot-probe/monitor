@@ -125,6 +125,12 @@ CREATE TABLE IF NOT EXISTS node (
   -- 埋在 JSON 里会让"过期判断"变成各处自己解析 ✓（今天已经因为"两处各写一份"吃过亏 ✓）。
   probe TEXT,
   probe_at INTEGER,
+  -- agent 是否**会**做流媒体探测 ✓（能力 ✓，不是许可 ✗ —— 它由版本决定 ✓ 在 hello 里上报 ✓）。
+  -- ⚠️⚠️ **缺席时按 0 处理** ✗✗ —— 与 `allow_ip_quality` **正好相反** ✓：
+  -- 那个缺席按"允许"（向后兼容 ✓ 老节点不断 ✓）；这个缺席按"**不会**" ✓，
+  -- 因为老 agent **真的没有这段代码** ✓✓（那不是政策选择 ✓，是事实 ✓）。
+  -- ⇒ 面板据此把「**版本不支持**」与「**还没测过**」分开 ✓✓（两件事 ✓，处置不同 ✓）。
+  stream_probe INTEGER NOT NULL DEFAULT 0,
   -- 节点质量（IP 结论 ✓）：由 hub 用**本地**库查出 ✓，不是 agent 上报的 ✗ ——
   -- agent 依旧零改动 ✓，也不把节点 IP 发给第三方 ✓（除非以后显式打开在线库 ✓）。
   -- 八个列**全部可空** ✓：查不到就是空 ✓ —— "未知"与"美国"是两件事 ✗（`''` 会被读成后者 ✓）。
@@ -306,7 +312,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -670,6 +676,11 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         // ⚠️ 两列都可空 ✓：没探测过就是 NULL ✓（与"探测过但没结论"分得开 ✓）。
         add_column(&tx, "node", "probe TEXT")?;
         add_column(&tx, "node", "probe_at INTEGER")?;
+    }
+    if from < 22 {
+        // 会不会探流媒体（能力 ✓）。默认 0 ✓ —— 而**缺席按 0 处理**是刻意的 ✓：
+        // 老 agent 手里没有这段代码 ✓，所以对它来说这个 0 描述的是**事实** ✓（不是"暂不允许" ✓）。
+        add_column(&tx, "node", "stream_probe INTEGER NOT NULL DEFAULT 0")?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -6812,5 +6823,40 @@ mod heatmap_tests {
     #[test]
     fn band_edges_handle_no_samples() {
         assert_eq!(Db::band_edges(&[]), vec![0, 1]);
+    }
+    /// **升级路径的闸**：一个"21 版"的库迁移后必须有 stream_probe、且戳到 22 ✓。
+    /// ⚠️ 与 `allow_ip_quality` 那条**形状相同、断言相反** ✓✓：
+    /// 这一列是 `NOT NULL DEFAULT 0` ✓，而"缺席按 0"描述的是**事实** ✓
+    ///（老 agent 手里没有那段代码 ✓）—— 不是"暂不允许" ✓。
+    #[test]
+    fn migrating_from_21_adds_the_stream_probe_column() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE node DROP COLUMN stream_probe", []).unwrap();
+        conn.execute("PRAGMA user_version = 21", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"stream_probe".to_string()), "前提：列已删掉");
+        migrate(&conn, 21).unwrap();
+        assert!(cols(&conn).contains(&"stream_probe".to_string()));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        let (notnull, dflt): (i64, String) = conn
+            .query_row(
+                "SELECT [notnull], COALESCE(dflt_value,'') FROM pragma_table_info('node') WHERE name='stream_probe'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(notnull, 1, "必须 NOT NULL ✓");
+        assert_eq!(dflt, "0", "默认必须是 0 ✓（缺席 = 老 agent = 不会探 ✓）");
     }
 }
