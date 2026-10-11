@@ -1094,7 +1094,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {n.quality?.org ?? ""}
                       </>
                     ) : (
-                      <span className="text-muted-foreground">未知</span>
+                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
                     )}
                   </span>
                   <span className="truncate">
@@ -1105,7 +1105,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {n.quality?.country ?? ""}
                       </>
                     ) : (
-                      <span className="text-muted-foreground">未知</span>
+                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
                     )}
                   </span>
                   {/* 坐标 ✓：**可点开地图** ✓ —— 与编辑框里那个链接同一形式 ✓（`check.place` ✓），
@@ -1121,13 +1121,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {n.quality.latitude.toFixed(2)}, {n.quality.longitude.toFixed(2)}
                       </a>
                     ) : (
-                      <span className="text-muted-foreground">未知</span>
+                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
                     )}
                   </span>
                   {/* 时区 ✓ —— ⚠️ **DB-IP 的 City 库没有这一项** ✗ ⇒ 用 DB-IP 时这一列会**全是"未知"** ✓。
                       那不是坏了 ✓，是那份库确实不提供 ✓（空比错好 ✓；编辑框那边也是这么显示的 ✓）。 */}
                   <span className="truncate">
-                    {n.quality?.time_zone ?? <span className="text-muted-foreground">未知</span>}
+                    {n.quality?.time_zone ?? <span className="text-muted-foreground/40" title="未查到或未启用">—</span>}
                   </span>
                   <span className="truncate">
                     {n.risk ? (
@@ -1145,7 +1145,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     ) : n.tor_exit === false ? (
                       "否"
                     ) : (
-                      <span className="text-muted-foreground">未知</span>
+                      <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
                     )}
                   </span>
                 </div>
