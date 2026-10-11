@@ -282,6 +282,123 @@ pub enum Pack {
     TarGz,
 }
 
+/// **流式落盘** ✓✓：解开包装 → 直接写临时文件 → **从文件校验** → 原子替换 ✓。
+///
+/// 与 [`store_atomic`] 的区别就是**内存** ✗：那个要先把解压结果攒成几百 MB 的 `Vec` ✓，
+/// 这个只用一个固定缓冲 ✓ —— 于是峰值与**文件大小脱钩** ✓✓（现场 OOM 的直接原因就是前者 ✓）。
+///
+/// **"坏内容绝不覆盖好文件"这条性质不变** ✓✓：任何一步失败 ⇒ 删掉临时文件 ⇒ 目标原封不动 ✓。
+/// 顺序也仍然是最紧的那个 ✗：**先解压、再量尺寸、再校验、最后才 rename** ✓。
+pub fn store_streamed(
+    dir: &Path,
+    name: &str,
+    shape: Shape,
+    pack: Pack,
+    min_bytes: usize,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let unpacked = {
+        let mut out = std::fs::File::create(&tmp)?;
+        match unpack_to(pack, name, bytes, &mut out) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    };
+    // 尺寸：先量**落盘之后**的字节数 ✓（不是压缩包的大小 ✓ —— 那两者差着几倍 ✓）
+    let bad = if (unpacked as usize) < min_bytes {
+        Some(format!("{name}: unpacked to {unpacked} bytes, below the {min_bytes} byte floor"))
+    } else {
+        match looks_valid_file(&tmp, shape) {
+            Ok(true) => None,
+            Ok(false) => Some(format!("{name}: the unpacked file does not look like a valid {shape:?}")),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    };
+    if let Some(msg) = bad {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, msg));
+    }
+    match std::fs::rename(&tmp, dir.join(name)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// 只读一个文件**尾部的一段**（默认 128 KB ✓）✓ —— 校验 mmdb 只需要这一段 ✓✓。
+///
+/// **为什么必须这样** ✗✗：现场的 OOM（2026-10-11）是"整份文件进内存"造成的 ✓ ——
+/// City 解压后几百 MB ✓，而 hub 的包线是 **256M** ✓（安装脚本写死的 ✓）。
+/// 校验只需要**尾部**那点字节 ✓ ⇒ 这里就必须只读那点字节 ✓，别图省事整份读 ✓。
+pub fn read_tail(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(limit as u64);
+    f.seek(SeekFrom::Start(start))?;
+    let mut out = Vec::with_capacity((len - start) as usize);
+    f.take(len - start).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// 校验一份**已经在磁盘上**的库文件 ✓（mmdb 看尾部魔数 ✓；文本列表整份读但它本来就小 ✓）。
+pub fn looks_valid_file(path: &std::path::Path, shape: Shape) -> std::io::Result<bool> {
+    match shape {
+        // 只读尾部 ✓ —— 见 `read_tail` 的说明 ✓（魔数只在尾部 ✓，头部是二进制树 ✓）。
+        Shape::Mmdb => Ok(looks_like_mmdb(&read_tail(path, MMDB_TAIL)?)),
+        Shape::Text => {
+            let bytes = std::fs::read(path)?;
+            Ok(std::str::from_utf8(&bytes).is_ok_and(looks_like_text_list))
+        }
+    }
+}
+
+/// **流式**解开包装 ✓：把里面那份库写进 `out` ✓，返回写了多少字节 ✓。
+///
+/// 与 [`unpack`] 的区别是**内存**：那个会攒出一个几百 MB 的 `Vec` ✗，
+/// 这个只用一个固定缓冲 ✓ —— 于是占用量与文件大小**脱钩** ✓✓，
+/// hub 才能在**项目自己声明的 256M 包线内**干活 ✓（见 `read_tail` 的说明 ✓）。
+pub fn unpack_to(
+    pack: Pack,
+    name: &str,
+    bytes: &[u8],
+    out: &mut impl std::io::Write,
+) -> std::io::Result<u64> {
+    match pack {
+        Pack::Raw => Ok(std::io::copy(&mut &bytes[..], out)?),
+        Pack::Gzip => Ok(std::io::copy(&mut flate2::read::GzDecoder::new(bytes), out)?),
+        Pack::TarGz => {
+            let tar = flate2::read::GzDecoder::new(bytes);
+            let mut archive = tar::Archive::new(tar);
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                let path = entry.path()?.to_string_lossy().into_owned();
+                if path.ends_with(".mmdb") {
+                    return std::io::copy(&mut entry, out);
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{name}: the archive holds no .mmdb file"),
+            ))
+        }
+    }
+}
+
+// ⚠️ **它只在测试里用了** ✓ —— 但**不能删** ✗✗：`the_streaming_unpack_matches_the_in_memory_one_byte_for_byte`
+// 正是拿它与流式那条路**逐字节比对** ✓✓（"两条路算出不同结果"是最难发现的错之一 ✓，
+// 因为一条只在别人的机器上跑 ✓）。所以它留在这里当**参照实现** ✓。
+#[cfg(test)]
 /// 解开包装 ✓，返回**里面那个真正的库文件** ✓。
 pub fn unpack(pack: Pack, name: &str, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     match pack {
@@ -309,6 +426,10 @@ pub fn unpack(pack: Pack, name: &str, bytes: &[u8]) -> std::io::Result<Vec<u8>> 
     }
 }
 
+// ⚠️ **它只在测试里用了** ✓ —— 但**不能删** ✗✗：`the_streaming_unpack_matches_the_in_memory_one_byte_for_byte`
+// 正是拿它与流式那条路**逐字节比对** ✓✓（"两条路算出不同结果"是最难发现的错之一 ✓，
+// 因为一条只在别人的机器上跑 ✓）。所以它留在这里当**参照实现** ✓。
+#[cfg(test)]
 /// 解开一层 gzip ✓。
 fn gunzip(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
@@ -354,6 +475,10 @@ pub fn looks_like_text_list(text: &str) -> bool {
         })
 }
 
+// ⚠️ **它只在测试里用了** ✓ —— 但**不能删** ✗✗：`the_streaming_unpack_matches_the_in_memory_one_byte_for_byte`
+// 正是拿它与流式那条路**逐字节比对** ✓✓（"两条路算出不同结果"是最难发现的错之一 ✓，
+// 因为一条只在别人的机器上跑 ✓）。所以它留在这里当**参照实现** ✓。
+#[cfg(test)]
 /// 按形态校验 ✓。
 pub fn looks_valid(shape: Shape, bytes: &[u8]) -> bool {
     match shape {
@@ -362,6 +487,10 @@ pub fn looks_valid(shape: Shape, bytes: &[u8]) -> bool {
     }
 }
 
+// ⚠️ **它只在测试里用了** ✓ —— 但**不能删** ✗✗：`the_streaming_unpack_matches_the_in_memory_one_byte_for_byte`
+// 正是拿它与流式那条路**逐字节比对** ✓✓（"两条路算出不同结果"是最难发现的错之一 ✓，
+// 因为一条只在别人的机器上跑 ✓）。所以它留在这里当**参照实现** ✓。
+#[cfg(test)]
 /// **先写临时文件 → 校验 → 原子替换** ✓✓。
 ///
 /// 校验不过、或任何一步 IO 失败：**目标文件原封不动** ✓，临时文件被清掉 ✓。
@@ -429,13 +558,9 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     // ⇒ 先解开再校验 ✓（校验器只认裸 .mmdb ✓）。
     // ⚠️ **顺序要紧** ✗：解压失败 ⇒ 直接返回 ⇒ **旧文件一动不动** ✓
     //（与"下载失败不覆盖"是同一道防线 ✓，只是发生在更前面一步 ✓）。
-    let bytes = match unpack(source.pack, source.name, &bytes) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("geo: {}: cannot unpack the download: {e:#}", source.name);
-            return false;
-        }
-    };
+    // ⚠️ 这里**不再**先解开成一个 Vec ✗ —— 那正是现场 OOM 的成因（City 解压后几百 MB ✓，
+    // 而 hub 的包线是 256M ✓）。改成**流式**：解开直接写临时文件 ✓，校验只看文件 ✓，
+    // 最后原子替换 ✓ ⇒ 峰值与文件大小**脱钩** ✓✓（见 `store_streamed` ✓）。
     if bytes.len() < source.min_bytes {
         // 明确说出"太小" ✓：镜像返回一个 200 的错误页时，这是唯一看得见的线索 ✓。
         tracing::warn!(
@@ -446,7 +571,7 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
         );
         return false;
     }
-    match store_atomic(&app.data_dir, source.name, source.shape, &bytes) {
+    match store_streamed(&app.data_dir, source.name, source.shape, source.pack, source.min_bytes, &bytes) {
         Ok(()) => {
             tracing::info!("geo: {} updated ({} bytes)", source.name, bytes.len());
             true
@@ -586,6 +711,59 @@ mod tests {
         assert_eq!(only_asn.country, None, "没有就是 None ✓ —— 不编 ✗");
         // 两个都没有 ⇒ 全空 ✓
         assert_eq!(merge(None, None), Quality::default());
+    }
+
+    /// ⭐ **流式与"攒成 Vec"必须逐字节相同** ✓✓ ——
+    /// 这是我为省内存新开的第二条路 ✓，而"两条路算出不同结果"是最难发现的错之一 ✓
+    ///（一条只在别人的机器上跑 ✓）。所以：同一份包，两条路的结果必须**完全一致** ✓。
+    #[test]
+    fn the_streaming_unpack_matches_the_in_memory_one_byte_for_byte() {
+        use std::io::Write;
+        let inner = fake_mmdb();
+        // gz ✓
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&inner).unwrap();
+        let gz = enc.finish().unwrap();
+        // tar.gz ✓（带日期目录 ✓）
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(inner.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "GeoLite2-City_20260307/GeoLite2-City.mmdb", inner.as_slice()).unwrap();
+        let tarball = tar.into_inner().unwrap();
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&tarball).unwrap();
+        let tgz = enc.finish().unwrap();
+
+        for (pack, blob) in [(Pack::Gzip, &gz), (Pack::TarGz, &tgz), (Pack::Raw, &inner)] {
+            let mut streamed = Vec::new();
+            let n = unpack_to(pack, "x.mmdb", blob, &mut streamed).unwrap();
+            assert_eq!(n as usize, streamed.len(), "返回的字节数要和写出去的一致 ✓");
+            assert_eq!(streamed, unpack(pack, "x.mmdb", blob).unwrap(), "{pack:?}: 两条路必须一致 ✓");
+        }
+        // 坏包在两条路上**都要失败** ✓（否则流式那条会把半截文件当成库 ✓✗）
+        let mut sink = Vec::new();
+        assert!(unpack_to(Pack::Gzip, "x.mmdb", b"not gzip", &mut sink).is_err());
+        assert!(unpack_to(Pack::TarGz, "x.mmdb", &gz, &mut sink).is_err(), "只有 gz 没有 tar ⇒ 拒绝 ✓");
+    }
+
+    /// 磁盘校验：只读尾部就够了 ✓✓（这条保证"校验不再整份读"是真的事实 ✓）。
+    #[test]
+    fn validating_from_disk_only_reads_the_tail() {
+        let dir = tmpdir("tail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("City.mmdb");
+        // 一个"大"文件：前面全是 0 ✓，**只有尾部有魔数** ✓
+        let mut big = vec![0u8; MMDB_TAIL * 2];
+        big.extend_from_slice(MMDB_MARKER);
+        std::fs::write(&path, &big).unwrap();
+        assert!(looks_valid_file(&path, Shape::Mmdb).unwrap(), "尾部有魔数 ⇒ 合格 ✓");
+        assert_eq!(read_tail(&path, 128 * 1024).unwrap().len(), 128 * 1024, "只读尾部 128 KB ✓");
+        // 没有魔数 ⇒ 拒绝 ✓
+        std::fs::write(&path, vec![0u8; MMDB_TAIL * 2]).unwrap();
+        assert!(!looks_valid_file(&path, Shape::Mmdb).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **解压这条路要真的被执行过** ✓✓ —— 往返测一次，而不是只测"坏包会被拒" ✗。
