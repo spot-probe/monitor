@@ -4205,12 +4205,14 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Field
                 row
                 label="API Key"
-                hint="在 abuseipdb.com 免费申请；留空表示没配 —— 这一家会被跳过（是正常状态，不是错误）。"
+                hint={`${secretHint("risk_abuseipdb_key")}；在 abuseipdb.com 免费申请，留空表示这一家不查（正常状态，不是错误）。`}
               >
                 <Input
+                  type="password"
+                  autoComplete="off"
+                  placeholder={s.risk_abuseipdb_key_set ? "••••••••" : "未设置"}
                   value={text("risk_abuseipdb_key")}
                   onChange={(e) => set("risk_abuseipdb_key", e.target.value)}
-                  placeholder="未设置"
                 />
               </Field>
               {/* 关着时**明说不会发** ✓ —— 隐私这件事写在界面上 ✓，而不是只写在代码注释里 ✗。 */}
@@ -4225,11 +4227,21 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
               <Button variant="ghost" onClick={reload}>
                 重置
               </Button>
+              {/* 有凭据时才给"清除" ✓ —— 没有它的话用户**没有正当途径**把 key 删掉 ✓：
+                  "重置"只是把草稿恢复成空（因为 hub 不回显 ✓）⇒ 点了也删不掉 ✓。 */}
+              {s.risk_abuseipdb_key_set && (
+                <Button variant="ghost" onClick={() => save({ risk_abuseipdb_key: "" })}>
+                  清除 Key
+                </Button>
+              )}
               <Button
                 onClick={() =>
                   save({
                     risk_enabled: text("risk_enabled"),
-                    risk_abuseipdb_key: text("risk_abuseipdb_key"),
+                    // ⭐ **只在输入框非空时才带上它** ✓✓ —— hub 不再回显这个 key ✓，
+                    // 所以框里平时是空的 ✓；照原样提交就会把已存的凭据**覆盖成空串** ✗✗。
+                    // 这正是 Telegram 那张卡用 `typed(...)` 的原因 ✓（照抄 ✓）。
+                    ...typed("risk_abuseipdb_key"),
                   })
                 }
               >
