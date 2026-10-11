@@ -121,9 +121,12 @@ function StatusPill({ tone, text }: { tone: "ok" | "warn" | "bad" | "muted"; tex
 //    （"浮在半空的两颗小药丸"那个观感，根子是**没有底座槽** ✓：两项直接躺在页面白底上 ✓。）
 //
 // 颜色一律走 token ✓（`muted` / `primary` / `muted-foreground` ✓）—— 换肤时不会漏色 ✓。
-const TRACK = "inline-flex h-9 items-center rounded-lg bg-muted p-1"
+// ⚠️ **不写死高度** ✗：原来写的是 `h-9`(36px) ✓，而"36 = p-1×2 + 项高 28"只在 `text-sm` 时成立 ✓；
+// 字号一调（比如 13px ✓），那 2px 就会变成**槽里的缝** ✓ —— 让内容自己撑高才不会露馅 ✓。
+const TRACK = "inline-flex items-center rounded-lg bg-muted p-1"
 const pill = (on: boolean) =>
-  `tnum rounded-md px-3.5 py-1 text-sm transition-all ${
+  // 字号 **13px** ✓（用户要"小一点点"✓）—— 不回到 `text-xs`(12px ✓)：那是**一整级** ✓，不是一点点 ✓。
+  `tnum rounded-md px-3.5 py-1 text-[13px] transition-all ${
     on
       ? "bg-primary font-medium text-primary-foreground shadow-xs"
       : "text-muted-foreground hover:bg-muted-foreground/10 hover:text-foreground"
@@ -496,14 +499,14 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         <CardAction>
           <div className="flex flex-wrap items-center gap-2">
             {/* 两个控件都是「选一个」，所以共用同一种胶囊样式：长得不一样只会让人犹豫。 */}
-            <div className="flex items-center rounded-full bg-muted p-0.5">
+            <div className={TRACK}>
               {tabs.map((t) => (
                 <button key={t.key} type="button" onClick={() => setTab(t.key)} aria-pressed={tab === t.key} className={pill(tab === t.key)}>
                   {t.label}
                 </button>
               ))}
             </div>
-            <div className="flex items-center rounded-full bg-muted p-0.5">
+            <div className={TRACK}>
               {[7, 30, 90].map((d) => (
                 <button key={d} type="button" onClick={() => setRange(d)} aria-pressed={range === d} className={pill(range === d)}>
                   {d} 天
