@@ -1402,4 +1402,39 @@ mod tests {
         // Unknown methods are ignored.
         assert!(dispatch(&app, id, "ip", r#"{"method":"whatever"}"#).is_ok());
     }
+    /// ⭐ **这是"不被担保输入"的唯一闸门** ✓✓ —— 所以它的测试要盯住"什么会被放进去" ✗。
+    /// 一台机器可以发任何东西过来 ✓；这里钉住的是：**只有我们认识的东西能入库** ✓。
+    #[test]
+    fn probe_reports_are_narrowed_to_what_we_know() {
+        // 认识的服务 + 好的状态 ⇒ 收下 ✓（并原样带上地区 ✓）
+        let ok = json!({"netflix": {"status": "unlocked", "region": "JP"}});
+        assert_eq!(sanitize_probe(&ok), Some(json!({"netflix": {"status": "unlocked", "region": "JP"}})));
+
+        // ⚠️ **不认识的服务名 ⇒ 丢掉** ✓✗ —— 否则一个"服务名"就能往库里塞任意键 ✓，
+        // 而面板会去渲染它 ✓（这一条挡的就是那个 ✓）
+        let stranger = json!({"netflix": {"status": "unlocked"}, "evil": {"status": "unlocked"}});
+        assert_eq!(sanitize_probe(&stranger), Some(json!({"netflix": {"status": "unlocked"}})));
+
+        // ⚠️ **状态读不懂 ⇒ 这一项没有可用的东西** ✓（不猜成 unlocked ✓✗，也不猜成 blocked ✓）
+        assert_eq!(sanitize_probe(&json!({"netflix": {"status": "maybe"}})), None);
+        assert_eq!(sanitize_probe(&json!({"netflix": {}})), None);
+        // 全都不可用 ⇒ **什么都不能写** ✓（调用方据此**不覆盖**上一次的好结论 ✓✓）
+        assert_eq!(sanitize_probe(&json!({"evil": {"status": "unlocked"}})), None);
+        assert_eq!(sanitize_probe(&json!({})), None);
+        assert_eq!(sanitize_probe(&json!("not an object")), None);
+
+        // ⚠️ **地区形状不对 ⇒ 丢掉地区、保留状态** ✓✓ —— 不因为一格坏了丢掉有用的那格 ✓；
+        // 而形状检查是必须的 ✓：`us`（小写 ✓）/ `USA`（三位 ✓）/ `U1`（含数字 ✓）都不是地区 ✓✗
+        for bad in ["us", "USA", "U1", "", "🇺🇸"] {
+            assert_eq!(
+                sanitize_probe(&json!({"netflix": {"status": "blocked", "region": bad}})),
+                Some(json!({"netflix": {"status": "blocked"}})),
+                "地区 {bad:?} 不该被收下 ✓"
+            );
+        }
+
+        // ⚠️ **整体大小上限** ✓：一个巨物不该能进库（也不该被解析成一堆键 ✓）
+        let huge = json!({"netflix": {"status": "unlocked", "junk": "x".repeat(8 * 1024)}});
+        assert_eq!(sanitize_probe(&huge), None, "超大报文 ⇒ 当没有 ✓");
+    }
 }
