@@ -1147,16 +1147,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         <div className="space-y-4">
           <div className="overflow-x-auto rounded-lg border border-border">
             <div className="min-w-[68rem]">
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1.6fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
                 <span>IP 与归属</span>
                 <span>地理位置</span>
                 <span>安全态势</span>
+                <span>节点实测</span>
               </div>
               {qualityRows.map((n) => (
                 <div
                   key={n.id}
-                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1.6fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
+                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
                 >
                   <div className="min-w-0 space-y-0.5">
                     <div className="truncate font-medium">{n.name}</div>
@@ -1254,6 +1255,58 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       )}
                     </div>
                   </div>
+                {/* ⭐ 「节点实测」✓（第一期：Netflix ✓）—— 这一格的命是**分辨三种"没有"** ✓✓：
+                    ① **未允许检测** ✓（人可以去勾上 ✓）
+                    ② **版本不支持** ✓（agent 太旧 ✓ —— **永远不会有** ✓，只能升级 ✓）
+                    ③ **还没测过** ✓（再等等就有了 ✓）
+                    ⇒ 混成一句会让人**去等一个永远不会来的结果** ✓✗（或去查一个其实没坏的东西 ✓）。
+                    ⚠️ 判据顺序是刻意的 ✗：**先问"允许吗"、再问"会吗"** ✓ ——
+                    因为"没允许"是**这台机器自己的政策** ✓，比"版本支不支持"更该先说 ✓。 */}
+                <div className="min-w-0 space-y-0.5">
+                  <div className="truncate text-xs">
+                    {n.stream_probe === false ? (
+                      <span className="text-muted-foreground/50">版本不支持</span>
+                    ) : n.allow_ip_quality === false ? (
+                      <span className="text-warn">未允许检测</span>
+                    ) : n.probe?.netflix ? (
+                      <span>
+                        Netflix{" "}
+                        <span
+                          className={
+                            n.probe.netflix.status === "unlocked"
+                              ? "font-medium text-ok"
+                              : n.probe.netflix.status === "blocked"
+                                ? "font-medium text-destructive"
+                                : "text-muted-foreground"
+                          }
+                        >
+                          {/* ⚠️ 面板只说**自己的话** ✓（线上报文仍是 `unlocked` 等 ✓ —— 那套字符串由 hub 的测试钉住 ✓） */}
+                          {n.probe.netflix.status === "unlocked"
+                            ? "解锁"
+                            : n.probe.netflix.status === "blocked"
+                              ? "未解锁"
+                              : "没读明白"}
+                        </span>
+                        {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground/50">还没测过</span>
+                    )}
+                  </div>
+                  {/* ⚠️ **时效** ✓✓ —— 这一格的命就是它：没有"多久之前"，
+                      一条三周前的"解锁"看起来和刚测的一样 ✓✗。 */}
+                  {n.probe_at ? (
+                    <div className="truncate text-[11px] text-muted-foreground/70">
+                      {(() => {
+                        const mins = Math.max(0, Math.round((Date.now() / 1000 - n.probe_at) / 60))
+                        if (mins < 2) return "刚刚测的"
+                        if (mins < 90) return `${mins} 分钟前`
+                        const hours = Math.round(mins / 60)
+                        return hours < 48 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
+                      })()}
+                    </div>
+                  ) : null}
+                </div>
                 </div>
               ))}
             </div>
@@ -1283,15 +1336,30 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             档位文字由本面板给出（按分数 25 / 75 划档），各家口径不同 · 风险来自在线库（第三方，需要开关）·
             ASN 与位置来自本地库（不外发）· Tor 出口来自官方出口清单（不外发，每小时更新）。
           </p>
-          {/* ③ 块：**预留** ✓（用户要求 ✓）—— 只放一句诚实的说明 ✓，
-              **不编任何字段** ✗：探哪些服务、多久一次、谁触发都还没定 ✓，
-              现在硬编格子只会得到"看起来支持、其实空着"的假信号 ✓。 */}
+          {/* 图例 ✓ —— 表格里那一列用了几个人话词 ✓，这里解释它们分别是什么意思 ✓。
+              ⚠️ 它**不是**"预留说明"了 ✗：流媒体检测**已经上线** ✓（agent 每 6 小时自己探一次 ✓），
+              所以旧版那句"等待 agent 支持"现在**是假话** ✓✗ —— 已改掉 ✓。 */}
           <div className="rounded-lg border border-dashed border-border bg-muted/30 p-3.5 text-xs leading-relaxed text-muted-foreground">
-            <p className="font-medium text-foreground">节点实测（预留）</p>
-            <p className="mt-1">
-              流媒体检测等待 agent 支持。这一类结论只能**从节点发出探测**才能得到（hub 代不了），
-              而且**带时效**（今天解锁不等于下周解锁）⇒ 它会单独成一块，并显示"什么时候测的"。
-            </p>
+            <p className="font-medium text-foreground">关于「节点实测」</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              <li>
+                <span className="text-warn">未允许检测</span> —— 这台机器没开「允许 IP 质量检测」✓，
+                允许之后 hub 才会为它查询与接收探测 ✓。
+              </li>
+              <li>
+                <span className="text-muted-foreground/70">版本不支持</span> —— 它的 agent 还没有探测能力 ✓，
+                升级 agent 之后才会有结果 ✓（在那之前**等多久都不会有** ✓）。
+              </li>
+              <li>
+                <span className="text-muted-foreground/70">还没测过</span> —— 有能力、也允许了 ✓，
+                只是还没到它那一次（每 6 小时一次 ✓，各台按自己的时点错开 ✓）。
+              </li>
+              <li>
+                结论**带时效** ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。
+                探测**从节点自己发出** ✓（hub 代不了 ✓），而**失败不等于未解锁** ✓ ——
+                取不到页面时不会报结论，你会看到上一次的结论与它的年龄 ✓。
+              </li>
+            </ul>
           </div>
         </div>
       ) : page === "resource" ? (

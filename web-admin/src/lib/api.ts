@@ -95,6 +95,25 @@ export type Node = {
    */
   allow_ip_quality?: boolean
   /**
+   * 流媒体探测的结果 ✓（hub 已解析成对象 ✓；没探测过是 `null` ✓）。
+   * 形状 ✓：`{ netflix: { status: "unlocked" | "blocked" | "unknown", region?: "US" } }`
+   * ⚠️ 那几个状态字符串与 hub 的白名单**逐字一致** ✓（hub 那边有测试钉住它们 ✓；
+   * 面板这边只**显示**、不判断 ✓ —— 判据一处就够 ✓）。
+   */
+  probe?: Record<string, { status?: string; region?: string }> | null
+  /**
+   * 那次探测**什么时候**做的 ✓（Unix 秒 ✓，**由 hub 盖** ✓）。
+   * ⚠️ 这一块的命就是"时效" ✓：没有它，一条三周前的"解锁"看起来和刚测的一样 ✓✗。
+   */
+  probe_at?: number | null
+  /**
+   * 这个 agent **会不会**探流媒体 ✓（**能力** ✓，由版本决定 ✓ —— 不是许可 ✗）。
+   * ⚠️ 它把两种"没有数据"分开 ✓✓：`false` = **版本不支持** ✓（永远不会有 ✓，
+   * 除非升级 agent ✓）；`true` 且没有 `probe` = **还没测过** ✓（再等等就有了 ✓）。
+   * ⚠️ 判断用 `=== false` ✗（老 hub 不给这个字段时，`!x` 会把"不知道"当成"不会" ✓✗）。
+   */
+  stream_probe?: boolean
+  /**
    * **hub 实际按哪个地址做的查询** ✓ —— 面板要显示的是它，不是 `ipv4` ✗✓。
    * ⚠️ 生产上踩过 ✗：节点 `ipv4` 是内网 `10.x` ✓，而旁边写着「Los Angeles · US」✓
    * ⇒ 看起来像"内网地址查出了洛杉矶" ✓✗（其实 hub 按规则选了公网地址去查 ✓，
