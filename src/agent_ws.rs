@@ -377,6 +377,9 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             return Ok(owed.then_some(source));
         }
         "report" => report(app, node_id, rpc.params)?,
+        // 流媒体探测的结果 ✓（agent 自己每 6 小时探一次 ✓ 报上来 ✓）。
+        // ⚠️ 校验在 `sanitize_probe` 里（纯函数 ✓ 有测试 ✓）—— 这里只管"存" ✓。
+        "probe" => probe(app, node_id, &rpc.params)?,
         "upgrade.report" => {
             // 这是 agent 对一次升级的**结论**，不是原始数据：长度与可见字符都按对待
             // 其它不设防字段的同一套规矩处理（它们来自一台不被担保的机器）。
@@ -658,6 +661,82 @@ fn check_contract(node_id: i64, metrics: &serde_json::Value) {
     let missing: Vec<&str> = report_fields().filter(|k| metrics.get(k).is_none()).collect();
     if !missing.is_empty() {
         warn!("node {node_id} reports without {missing:?}: those columns will read zero and the default theme will void this node's live view, so this agent and this hub are out of step");
+    }
+}
+
+/// 把 agent 报来的探测结果**收拾成我们能存的样子** ✓✓ —— 纯函数 ✓（所以那些"不该收的东西"能测死 ✓）。
+///
+/// ⚠️ 这些数据来自**一台不被担保的机器** ✓（与 report 的其余字段同一条规矩 ✓）：
+/// 所以这里做三件事，且**只**做这三件事 ✓：
+/// 1. **白名单服务名** ✓ —— 只认我们知道的那几个 ✓；其余一律丢掉 ✓
+///    （否则将来一个"服务名"就能往库里塞任意键 ✓✗，面板再去渲染它 ✓）；
+/// 2. **状态值白名单** ✓ —— 只认 `unlocked` / `blocked` / `unknown` ✓ 三个 ✓；
+///    ⚠️ 它们与 agent 侧的 `Status` 是**同一套字面量** ✓（两边必须一致 ✓ —— 见那边的注释 ✓）；
+/// 3. **地区码形状** ✓ —— 两位大写字母 ✓，否则丢掉 ✓（不是拒绝整条 ✓：状态仍然有用 ✓）。
+///
+/// 另外：**整体大小上限** ✓ —— 一个 JSON 不该能把库或内存撑坏 ✓
+/// （hub 刚因为"整份读进内存"出过 OOM ✓，这条规矩一样适用 ✓）。
+///
+/// 返回 `None` 表示"这条报文没有任何可用的东西" ✓ ⇒ 调用方**什么都不写** ✓
+/// （**不要**用一条空结论覆盖掉上一次的好结论 ✓✗）。
+/// 收下一次探测结果 ✓：**先校验** ✓（`sanitize_probe` ✓），**再存** ✓，并**由 hub 盖时间戳** ✓✓。
+///
+/// ⚠️ **时间戳为什么由 hub 盖** ✗✓：`probe_at` 是"结论新不新"的依据 ✓，
+/// 而一台不被担保的机器的时钟**可以错**（也常常错 ✓）⇒ 用它的时间去判断新鲜度 ✓✗
+/// 等于把判断权交给它 ✓。网络延迟是秒级 ✓，而周期是 6 小时 ✓ ⇒ 收到就算当时测的 ✓。
+///
+/// ⚠️ 校验后没有可用内容（`None` ✓）⇒ **什么都不写** ✓ ——
+/// **绝不能**用一条空结论覆盖掉上一次的好结论 ✓✗（那是"把没读到当成没解锁"的同一类错 ✓）。
+fn probe(app: &App, node_id: i64, params: &serde_json::Value) -> Result<()> {
+    let Some(clean) = sanitize_probe(params) else {
+        debug!("node {node_id} sent a probe report with nothing usable in it");
+        return Ok(());
+    };
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    app.db.save_probe(node_id, &clean, at)?;
+    Ok(())
+}
+
+fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
+    const MAX_BYTES: usize = 4 * 1024;
+    const SERVICES: [&str; 1] = ["netflix"]; // 第一期只有它 ✓（加服务只改这一行 ✓）
+    const STATUSES: [&str; 3] = ["unlocked", "blocked", "unknown"];
+
+    // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
+    let raw = serde_json::to_string(params).ok()?;
+    if raw.len() > MAX_BYTES {
+        return None;
+    }
+    let obj = params.as_object()?;
+    let mut out = serde_json::Map::new();
+    for (name, v) in obj {
+        if !SERVICES.contains(&name.as_str()) {
+            continue; // 不认识的服务 ⇒ 丢掉 ✓（不报错 ✓：将来 agent 先升级也不会被拒 ✓）
+        }
+        let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+        if !STATUSES.contains(&status) {
+            continue; // 状态读不懂 ⇒ 这一项没有可用的东西 ✓
+        }
+        // 地区：**两位大写字母**才收 ✓（与 agent 侧判据同一条形状 ✓）；
+        // 没有 / 形状不对 ⇒ 就不给地区 ✓ —— 状态仍然保留 ✓（不因为一格坏了丢掉有用的那格 ✓）。
+        let region = v
+            .get("region")
+            .and_then(|x| x.as_str())
+            .filter(|r| r.len() == 2 && r.chars().all(|c| c.is_ascii_uppercase()));
+        let mut item = serde_json::Map::new();
+        item.insert("status".into(), serde_json::json!(status));
+        if let Some(r) = region {
+            item.insert("region".into(), serde_json::json!(r));
+        }
+        out.insert(name.clone(), serde_json::Value::Object(item));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(out))
     }
 }
 

@@ -2045,6 +2045,20 @@ impl Db {
     /// 没允许就**一个请求都不发** ✓（不是"发了但结果丢掉" ✗ —— 那 IP 已经出去了 ✓，收不回来 ✓）。
     ///
     /// 读不到这台节点（id 不存在 ✓）⇒ **false** ✓：宁可少查，不可误发 ✓。
+    /// 存下一次流媒体探测的结果 ✓（`probe` 是**已经校验过**的 JSON ✓，见 `agent_ws::sanitize_probe` ✓）。
+    /// `at` 是 **Unix 秒** ✓，**由 hub 盖** ✓（不收 agent 报的时间 ✓ —— 它的时钟可以错 ✓）。
+    ///
+    /// ⚠️ 两列一起写 ✓：只更新 JSON 不更新时间戳的话 ✓，
+    /// 面板会用一个**旧的**时间去判断一条**新**结论 ✓✗（"新不新"就骗人了 ✓）。
+    pub fn save_probe(&self, id: i64, probe: &serde_json::Value, at: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE node SET probe=?2, probe_at=?3 WHERE id=?1",
+            rusqlite::params![id, probe.to_string(), at],
+        )?;
+        Ok(())
+    }
+
     pub fn quality_allowed(&self, id: i64) -> bool {
         self.conn()
             .query_row("SELECT allow_ip_quality <> 0 FROM node WHERE id=?1", [id], |r| r.get(0))
