@@ -96,6 +96,34 @@ pub enum Checked {
     Nothing,
 }
 
+/// **三态怎么定** ✓✓ —— 纯函数 ✓（`check` 里那几处判断全搬到这里 ✓）。
+///
+/// 抽出来的理由就是"能测" ✗：原来的判断埋在 `check` 里 ✓，而它要一个真实的 `App` ✓
+/// ⇒ 这条**最该有测试**的逻辑反而一条测试都没有 ✓（2026-10-11 记下的缺口 ✓）。
+///
+/// 三个入参分别是"该不该查"（[`active`] ✓）、"缓存里有什么" ✓、"这次请求拿到了什么" ✓；
+/// ⚠️ **请求失败用 `None` 表达** ✓，与"查了但没查到"（拿到了响应、但解析不出结论 ✓）是两回事 ✓✗：
+/// 前者走 `Skipped`（**什么都不动** ✓ —— 一次网络抖动不该把已有结论抹掉 ✓），
+/// 后者走 `Nothing`（**如实作查空** ✓，覆盖旧值 ✓）。
+pub fn outcome(key_ok: bool, cached: Option<&str>, fetched: Option<&str>) -> Checked {
+    if !key_ok {
+        return Checked::Skipped; // 开关关着 / 没配 key ⇒ **没去查** ✓
+    }
+    match cached.or(fetched) {
+        Some(body) => verdict(body),
+        // 缓存没有、请求也没拿到 ⇒ **没查到东西** ✓（失败 ✓）⇒ 不动 ✓
+        None => Checked::Skipped,
+    }
+}
+
+/// 手里有一份响应 ⇒ 它能得出什么结论 ✓（解析不出来也算"查空" ✓ —— 服务换了口径也会走到这里 ✓）。
+fn verdict(body: &str) -> Checked {
+    match serde_json::from_str::<serde_json::Value>(body).ok().as_ref().and_then(parse_abuseipdb) {
+        Some(r) => Checked::Found(r),
+        None => Checked::Nothing,
+    }
+}
+
 /// 查一个 IP 的**在线**风险结论 ✓（AbuseIPDB ✓）。
 ///
 /// **三处"不发请求"都是刻意的** ✗：
@@ -108,8 +136,9 @@ pub enum Checked {
 pub async fn check(app: &crate::App, ip: &str, day: &str) -> Checked {
     let enabled = app.db.get("risk_enabled").unwrap_or_default();
     let key = app.db.get("risk_abuseipdb_key").unwrap_or_default();
-    if !active(&enabled, &key) {
-        return Checked::Skipped; // 开关关着 / 没配 key ⇒ **没去查** ✓（调用方什么都不动 ✓）
+    let key_ok = active(&enabled, &key);
+    if !key_ok {
+        return outcome(key_ok, None, None); // **没去查** ✓（调用方什么都不动 ✓）
     }
     // 今天的缓存命中 ⇒ **不再请求** ✓（额度就省在这里 ✓）
     if let Some(body) = app.db.risk_cached(ip, "abuseipdb", day) {
@@ -133,7 +162,7 @@ pub async fn check(app: &crate::App, ip: &str, day: &str) -> Checked {
             Err(e) => {
                 return {
                     tracing::warn!("risk: abuseipdb body read failed: {e:#}");
-                    Checked::Skipped // 请求/读取失败**不是查空** ✗：什么都不动 ✓（抖动不丢数据 ✓）
+                    outcome(key_ok, None, None) // 请求/读取失败 ⇒ **没有 fetched** ⇒ Skipped ✓（抖动不丢数据 ✓）
                 };
             }
         },
@@ -148,10 +177,7 @@ pub async fn check(app: &crate::App, ip: &str, day: &str) -> Checked {
     if let Err(e) = app.db.save_risk(ip, "abuseipdb", day, &body) {
         tracing::warn!("risk: caching the abuseipdb answer failed: {e:#}");
     }
-    match serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(parse_abuseipdb) {
-        Some(r) => Checked::Found(r),
-        None => Checked::Nothing, // 请求**发出去了** ✓ 但没解析出结论 ⇒ 如实作"查空" ✓
-    }
+    outcome(key_ok, None, Some(&body)) // 请求**发出去了** ✓ ⇒ 由它判"查到 / 查空" ✓
 }
 
 #[cfg(test)]
@@ -212,6 +238,30 @@ mod tests {
         assert!(u.starts_with("https://api.abuseipdb.com/api/v2/check?"), "{u}");
         assert!(u.contains("ipAddress=203.0.113.9"), "{u}");
         assert!(u.contains("maxAgeInDays=90"), "{u}");
+    }
+
+    /// ⭐ **三态映射的单测** ✓✓ —— 这条测试之所以**现在才存在** ✓，
+    /// 是因为判断先前埋在 `check` 里 ✓，而它需要一个真实的 `App` ✗；
+    /// 抽成纯函数 [`outcome`] 之后才测得动 ✓（这正是抽它的唯一理由 ✓）。
+    #[test]
+    fn the_verdict_separates_not_checked_from_checked_and_empty() {
+        let good = r#"{"data":{"abuseConfidenceScore":42,"totalReports":7}}"#;
+        // 开关关着 / 没配 key ⇒ **没去查** ✓（手里就算有响应也不该下结论 ✓ —— 因为压根不该去查 ✓）
+        assert_eq!(outcome(false, None, None), Checked::Skipped);
+        assert_eq!(outcome(false, Some(good), None), Checked::Skipped, "关着就不该有结论 ✓");
+        // 查到了 ✓
+        match outcome(true, Some(good), None) {
+            Checked::Found(r) => assert_eq!(r.score, Some(42.0)),
+            other => panic!("期望 Found，实际 {other:?}"),
+        }
+        // ⭐ **查了但这家不认识它** ⇒ `Nothing` ✓✓（覆盖旧结论 ✓ —— 这正是三态存在的理由 ✓）
+        assert_eq!(outcome(true, Some("{}"), None), Checked::Nothing);
+        assert_eq!(outcome(true, None, Some("{}")), Checked::Nothing);
+        // ⭐ **请求失败**（没有 fetched ✓）⇒ `Skipped` ✓，**不是** `Nothing` ✗✓ ——
+        // 一次网络抖动不该把已有结论抹掉 ✓。**这是本条最要紧的一条** ✓。
+        assert_eq!(outcome(true, None, None), Checked::Skipped, "失败 ≠ 查空 ✓：不丢数据 ✓");
+        // 缓存优先 ✓（有缓存就不再关心 fetched ✓ —— `check` 也因此不会重复请求 ✓）
+        assert_eq!(outcome(true, Some("{}"), Some(good)), Checked::Nothing, "缓存说了算 ✓");
     }
 
     /// 缺字段 / 出错页 / 限流回执 ⇒ `None` ✓ —— **不编 0** ✗：
