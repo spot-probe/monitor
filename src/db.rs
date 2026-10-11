@@ -118,6 +118,13 @@ CREATE TABLE IF NOT EXISTS node (
   -- ⚠️ 与上面那列**有一处关键不同** ✗：**老 agent 不报这个字段，而那时要当作"允许"** ✓ ——
   -- 这是"向后兼容、老节点不断"的决定 ✓（见读 hello 那一处 ✓）。
   allow_ip_quality INTEGER NOT NULL DEFAULT 0,
+  -- **流媒体解锁检测的结果** ✓（agent 自己每 6 小时探一次 ✓ 并上报 ✓）。
+  -- ⚠️ 存成 **JSON** ✓✓：一个服务一格形状（状态 ✓ 地区 ✓），将来加服务/加"方式"只是多一个键 ✓，
+  -- 不改表 ✓（用户要的"提前预留"正是这个意思 ✓）。
+  -- ⚠️ 而**时间戳单独一列** ✗：它是"结论新不新"的唯一依据 ✓ ——
+  -- 埋在 JSON 里会让"过期判断"变成各处自己解析 ✓（今天已经因为"两处各写一份"吃过亏 ✓）。
+  probe TEXT,
+  probe_at INTEGER,
   -- 节点质量（IP 结论 ✓）：由 hub 用**本地**库查出 ✓，不是 agent 上报的 ✗ ——
   -- agent 依旧零改动 ✓，也不把节点 IP 发给第三方 ✓（除非以后显式打开在线库 ✓）。
   -- 八个列**全部可空** ✓：查不到就是空 ✓ —— "未知"与"美国"是两件事 ✗（`''` 会被读成后者 ✓）。
@@ -299,7 +306,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -657,6 +664,12 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         // ⚠️ 老 agent 不上报这个字段 ⇒ 读 hello 时按**允许**处理 ✓（见 `save_facts` 那一处 ✓）——
         // 所以库里这一列的 0 只代表"明确不允许" ✓，"没上报"在入库前就变成 1 了 ✓。
         add_column(&tx, "node", "allow_ip_quality INTEGER NOT NULL DEFAULT 0")?;
+    }
+    if from < 21 {
+        // 流媒体解锁检测的结果（JSON ✓）与它**什么时候测的**（Unix 秒 ✓）。
+        // ⚠️ 两列都可空 ✓：没探测过就是 NULL ✓（与"探测过但没结论"分得开 ✓）。
+        add_column(&tx, "node", "probe TEXT")?;
+        add_column(&tx, "node", "probe_at INTEGER")?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -5798,6 +5811,46 @@ mod tests {
             .unwrap();
         assert_eq!(notnull, 1, "必须 NOT NULL ✓（库里的 0 只代表『明确不允许』✓）");
         assert_eq!(dflt, "0", "默认必须是 0 ✓（新装要勾选才允许 ✓）");
+    }
+    /// **升级路径的闸**：一个"20 版"的库迁移后必须有两列、且戳到 21 ✓。
+    /// 顺便断言**两列都可空** ✓ —— 没探测过写 NULL ✓，
+    /// 而"探测过、但这一项没结论"要靠 JSON 里的键来表达 ✓（不是靠 NULL ✓）——
+    /// 若被写成 NOT NULL，错误会在"新增一台节点"时才炸 ✓（与 q_ 那八列同一条理由 ✓）。
+    #[test]
+    fn migrating_from_20_adds_the_probe_columns() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        for col in ["probe", "probe_at"] {
+            conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), []).unwrap();
+        }
+        conn.execute("PRAGMA user_version = 20", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"probe".to_string()), "前提：列已删掉");
+        migrate(&conn, 20).unwrap();
+        let after = cols(&conn);
+        assert!(after.contains(&"probe".to_string()) && after.contains(&"probe_at".to_string()));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        let notnull: i64 = conn
+            .query_row(
+                // ⚠️ 列名用**方括号**引用 ✓（SQLite 支持 ✓）—— 用双引号的话，
+                // 在"Python 模板 → 写进 Rust 字符串"这条路上要转义两层 ✓，
+                // 而今天已经在这上面栽过一次（反斜杠被吃掉 ⇒ Rust 字符串提前结束 ✓✗）。
+                "SELECT COUNT(*) FROM pragma_table_info('node') WHERE name IN ('probe','probe_at') AND [notnull]=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notnull, 0, "两列都必须可空");
     }
 
     #[test]
