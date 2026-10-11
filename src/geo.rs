@@ -166,9 +166,13 @@ pub struct Source {
     pub key: &'static str,
     /// 小于这个字节数一定是坏的 ✓（一个 200 字节的"城市库"不可能是真的 ✓）。
     pub min_bytes: usize,
-    /// 厂商发出来的**包装** ✓ —— 免费库几乎都发压缩包 ✗（MaxMind 是 `.tar.gz` ✓、DB-IP 是 `.mmdb.gz` ✓），
-    /// 只有 Tor 列表是裸文本 ✓。所以"只收裸 .mmdb"那条老规矩行不通 ✓（`unpack` 负责解开 ✓）。
-    pub pack: Pack,
+    /// **可能的落盘名** ✓✓ —— 由**内容**决定用哪一个 ✓（`sniff` ✓），不再由"哪个键配的"决定 ✗。
+    ///
+    /// 顺序是刻意的 ✓：第一个是 MaxMind 那套名字 ✓（`.tar.gz` 与裸 `.mmdb` 用它 ✓），
+    /// 第二个是 DB-IP 那套 ✓（`.mmdb.gz` 用它 ✓）—— 而这两个名字**正是 `lookup`
+    /// 的候选名单里的那两个** ✓✓ ⇒ 读的一侧一行都不用改 ✓。
+    /// Tor 只有一个名字 ✓（它本来就是裸文本 ✓），所以是切片 ✓。
+    pub names: &'static [&'static str],
     /// **多久刷一次** ✓✓ —— 必须按来源定 ✗，不能一刀切：
     /// MaxMind 的 EULA 限**每天 30 次下载** ✗（官方页写明 ✓），而 Tor 列表随时小改、没有额度 ✓。
     pub every: std::time::Duration,
@@ -182,42 +186,27 @@ pub struct Source {
 /// MaxMind 是 mmdb ✓、Tor 出口是纯文本 ✓；
 /// IP2Proxy LITE / DB-IP 的发布形态（mmdb ✗ BIN ✗ CSV ✗）**我没有核实** ✓，
 /// 所以先不写进来 ✓ —— 核实之后各加一行即可 ✓（它们的形态字段已经准备好 ✓）。
-pub const SOURCES: [Source; 5] = [
+pub const SOURCES: [Source; 3] = [
     Source {
-        name: "GeoLite2-City.mmdb",
-        pack: Pack::TarGz,
+        name: "城市库",
+        // 落盘名按内容挑 ✓：`.tar.gz`/裸 ⇒ MaxMind 的名字 ✓；`.gz` ⇒ DB-IP 的名字 ✓
+        names: &["GeoLite2-City.mmdb", "dbip-city-lite.mmdb"],
         shape: Shape::Mmdb,
         key: "geo_city_url",
-        min_bytes: 1 << 20,
+        min_bytes: 1 << 20, // 只在"内容判不出来"时兜底 ✓（见 fetch ✓）
         every: std::time::Duration::from_secs(24 * 3600),
     },
     Source {
-        name: "GeoLite2-ASN.mmdb",
-        pack: Pack::TarGz,
-        shape: Shape::Mmdb,
-        key: "geo_asn_url",
-        min_bytes: 1 << 20,
-        every: std::time::Duration::from_secs(24 * 3600),
-    },
-    Source {
-        name: "dbip-city-lite.mmdb",
-        shape: Shape::Mmdb,
-        key: "geo_city_url",
-        min_bytes: 1 << 20,
-        pack: Pack::Gzip,
-        every: std::time::Duration::from_secs(24 * 3600),
-    },
-    Source {
-        name: "dbip-asn-lite.mmdb",
+        name: "ASN 库",
+        names: &["GeoLite2-ASN.mmdb", "dbip-asn-lite.mmdb"],
         shape: Shape::Mmdb,
         key: "geo_asn_url",
         min_bytes: 1 << 19,
-        pack: Pack::Gzip,
         every: std::time::Duration::from_secs(24 * 3600),
     },
     Source {
-        name: "tor-exit.txt",
-        pack: Pack::Raw,
+        name: "Tor 出口列表",
+        names: &["tor-exit.txt"],
         shape: Shape::Text,
         key: "geo_tor_url",
         min_bytes: 1 << 10,
@@ -650,10 +639,55 @@ pub async fn fetch(app: &App, source: &Source) -> bool {
     // ⚠️ 这里**不再**先解开成一个 Vec ✗ —— 那正是现场 OOM 的成因（City 解压后几百 MB ✓，
     // 而 hub 的包线是 256M ✓）。改成**流式**：解开直接写临时文件 ✓，校验只看文件 ✓，
     // 最后原子替换 ✓ ⇒ 峰值与文件大小**脱钩** ✓✓（见 `store_streamed` ✓）。
+    // ⭐ **按内容定名** ✓✓（修已知项 ① 的接线 ✓）—— 不再由"哪个键配的"决定 ✗，
+    //    那正是两条误导性 WARN 的根 ✓。先读**头部**认出包装 ✓；
+    //    若看到 gzip ✓，还要**解压出几百字节**才知道里面是 tar 还是单个文件 ✓
+    //    —— gzip 的头部里看不到压缩内容 ✓，这就是 `sniff`/`sniff_inner` 分成两个的缘故 ✓。
+    let pack = {
+        use std::io::Read;
+        let mut head = [0u8; 512];
+        let n = match std::fs::File::open(&dl).and_then(|mut f| f.read(&mut head)) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("geo: {}: cannot read the download: {e:#}", source.name);
+                let _ = std::fs::remove_file(&dl);
+                return false;
+            }
+        };
+        let outer = sniff(&head[..n]);
+        if outer == Pack::Gzip {
+            // 解压**前 512 字节**再看 ✓ —— 只要几百字节 ✓，与流式那条低内存路径一致 ✓
+            let mut inner = [0u8; 512];
+            let m = match std::fs::File::open(&dl) {
+                Ok(f) => flate2::read::GzDecoder::new(f).read(&mut inner).unwrap_or(0),
+                Err(_) => 0,
+            };
+            match sniff_inner(&inner[..m]) {
+                Pack::TarGz => Pack::TarGz,
+                _ => Pack::Gzip,
+            }
+        } else {
+            outer
+        }
+    };
+    // 落盘名 ✓：`.tar.gz` 与裸文件 ⇒ 第一个（MaxMind 那套 ✓）；`.gz` ⇒ 第二个（DB-IP 那套 ✓）。
+    // ⭐ 这两个名字**正是 `lookup` 候选名单里的那两个** ✓✓ ⇒ 读的一侧一行都不用改 ✓。
+    // Tor 只有一个名字 ✓ ⇒ 永远是它自己 ✓。
+    let target = if pack == Pack::Gzip && source.names.len() > 1 { source.names[1] } else { source.names[0] };
+
     // ⚠️ 临时下载文件必须删 ✗ —— 它是 127 MB 级的 ✓，而 pid 每次都变 ✓
     // ⇒ 忘了删就会**慢慢攒满磁盘** ✓（那种失败几周后才显形 ✓，且没人会想到是这里 ✓）。
-    let outcome =
-        store_streamed(&app.data_dir, source.name, source.shape, source.pack, source.min_bytes, &bytes);
+    let outcome = store_streamed(
+        &app.data_dir,
+        // ⚠️ 落盘名用**按内容定下来的** `target` ✓，不是 `source.name` ✗ ——
+        // 后者现在是**给人看的标签**（"城市库" ✓）⇒ 拿它当文件名会让 `lookup` 找不到 ✓✗。
+        target,
+        source.shape,
+        // 同理：包装用 **sniff 出来的** `pack` ✓，不是 `source.pack` ✗
+        pack,
+        source.min_bytes,
+        &bytes,
+    );
     let _ = std::fs::remove_file(&dl);
     match outcome {
         Ok(()) => {
@@ -1005,7 +1039,13 @@ mod tests {
     fn no_source_carries_a_hardcoded_url() {
         for s in SOURCES {
             assert!(s.key.starts_with("geo_"), "URL 必须来自设置：{}", s.name);
-            assert!(s.name.ends_with(".mmdb") || s.name.ends_with(".txt"), "落盘名要能看出形态：{}", s.name);
+            // ⚠️ `name` 现在是**标签** ✓（"城市库" ✓），文件名在 `names` 里 ✓ ——
+            // 这条断言跟着改 ✓：护栏盯的是**落盘的那个名字** ✓（否则它会一直红 ✓，
+            // 而"改了标签就红"的护栏会被人顺手删掉 ✓ —— 那才是最糟的结果 ✓）。
+            for n in s.names {
+                assert!(n.ends_with(".mmdb") || n.ends_with(".txt"), "落盘名要能看出形态：{n}");
+            }
+            assert!(!s.names.is_empty(), "至少有一个落盘名：{}", s.name);
             assert!(s.min_bytes >= 1024, "最小尺寸太小挡不住坏下载：{}", s.name);
         }
     }
