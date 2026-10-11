@@ -3932,6 +3932,27 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
     // Wider gaps between sections than within them: the two groups answer different
     // questions, and a single rhythm made the page read as one long form.
     <div className="space-y-6">
+      {/* 页签 ✓ —— 样式对齐**总览/节点页那套胶囊控件** ✓（用户要求 ✓）：
+          容器 `rounded-full bg-muted p-0.5` ✓ · 每一项 `rounded-full px-2.5 py-0.5 text-xs font-medium` ✓ ·
+          选中 `bg-primary text-primary-foreground` ✓ —— 与那一套**逐类相同** ✓，没有自创观感 ✓。
+          位置在页面**最上面**（第一个区块之前 ✓）：这一页的所有内容都属于这两个页签之一 ✓。 */}
+      <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 w-fit">
+        {([["notify", "通知"], ["ip", "IP 信息"]] as const).map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setTab(k)}
+            className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+              tab === k ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "notify" ? (
+        <>
       <Section
         title="推送渠道"
         hint="Telegram 和 Webhook 配了哪个就发哪个，也可以同时用。"
@@ -4026,27 +4047,6 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       </ChannelCard>
       </Section>
 
-      {/* 页签 ✓ —— 用户要求：把『运维的动作』收拢到这一页 ✓。
-          「通知」继承原来的全部内容 ✓（含流量报告 ✓）；「IP 信息」放 IP 风险库与 IP 数据库 ✓。
-          做成页签而不是再开一个菜单 ✓，是为了后续新增的运维项能**继续加页签** ✓
-          —— 菜单项不涨 ✓，而这一页可以一直长 ✓（面向扩展 ✓）。 */}
-      <div className="flex gap-1 rounded-lg bg-muted p-1">
-        {([["notify", "通知"], ["ip", "IP 信息"]] as const).map(([k, label]) => (
-          <button
-            key={k}
-            type="button"
-            onClick={() => setTab(k)}
-            className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
-              tab === k ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "notify" ? (
-        <>
       <Section title="触发规则" hint="离线通知在下面按节点打开；流量和到期提醒对填了额度、到期日的节点生效。">
         <OfflineNodes nodes={nodes} refresh={refresh} />
       </Section>
