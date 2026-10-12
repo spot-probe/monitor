@@ -1180,7 +1180,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       ⇒ 都写成"暂无解析数据"会让人以为"查过了、结果是空" ✓✗，
                         而那会让人去做**完全无关**的排查 ✓（查库、查网络 ✓ —— 其实只是没允许 ✓）。 */}
                   {n.allow_ip_quality === false ? (
-                    <div className="text-xs text-warn">未允许检测</div>
+                    <Badge variant="outline" className="border-transparent bg-warn/10 font-medium text-warn">
+                      未允许检测
+                    </Badge>
                   ) : n.quality ? null : (
                     <div className="text-xs text-muted-foreground/70">暂无解析数据</div>
                   )}
@@ -1189,7 +1191,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     {/* ⚠️ 显示 **hub 实际查询的那个地址** ✓（`lookup_ip` ✓），不是 `ipv4` ✗✓ ——
                         生产上见过：`ipv4` 是内网 `10.x` ✓，而右边写着「Los Angeles」✓
                         ⇒ 看起来像"内网地址查出了洛杉矶" ✓✗。没有这个字段时（老 hub ✓）才退回 `ipv4 || ip` ✓。 */}
-                    <div className="truncate font-mono text-xs">
+                    {/* 主要信息要强：IP 是这一行最要紧的东西，原来是灰的，于是整张表看着一片灰。 */}
+                    <div className="truncate font-mono text-xs font-medium text-foreground">
                       {n.lookup_ip || n.ipv4 || n.ip || "未知"}
                     </div>
                     <div className="truncate text-xs text-muted-foreground">
@@ -1209,9 +1212,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       {n.quality?.city || n.quality?.country ? (
                         <>
                           {flag(n.quality?.country) ? flag(n.quality?.country) + " " : null}
-                          {n.quality?.city ?? ""}
-                          {n.quality?.city && n.quality?.country ? " · " : null}
-                          {n.quality?.country ?? ""}
+                          <span className="font-medium text-foreground">{n.quality?.city ?? ""}</span>
+                          {n.quality?.city && n.quality?.country ? <span className="text-muted-foreground"> · </span> : null}
+                          <span className="text-muted-foreground">{n.quality?.country ?? ""}</span>
                         </>
                       ) : (
                         <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
@@ -1283,9 +1286,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <div className="min-w-0 space-y-0.5">
                   <div className="truncate text-xs">
                     {n.stream_probe === false ? (
-                      <span className="text-muted-foreground/50">版本不支持</span>
+                      <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                        版本不支持
+                      </Badge>
                     ) : n.allow_ip_quality === false ? (
-                      <span className="text-warn">未允许检测</span>
+                      <Badge variant="outline" className="border-transparent bg-warn/10 font-medium text-warn">
+                        未允许检测
+                      </Badge>
                     ) : n.probe?.netflix ? (
                       <span>
                         Netflix{" "}
@@ -1324,7 +1331,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
                       </span>
                     ) : (
-                      <span className="text-muted-foreground/50">还没测过</span>
+                      <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                        还没测过
+                      </Badge>
                     )}
                   </div>
                   {/* ⚠️ **时效** ✓✓ —— 这一格的命就是它：没有"多久之前"，
