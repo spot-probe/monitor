@@ -704,11 +704,23 @@ fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
     const MAX_BYTES: usize = 4 * 1024;
     // ⚠️ 加服务**只改这一行** ✓ —— 而它必须**早于** agent 开始发那个服务 ✗✓
     //（"绝不给对方发它还不能处理的东西" ✓ ⇒ hub 先能收 ✓）。加一个没人发的服务是无害的 ✓。
-    const SERVICES: [&str; 2] = ["netflix", "tiktok"];
+    // ⚠️ **一次把六个都开了** ✗✓ —— 理由与取舍都写在这里 ✓：
+    // · 理由 ✓：服务的白名单必须**早于** agent 开始发它 ✓（"绝不给对方发它还不能处理的东西" ✓），
+    //   而每次加服务都改一遍 hub ✓ 会让"先发 hub、再发 agent"这个顺序**多出五次机会出错** ✓✗；
+    // · ⚠️ **放宽它 = 放宽了一个安全边界** ✗：现在一台不被担保的机器可以往库里写这**六个键** ✓
+    //   （从前只有两个 ✓）。⇒ 可接受的理由有两条 ✓：**值仍受白名单与形状校验** ✓
+    //   （状态六档 ✓ · 地区两位大写 ✓）· **整体仍限 4 KB** ✓✓ —— 也就是说它能塞的
+    //   只是"我们认识的形状" ✓，而不是任意内容 ✓。
+    // · 剩下的三个（disneyplus / youtube / amazonpv）**也一起开着** ✓ ——
+    //   它们是同一批已定的服务 ✓，加进来不会扩大"形状"上的风险 ✓（同上两条 ✓）。
+    const SERVICES: [&str; 6] = ["netflix", "tiktok", "chatgpt", "reddit", "youtube", "amazonpv"];
     // ⚠️ 四个 ✓：`idc` 是"**解锁了、但对方把这个地址识别成机房**" ✓✓ ——
     // 它与"解锁"**不是一回事** ✓（机房 IP 在很多服务上吃亏 ✓，而这正是运维想知道的 ✓），
     // 也与"未解锁"不同 ✓ ⇒ 单独一档 ✓（用户定的"甲" ✓）。
-    const STATUSES: [&str; 4] = ["unlocked", "blocked", "unknown", "idc"];
+    // ⚠️ **六档** ✓（用户定"甲" ✓）：`web` = **网页能用、App 不行** ✓；
+    // `app` = **反过来** ✓（两者来自 ChatGPT 那一套探测 ✓ —— 它分别探 API 与 iOS 端 ✓）。
+    // ⚠️ 这两档既不是"解锁"也不是"未解锁" ✗ ⇒ 必须单独存在 ✓（合并任何一边都是丢信息 ✓）。
+    const STATUSES: [&str; 6] = ["unlocked", "blocked", "unknown", "idc", "web", "app"];
 
     // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
     let raw = serde_json::to_string(params).ok()?;
@@ -1454,5 +1466,23 @@ mod tests {
         );
         // 而真的读不懂的状态**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
         assert_eq!(sanitize_probe(&json!({"tiktok": {"status": "maybe"}})), None);
+    }
+    /// ⭐ `web` / `app` 两档 ✓✓（用户定"甲" ✓）：ChatGPT 会分别探 API 与 iOS 端 ✓，
+    /// 于是可能出现"**网页能用、App 不行**"（`web` ✓）或反过来（`app` ✓）。
+    /// ⚠️ 它们**既不是解锁也不是未解锁** ✗ ⇒ 合并任何一边都是**丢信息** ✓
+    ///（而"能用一半"恰恰是运维会据以决定要不要换机器的那类事实 ✓）。
+    #[test]
+    fn the_partial_tiers_survive_the_whitelist() {
+        for (status, region) in [("web", "JP"), ("app", "US")] {
+            assert_eq!(
+                sanitize_probe(&json!({"chatgpt": {"status": status, "region": region}})),
+                Some(json!({"chatgpt": {"status": status, "region": region}})),
+                "{status} 必须被原样收下 ✓"
+            );
+        }
+        // 而六档之外的东西**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
+        for bad in ["partial", "web_only", "desktop"] {
+            assert_eq!(sanitize_probe(&json!({"chatgpt": {"status": bad}})), None, "{bad} 不该被收 ✓");
+        }
     }
 }

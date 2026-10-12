@@ -1275,7 +1275,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           className={
                             n.probe.netflix.status === "unlocked"
                               ? "font-medium text-ok"
-                              : n.probe.netflix.status === "idc"
+                              : n.probe.netflix.status === "idc" ||
+                                  n.probe.netflix.status === "web" ||
+                                  n.probe.netflix.status === "app"
                                 ? "font-medium text-warn"
                                 : n.probe.netflix.status === "blocked"
                                   ? "font-medium text-destructive"
@@ -1286,13 +1288,20 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           {/* ⚠️ **四档** ✓（用户定"甲" ✓）：`idc` = 解锁、但被识别成**机房** ✓ ——
                               它与"解锁"不是一回事 ✓（机房 IP 在很多服务上吃亏 ✓），
                               也与"未解锁"不同 ✓ ⇒ 必须单独说 ✓✗（否则它会落进"没读明白" ✓ = 又一个假信息 ✓）。 */}
+                          {/* ⚠️ **六档** ✓：`idc` = 解锁但被识别成机房 ✓；`web` / `app` =
+                              只通一边 ✓（ChatGPT 会分别探 API 与 iOS 端 ✓）——
+                              它们**都必须单独说** ✗（否则会落进"没读明白" ✓ = 假信息 ✓）。 */}
                           {n.probe.netflix.status === "unlocked"
                             ? "解锁"
                             : n.probe.netflix.status === "idc"
                               ? "解锁（机房）"
-                              : n.probe.netflix.status === "blocked"
-                                ? "未解锁"
-                                : "没读明白"}
+                              : n.probe.netflix.status === "web"
+                                ? "仅网页可用"
+                                : n.probe.netflix.status === "app"
+                                  ? "仅 App 可用"
+                                  : n.probe.netflix.status === "blocked"
+                                    ? "未解锁"
+                                    : "没读明白"}
                         </span>
                         {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
                       </span>
@@ -1360,6 +1369,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <li>
                 <span className="text-muted-foreground/70">还没测过</span> —— 有能力、也允许了 ✓，
                 只是还没到它那一次（每 6 小时一次 ✓，各台按自己的时点错开 ✓）。
+              </li>
+              <li>
+                <span className="text-warn">解锁（机房）</span> · <span className="text-warn">仅网页可用</span> ·
+                <span className="text-warn">仅 App 可用</span> —— 这三种都是"**能用，但有限制**" ✓：
+                机房 IP 在很多服务上吃亏 ✓；后两种是**只通一边** ✓（例如网页能开、App 打不开 ✓）。
+                ⚠️ 它们既不是"解锁"也不是"未解锁" ✗ ⇒ 单独列出来 ✓，不合并 ✓。
               </li>
               <li>
                 结论**带时效** ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。
