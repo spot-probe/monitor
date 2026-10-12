@@ -1332,9 +1332,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                                 ? "仅网页可用"
                                 : n.probe.netflix.status === "app"
                                   ? "仅 App 可用"
-                                  : n.probe.netflix.status === "blocked"
-                                    ? "未解锁"
-                                    : "没读明白"}
+                                  : n.probe.netflix.status === "cn"
+                                    ? "中国区"
+                                    : n.probe.netflix.status === "noprem"
+                                      ? "可用·无会员"
+                                      : n.probe.netflix.status === "blocked"
+                                        ? "未解锁"
+                                        : "没读明白"}
                         </span>
                         {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
                       </span>
@@ -1410,6 +1414,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <span className="text-warn">仅 App 可用</span> —— 这三种都是"**能用，但有限制**" ✓：
                 机房 IP 在很多服务上吃亏 ✓；后两种是**只通一边** ✓（例如网页能开、App 打不开 ✓）。
                 ⚠️ 它们既不是"解锁"也不是"未解锁" ✗ ⇒ 单独列出来 ✓，不合并 ✓。
+              </li>
+              <li>
+                <span className="text-warn">中国区</span> · <span className="text-warn">可用·无会员</span> ——
+                这两档来自 YouTube ✓：前者是响应来自**中国版**（`www.google.cn` ✓）；后者是
+                "**视频能看，但 Premium 会员在这个国家买不到**" ✓ —— ⚠️ 它**能用** ✓，只是少一样东西 ✓
+                ⇒ 不要把它当成"没解锁" ✗。
               </li>
               <li>
                 结论**带时效** ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。

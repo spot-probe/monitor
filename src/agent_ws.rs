@@ -720,7 +720,11 @@ fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
     // ⚠️ **六档** ✓（用户定"甲" ✓）：`web` = **网页能用、App 不行** ✓；
     // `app` = **反过来** ✓（两者来自 ChatGPT 那一套探测 ✓ —— 它分别探 API 与 iOS 端 ✓）。
     // ⚠️ 这两档既不是"解锁"也不是"未解锁" ✗ ⇒ 必须单独存在 ✓（合并任何一边都是丢信息 ✓）。
-    const STATUSES: [&str; 6] = ["unlocked", "blocked", "unknown", "idc", "web", "app"];
+    // ⚠️ **八档** ✓：新加的两个来自 YouTube ✓（用户定"甲" ✓ —— 与前三次同一个取舍 ✓）：
+    // `cn` = 响应里出现 `www.google.cn` ✓（YouTube 在中国那一档 ✓）；
+    // `noprem` = "Premium is not available in your country" ✓
+    // ⇒ "**YouTube 能用，但 Premium 在这个国家买不到**" ✓✓（又一个"部分可用" ✓）。
+    const STATUSES: [&str; 8] = ["unlocked", "blocked", "unknown", "idc", "web", "app", "cn", "noprem"];
 
     // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
     let raw = serde_json::to_string(params).ok()?;
@@ -1483,6 +1487,24 @@ mod tests {
         // 而六档之外的东西**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
         for bad in ["partial", "web_only", "desktop"] {
             assert_eq!(sanitize_probe(&json!({"chatgpt": {"status": bad}})), None, "{bad} 不该被收 ✓");
+        }
+    }
+    /// ⭐ YouTube 带进来的两档 ✓✓（用户定"甲" ✓）：
+    /// `cn` = 响应里出现 `www.google.cn` ✓（YouTube 在中国那一档 ✓）；
+    /// `noprem` = "**能用，但 Premium 在这个国家买不到**" ✓✓ ——
+    /// ⚠️ 合并进"解锁"会让"能用但买不到会员"看起来完全正常 ✓✗（而那是要付费的用户最关心的一条 ✓）。
+    #[test]
+    fn the_youtube_tiers_survive_the_whitelist() {
+        for bad in ["cn", "noprem"] {
+            assert_eq!(
+                sanitize_probe(&json!({"youtube": {"status": bad, "region": "JP"}})),
+                Some(json!({"youtube": {"status": bad, "region": "JP"}})),
+                "{bad} 必须被原样收下 ✓"
+            );
+        }
+        // 八档之外的东西仍然要被丢掉 ✓
+        for bad in ["premium", "china", "nopremium"] {
+            assert_eq!(sanitize_probe(&json!({"youtube": {"status": bad}})), None, "{bad} 不该被收 ✓");
         }
     }
 }
