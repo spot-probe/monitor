@@ -964,8 +964,8 @@ function UpgradeButton({ node }: { node: Node }) {
           <DialogHeader>
             <DialogTitle>让 {node.name} 升级到最新 agent？</DialogTitle>
             <DialogDescription>
-              hub 会把最新发布版的二进制推给它，它**先验签**（公钥编译在 agent 里）。
-              验过才会替换自身的二进制并重启；<strong>180 秒</strong>内连不回 hub 就自动回滚到当前这一版。
+              hub 会把最新发布版的二进制推给它，它<span className="font-medium">先验签</span>（公钥编译在 agent 里）。
+              验过才会替换自身的二进制并重启；<span className="font-medium">180 秒</span>内连不回 hub 就自动回滚到当前这一版。
               结论会显示在「版本」那一列。
             </DialogDescription>
           </DialogHeader>
@@ -1477,8 +1477,8 @@ function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) 
           <DialogHeader>
             <DialogTitle>依次升级 {todo.length} 台？</DialogTitle>
             <DialogDescription>
-              一台一台下发，**任何一台失败就停下来** —— 剩下的不动，你可以先查那一台。
-              每台都会先验签，验过才替换自身的二进制并重启；<strong>180 秒</strong>内连不回 hub 就自动回滚。
+              一台一台下发，<span className="font-medium">任何一台失败就停下来</span> —— 剩下的不动，你可以先查那一台。
+              每台都会先验签，验过才替换自身的二进制并重启；<span className="font-medium">180 秒</span>内连不回 hub 就自动回滚。
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-48 space-y-1 overflow-auto text-xs">
@@ -1492,7 +1492,7 @@ function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) 
           {line && <p className="text-xs text-muted-foreground">{line}</p>}
           {fail && (
             <p className="text-xs text-danger-fg">
-              停在第 <strong>{fail.name}</strong>：{fail.why}（其余未动）
+              停在第 <span className="font-medium">{fail.name}</span>：{fail.why}（其余未动）
             </p>
           )}
           <DialogFooter>
@@ -2885,7 +2885,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 						<div className="flex flex-wrap items-baseline justify-between gap-x-3">
 							<h4 className="flex items-center gap-1.5 text-sm font-semibold">
 								延迟分布
-								<Help>按**时间 × 延迟区间**统计每一格里有多少个样本。横轴是时间（与上面那张图同一个窗口）。纵轴是这个窗口内的**真实毫秒区间** —— 由数据的分位数算出，不是写死的档位（延迟的"正常"取决于目标）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里：它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
+								<Help>按<span className="font-medium">时间 × 延迟区间</span>统计每一格里有多少个样本。横轴是时间（与上面那张图同一个窗口）。纵轴是这个窗口内的<span className="font-medium">真实毫秒区间</span> —— 由数据的分位数算出，不是写死的档位（延迟的"正常"取决于目标）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里：它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
 							</h4>
 						</div>
 						<div className="mt-2 rounded-lg bg-muted p-3">
