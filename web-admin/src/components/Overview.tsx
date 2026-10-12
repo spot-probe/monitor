@@ -1148,9 +1148,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           Tor 是本地清单（默认有效 · 不外发）✓ —— 两者说的可能是同一件事，但**不是同一条路** ✓。 */}
       {page === "quality" ? (
         <div className="space-y-4">
-          <div className="overflow-x-auto rounded-lg border border-border">
+          {/* ⚠️ **白底是这一处改动的全部要点** ✗✓：行分隔线**本来就有** ✓（每行都带 `border-b` ✓），
+                但卡片**没有自己的底色** ✗ ⇒ 页面灰底透出来 ✓ ⇒ 整张表看起来是"浮着的行" ✓✗，
+                而不是 p2 那种"一份白底列表" ✓✓。 */}
+            <div className="overflow-x-auto rounded-lg border border-border bg-background">
             <div className="min-w-[68rem]">
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
                 <span>IP 与归属</span>
                 <span>地理位置</span>
@@ -1261,7 +1264,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           {n.risk.label ?? "未分档"}
                         </span>
                       ) : (
-                        <Badge variant="outline" className="font-normal text-muted-foreground">
+                        <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                         未启用或未查到
                       </Badge>
                       )}
@@ -1277,11 +1280,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           Tor 出口
                         </Badge>
                       ) : n.tor_exit === false ? (
-                        <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                        <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                           非 Tor
                         </Badge>
                       ) : (
-                        <Badge variant="outline" className="font-normal text-muted-foreground/50">
+                        <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground/70">
                           Tor 未知
                         </Badge>
                       )}
@@ -1918,7 +1921,7 @@ function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
               {r.n.group ? <Badge variant="secondary" className="font-normal">{r.n.group}</Badge> : <span className="text-muted-foreground">—</span>}
             </TableCell>
             <TableCell className="py-2 font-mono text-xs text-muted-foreground">
-              {r.n.price > 0 ? `${r.n.price} ${r.n.currency} / ${r.n.billing_cycle}` : <Badge variant="outline" className="font-normal text-muted-foreground">未设置</Badge>}
+              {r.n.price > 0 ? `${r.n.price} ${r.n.currency} / ${r.n.billing_cycle}` : <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">未设置</Badge>}
             </TableCell>
             <TableCell className="py-2 text-right font-mono tabular-nums font-medium">
               {r.monthly === null ? <span className="text-muted-foreground">—</span> : cny(r.monthly)}
