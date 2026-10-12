@@ -1160,7 +1160,15 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
                 >
                   <div className="min-w-0 space-y-0.5">
-                    <div className="truncate font-medium">{n.name}</div>
+                    <div className="flex items-center gap-1.5">
+                    <div className="min-w-0 truncate font-medium">{n.name}</div>
+                    {/* 分组徽标 ✓ —— **逐字照抄**节点列表那套 ✓（用户指的第二张图 ✓）：同一套语汇 ✓，不新造样式 ✓。 */}
+                    {n.group ? (
+                      <Badge variant="outline" className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground">
+                        {n.group}
+                      </Badge>
+                    ) : null}
+                  </div>
                     {/* ⭐ **"为什么没有"第一次看得见** ✓（同事 mock 里那句的位置 ✓）——
                         此前只有悬停 title ✓✗，而你明确说过不该只活在悬停里 ✓。
                         ⚠️ 措辞**只说事实** ✗：面板分不清"没查过 / 查了没收录 / 库没配" ✓
@@ -1239,19 +1247,29 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           {n.risk.label ?? "未分档"}
                         </span>
                       ) : (
-                        <span className="text-muted-foreground">未启用或未查到</span>
+                        <Badge variant="outline" className="font-normal text-muted-foreground">
+                        未启用或未查到
+                      </Badge>
                       )}
                     </div>
                     {/* 第二行 = Tor 出口 ✓（**本地清单** ✓ 与上面的在线库**不是一条路** ✓ —— 表下声明说清了 ✓）。
                         ⚠️ **三种情形都保留** ✗：是 ⇒ 高亮 ✓ · 否 ⇒ 很淡 ✓ · 未知 ⇒ 明说"未知" ✓
                         （同事建议"否就不展示" ✓ —— 但那样"未知"会跟着消失 ✗✓，而那是两件事 ✓）。 */}
                     <div className="truncate text-xs">
+                      {/* Tor 也做成徽标 ✓（与第二张图里「可远程升级」那个灰胶囊同形 ✓）——
+                          ⚠️ 而**三种情形仍然分开写** ✗✓（是 / 否 / 未知 ✓）：原判断一字未改 ✓，只换外观 ✓。 */}
                       {n.tor_exit === true ? (
-                        <span className="font-medium text-destructive">Tor 出口</span>
+                        <Badge variant="outline" className="border-transparent bg-destructive/10 font-medium text-destructive">
+                          Tor 出口
+                        </Badge>
                       ) : n.tor_exit === false ? (
-                        <span className="text-muted-foreground/50">非 Tor 出口</span>
+                        <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                          非 Tor
+                        </Badge>
                       ) : (
-                        <span className="text-muted-foreground/40">Tor 未知</span>
+                        <Badge variant="outline" className="font-normal text-muted-foreground/50">
+                          Tor 未知
+                        </Badge>
                       )}
                     </div>
                   </div>
