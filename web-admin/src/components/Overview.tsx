@@ -1214,7 +1214,15 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           {flag(n.quality?.country) ? flag(n.quality?.country) + " " : null}
                           <span className="font-medium text-foreground">{n.quality?.city ?? ""}</span>
                           {n.quality?.city && n.quality?.country ? <span className="text-muted-foreground"> · </span> : null}
-                          <span className="text-muted-foreground">{n.quality?.country ?? ""}</span>
+                          {/* 国家做成胶囊 ✓（用户选"甲" ✓）—— 用 `bg-tag` ✓ 与 p2 里分组徽标**同一套** ✓✓。 */}
+                          {n.quality?.country ? (
+                            <Badge
+                              variant="outline"
+                              className="shrink-0 border-transparent bg-tag font-normal text-tag-foreground"
+                            >
+                              {n.quality.country}
+                            </Badge>
+                          ) : null}
                         </>
                       ) : (
                         <span className="text-muted-foreground/40" title="未查到或未启用">—</span>
@@ -1286,7 +1294,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <div className="min-w-0 space-y-0.5">
                   <div className="truncate text-xs">
                     {n.stream_probe === false ? (
-                      <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                      <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                         版本不支持
                       </Badge>
                     ) : n.allow_ip_quality === false ? (
@@ -1297,17 +1305,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       <span>
                         Netflix{" "}
                         <span
-                          className={
+                          className={`inline-flex items-baseline rounded-full px-2 py-0.5 text-xs ${
                             n.probe.netflix.status === "unlocked"
-                              ? "font-medium text-ok"
+                              ? "bg-ok/10 font-medium text-ok"
                               : n.probe.netflix.status === "idc" ||
                                   n.probe.netflix.status === "web" ||
                                   n.probe.netflix.status === "app"
-                                ? "font-medium text-warn"
+                                ? "bg-warn/10 font-medium text-warn"
                                 : n.probe.netflix.status === "blocked"
-                                  ? "font-medium text-destructive"
-                                  : "text-muted-foreground"
-                          }
+                                  ? "bg-destructive/10 font-medium text-destructive"
+                                  : "bg-muted text-muted-foreground"
+                          }`}
                         >
                           {/* ⚠️ 面板只说**自己的话** ✓（线上报文仍是 `unlocked` 等 ✓ —— 那套字符串由 hub 的测试钉住 ✓） */}
                           {/* ⚠️ **四档** ✓（用户定"甲" ✓）：`idc` = 解锁、但被识别成**机房** ✓ ——
@@ -1331,7 +1339,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
                       </span>
                     ) : (
-                      <Badge variant="outline" className="font-normal text-muted-foreground/70">
+                      <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                         还没测过
                       </Badge>
                     )}
