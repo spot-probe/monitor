@@ -633,16 +633,19 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const chips = !overflow || topGroups.includes(group) ? topGroups : group ? [...topGroups.slice(0, 2), group] : topGroups
   // 顶层视图。**故意不叫 `tab`**：趋势卡内部已经用 `tab`/`setTab` 表示"流量/带宽/资源"，
   // 同名会撞车。选择记在 localStorage，和 `overview-auto` 同一个习惯。
-  // 视图选择存在 localStorage ✓（**不经 hub** ✓ —— 它是"我这台浏览器看哪一栏"的偏好 ✓，
+  // ⚠️ **视图选择现在不存了** ✗（原来是存的 ✓ —— 见下面那段说明 ✓）。
   // 不是机队级的设置 ✓）。加了第三项之后，读取要从**两路**改成**三路** ✗：
   // 原来写的是 `=== "cost" ? "cost" : "resource"` ✓ ⇒ 第三项会被**静默读成 resource** ✓✗。
-  const [page, setPage] = useState<"resource" | "cost" | "quality">(() => {
-    const saved = localStorage.getItem("overview-page")
-    return saved === "cost" || saved === "quality" ? saved : "resource"
-  })
+  // ⚠️⚠️ **不再记住视图** ✗（用户要求 ✓："点进来是默认'资源'视图" ✓）——
+  // 原来是记在 `localStorage` 里的 ✓ ⇒ 于是"默认值"其实**只在第一次生效** ✗：
+  // 谁点过一次「IP 质量」✓，以后每次进来都落在那一页 ✓✗（用户遇到的正是这个 ✓ ——
+  // 而代码里的默认值**本来就是"资源"** ✓，所以问题从来不在默认值上 ✓）。
+  // ⇒ 去掉记忆 ✓：每次进总览都从「资源」开始 ✓✓（想切随时切 ✓，只是不留痕 ✓）。
+  // ⚠️ 而这是**取舍** ✓：常看「成本」的人每次要多点一下 ✗ ——
+  // 若以后觉得烦 ✓，正确做法是**记住但把默认值的含义说清** ✓，而不是现在这样悄悄记着 ✓。
+  const [page, setPage] = useState<"resource" | "cost" | "quality">("resource")
   const pickPage = (p: "resource" | "cost" | "quality") => {
     setPage(p)
-    localStorage.setItem("overview-page", p)
   }
   const nodes = group ? allNodes.filter((n) => n.group === group) : allNodes
 
