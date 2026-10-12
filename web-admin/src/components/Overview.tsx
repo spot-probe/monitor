@@ -1151,7 +1151,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           {/* ⚠️ **白底是这一处改动的全部要点** ✗✓：行分隔线**本来就有** ✓（每行都带 `border-b` ✓），
                 但卡片**没有自己的底色** ✗ ⇒ 页面灰底透出来 ✓ ⇒ 整张表看起来是"浮着的行" ✓✗，
                 而不是 p2 那种"一份白底列表" ✓✓。 */}
-            <div className="overflow-x-auto rounded-lg border border-border bg-background">
+            {/* ⚠️⚠️ **必须是 `bg-card`，不是 `bg-background`** ✗✗（我第一版就写错了 ✓）：
+                这个主题里 `--background` = `#f7f8fa`（**就是那片浅灰** ✗）·
+                `--card` = `#ffffff`（**白** ✓✓）—— 所以"加了底色却没变化" ✓✓。
+                本仓的卡片一律用 `bg-card` ✓（`Login.tsx` 就是这么写的 ✓）。 */}
+            <div className="overflow-x-auto rounded-lg border border-border bg-card">
             <div className="min-w-[68rem]">
               <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
@@ -1409,7 +1413,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               </li>
               <li>
                 <span className="text-muted-foreground/70">版本不支持</span> —— 它的 agent 还没有探测能力 ✓，
-                升级 agent 之后才会有结果 ✓（在那之前**等多久都不会有** ✓）。
+                升级 agent 之后才会有结果 ✓（在那之前等多久都不会有 ✓）。
               </li>
               <li>
                 <span className="text-muted-foreground/70">还没测过</span> —— 有能力、也允许了 ✓，
@@ -1417,19 +1421,19 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               </li>
               <li>
                 <span className="text-warn">解锁（机房）</span> · <span className="text-warn">仅网页可用</span> ·
-                <span className="text-warn">仅 App 可用</span> —— 这三种都是"**能用，但有限制**" ✓：
-                机房 IP 在很多服务上吃亏 ✓；后两种是**只通一边** ✓（例如网页能开、App 打不开 ✓）。
+                <span className="text-warn">仅 App 可用</span> —— 这三种都是"能用，但有限制" ✓：
+                机房 IP 在很多服务上吃亏 ✓；后两种是只通一边 ✓（例如网页能开、App 打不开 ✓）。
                 ⚠️ 它们既不是"解锁"也不是"未解锁" ✗ ⇒ 单独列出来 ✓，不合并 ✓。
               </li>
               <li>
                 <span className="text-warn">中国区</span> · <span className="text-warn">可用·无会员</span> ——
-                这两档来自 YouTube ✓：前者是响应来自**中国版**（`www.google.cn` ✓）；后者是
-                "**视频能看，但 Premium 会员在这个国家买不到**" ✓ —— ⚠️ 它**能用** ✓，只是少一样东西 ✓
+                这两档来自 YouTube ✓：前者是响应来自中国版（`www.google.cn` ✓）；后者是
+                "视频能看，但 Premium 会员在这个国家买不到" ✓ —— ⚠️ 它能用 ✓，只是少一样东西 ✓
                 ⇒ 不要把它当成"没解锁" ✗。
               </li>
               <li>
-                结论**带时效** ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。
-                探测**从节点自己发出** ✓（hub 代不了 ✓），而**失败不等于未解锁** ✓ ——
+                结论带时效 ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。
+                探测从节点自己发出 ✓（hub 代不了 ✓），而失败不等于未解锁 ✓ ——
                 取不到页面时不会报结论，你会看到上一次的结论与它的年龄 ✓。
               </li>
             </ul>
