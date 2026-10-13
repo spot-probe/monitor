@@ -1820,39 +1820,78 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               {expiringNodes.map((n) => {
                 const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
                 const asking = renewAsk === n.id
+                const days = daysUntil(n.expires_at)
                 return (
-                  <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
-                    <span className="font-medium">{n.name}</span>
-                    <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                    <Expiry date={n.expires_at} />
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {next ? `续一期 \u21d2 ${next}` : "未填计费周期"}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant={asking ? "default" : "outline"}
-                      disabled={!next || renewing}
-                      onClick={() => {
-                        if (!next) return
-                        if (!asking) {
-                          setRenewAsk(n.id)
-                          return
-                        }
-                        setRenewing(true)
-                        api(`/nodes/${n.id}`, {
-                          method: "PUT",
-                          body: JSON.stringify(changes(n, { expires_at: next })),
-                        })
-                          .then(() => {
-                            setRenewAsk(null)
-                            refresh()
+                  // ⚠️ **左信息 / 右操作 两栏** ✗✓（前端同事第 ② 条 ✓ —— 也是这里最要紧的一条 ✓）：
+                  // 原来是 `flex-wrap` ✓ ⇒ 东西一多，"我已续费"就**被挤到第二行** ✓✗
+                  // （他截图里正是那样 ✓）。⚠️ 而**不套小卡片** ✗：本仓那张姊妹弹窗
+                  // （"某天到期明细" ✓ 就是我们复用它的那张 ✓）用的是 `divide-y` ✓
+                  // ⇒ 保持**同一套语汇** ✓，但把行距加大 ✓（"呼吸感"那句他说得对 ✓）。
+                  <div key={n.id} className="flex items-center justify-between gap-3 py-3.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium">{n.name}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                      </div>
+                      {/* 第二行 = 日期与"点了会变成什么" ✓ —— 主次分明 ✓ 且**不用代码日志的写法** ✓ */}
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                        <span className="tnum">{n.expires_at || "没有到期日"}</span>
+                        {next ? (
+                          <>
+                            {" · 续至 "}
+                            <span className="tnum font-medium text-foreground">{next}</span>
+                          </>
+                        ) : (
+                          " · 周期未设置"
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1.5">
+                      {/* ⚠️ **紧急程度分级** ✓（同事第 ③ 条 ✓）—— 但**颜色走 token** ✗✗：
+                          他写的是 `bg-rose-50 text-rose-600` ✓ 那是写死颜色 ✓
+                          ⇒ 本仓一律 `bg-destructive/10` / `bg-warn/10` ✓（换主题不会漏 ✓）。 */}
+                      {days !== null ? (
+                        <Badge
+                          variant="outline"
+                          className={`font-normal ${
+                            days <= 3
+                              ? "border-transparent bg-destructive/10 text-destructive"
+                              : "border-transparent bg-warn/10 text-warn"
+                          }`}
+                        >
+                          {days < 0 ? `已过期 ${-days} 天` : `${days} 天后到期`}
+                        </Badge>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        className="h-8 text-xs"
+                        variant={asking ? "default" : "outline"}
+                        disabled={!next || renewing}
+                        onClick={() => {
+                          if (!next) return
+                          if (!asking) {
+                            setRenewAsk(n.id)
+                            return
+                          }
+                          setRenewing(true)
+                          api(`/nodes/${n.id}`, {
+                            method: "PUT",
+                            body: JSON.stringify(changes(n, { expires_at: next })),
                           })
-                          .catch(() => {})
-                          .finally(() => setRenewing(false))
-                      }}
-                    >
-                      {asking ? "确认续期？" : "我已续费"}
-                    </Button>
+                            .then(() => {
+                              setRenewAsk(null)
+                              refresh()
+                            })
+                            .catch(() => {})
+                            .finally(() => setRenewing(false))
+                        }}
+                      >
+                        {/* ⚠️ **不可用态直接写在按钮上** ✗✓（同事第 ④ 条 ✓）——
+                            原来是"禁用的按钮 + 旁边飘一句说明" ✓✗ ⇒ 两处说一件事 ✓。
+                            ⚠️ 没写成"去补全周期"（那需要一个跳转 ✗，而这里没有路由 ✓）。 */}
+                        {next ? (asking ? "确认续期？" : "我已续费") : "未配置周期"}
+                      </Button>
+                    </div>
                   </div>
                 )
               })}
