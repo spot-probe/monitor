@@ -661,7 +661,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const loadProbe = useCallback((node: Node) => {
     setProbeRows(null)
     setProbeErr(false)
-    probeHistory(node.id, 14)
+    probeHistory(node.id, 30)
       .then((r) => setProbeRows(r.rows))
       .catch(() => setProbeErr(true))
   }, [])
@@ -1784,7 +1784,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               ⚠️ 组件本身是 `left-[50%] translate-x-[-50%]` ✓ ⇒ 居中不用管 ✓，只管宽度 ✓。 */}
           <DialogContent
             className="max-h-[85vh] overflow-y-auto"
-            style={{ width: "min(96vw, 1100px)", maxWidth: "none" }}
+            // ⚠️ 宽度按**点阵的真实需求**算 ✓：120 格 × 9px = 1080 ✓ + 服务名 112 ✓
+            // + 状态徽章 80 ✓ + 内边距与列间距 ⇒ 约 1350px ✓ ⇒ 所以上限提到 1320 ✓
+            //（再窄就会把点挤出容器 ✓✗ —— 而点的宽度是固定的 ✓，挤不掉 ✓）。
+            style={{ width: "min(96vw, 1320px)", maxWidth: "none" }}
           >
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
@@ -1836,7 +1839,7 @@ const PROBE_LABELS: Record<string, string> = {
 const PROBE_STEP = 6 * 3600
 // ⚠️ **14 天**（用户要求"不需要显示这么多天" ✓）—— 14 × 4 = **56 格** ✓。
 // ⚠️ 而 hub 那边的**保留仍是 30 天** ✓（数据留着 ✓，只是这里少画一些 ✓ —— 想看更多时改这一个数即可 ✓）。
-const PROBE_SLOTS = 14 * 4
+const PROBE_SLOTS = 30 * 4
 
 /// 一格的观感 ✓（四种色沿用本仓 `riskTone` 那一套 ✓，不发明 ✗）。
 /// ⚠️ 只给"值得看的"上色 ✗：正常解锁是**常态** ✓ ⇒ 淡绿 ✓；有问题的才抢眼 ✓✓。
@@ -1940,8 +1943,8 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
         <span className="w-28 shrink-0" />
         {/* ⚠️ **相对时间** ✓（同事第 ④ 条 ✓）：绝对时间又长又死板 ✓✗ ——
             精确到秒的那一刻留给悬停 ✓（每个点本来就有 title ✓✓）。 */}
-        <span>14 天前</span>
-        <span className="mx-auto">7 天前</span>
+        <span>30 天前</span>
+        <span className="mx-auto">15 天前</span>
         <span>今天</span>
       </div>
       {order.map(({ sv, m, last }) => (
@@ -1974,13 +1977,13 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                     // 而 56 格时每列宽约 15px ✓ ⇒ rounded-full 在 ~15×14 上就是个**椭圆** ✓✗。
                     // ⇒ 固定 9×12 ✓ + rounded-[3px] ✓（四角一点弧度 ✓）+ **居中** ✓
                     //（不居中的话它会被拉回满列宽 ✓✗，又变成椭圆 ✓）。
-                    className={`mx-auto h-[10px] w-[6px] rounded-[2px] ${probeTone(r.status)}`}
+                    className={`mx-auto h-[15px] w-[9px] rounded-[3px] ${probeTone(r.status)}`}
                   />
                 ) : (
                   <span
                     key={k}
                     title={`${fmt(at)} · 没有记录`}
-                    className="mx-auto h-[10px] w-[6px] rounded-[2px] bg-muted/60"
+                    className="mx-auto h-[15px] w-[9px] rounded-[3px] bg-muted/60"
                   />
                 )
               })}
