@@ -705,6 +705,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const [renewOpen, setRenewOpen] = useState(false)
   const [renewAsk, setRenewAsk] = useState<number | null>(null)
   const [renewing, setRenewing] = useState(false)
+  // ⭐ 批量续期：**哪一个分组正在等确认** ✓（同一时刻只可能有一个 ✓）
+  const [bulkAsk, setBulkAsk] = useState<string | null>(null)
   // ⚠️ **"今天"必须按本地日历天取** ✗ —— 本文件里归组那张日历就是这么做的 ✓
   // （绝不能用 `toISOString()` ✗：那是 UTC ✓，在东八区会差一天 ✓✗）。
   const todayLocal = (() => {
@@ -1843,24 +1845,70 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 {
                   key: "soon",
                   title: "临近到期",
-                  hint: "还没到期。续一期从**原到期日**往后接，周期不会漂。",
+                  hint: "还没到期。续一期从原到期日往后接，周期不会漂。",
                   items: upcomingNodes,
                 },
                 {
                   key: "past",
                   title: "已过期",
-                  hint: "已经过期（但 hub 还留着它）。续一期从**今天**起算。",
+                  hint: "已经过期（但 hub 还留着它）。续一期从今天起算。",
                   items: overdueNodes,
                 },
               ].map((sec) => (
                 <div key={sec.key}>
                   {/* ⭐ **分组小字** ✓（用户要求 ✓）—— 它**同时**就是那条分隔 ✓✓：
                       上面一组的最后一行与它之间，靠 `divide-y` 自然有一条线 ✓。 */}
-                  <div className="flex items-baseline gap-2 py-2.5">
+                  {/* ⚠️ 这一行**要换行排** ✗✓（加了按钮之后一行放不下 ✓）：
+                      小字可能很长 ✓ ⇒ 让按钮 `ml-auto` 靠右 ✓，窄屏时自然折到第二行 ✓。 */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-2.5">
                     <span className="text-xs font-medium text-foreground">{sec.title}</span>
                     <span className="text-xs text-muted-foreground">
                       {sec.items.length} 台 · {sec.hint}
                     </span>
+                    {/* ⭐ **分组粒度的一键续费** ✓✓（用户要求 ✓）——
+                        ⚠️⚠️ 它**只算能续的** ✗✗：认不出周期或一次性的那些**必须排除** ✓
+                        ⇒ 按钮上的台数就是"**这次会改几台**" ✓✓（不是组里的总台数 ✓✗）。
+                        ⚠️ 同样是**两步确认** ✓（与单台那个一致 ✓），且**逐台串行** ✓ ——
+                        并发的 PUT 既没必要 ✓ 也不好排查 ✓。 */}
+                    {(() => {
+                      const renewable = sec.items.filter(
+                        (n) => renewedExpiry(n.expires_at, n.billing_cycle, todayLocal) !== null,
+                      )
+                      if (renewable.length === 0) return null
+                      const asking = bulkAsk === sec.key
+                      return (
+                        <Button
+                          size="sm"
+                          variant={asking ? "default" : "outline"}
+                          className="ml-auto h-7 text-xs"
+                          disabled={renewing}
+                          onClick={async () => {
+                            if (!asking) {
+                              setBulkAsk(sec.key)
+                              return
+                            }
+                            setRenewing(true)
+                            for (const n of renewable) {
+                              const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
+                              if (!next) continue
+                              try {
+                                await api(`/nodes/${n.id}`, {
+                                  method: "PUT",
+                                  body: JSON.stringify(changes(n, { expires_at: next })),
+                                })
+                              } catch {
+                                // ⚠️ 单台失败**不打断其余的** ✗✓ —— 一台上报异常不该让整批停下 ✓
+                              }
+                            }
+                            setRenewing(false)
+                            setBulkAsk(null)
+                            refresh()
+                          }}
+                        >
+                          {asking ? `确认续 ${renewable.length} 台？` : `全部续期（${renewable.length} 台）`}
+                        </Button>
+                      )
+                    })()}
                   </div>
                   {sec.items.map((n) => {
                     const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
