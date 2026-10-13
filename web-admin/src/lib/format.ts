@@ -83,6 +83,36 @@ export function cycleMonths(cycle: string): number {
 }
 
 /** The unit the billing form's cycle controls offer. */
+/**
+ * ⭐ **续一期之后的到期日** ✓✓（面板"我已续费"那个按钮用它 ✓）。
+ *
+ * ⚠️ 基数 = **max(原到期日, 今天)** ✓（维护者定的规则 ✓）：
+ *   未到期 ⇒ 从**原到期日**往后接 ✓（周期不漂 ✓）；
+ *   已过期 ⇒ 从**今天**起算 ✓（它确实就是"今天才续的" ✓）。
+ *   ⇒ 不这么做的话 ✅ 会出现"点了续费，面板还红着" ✗✗（已过期那台尤其明显 ✓）。
+ *
+ * ⚠️ **能不能续**由 `cycleMonths` 决定 ✓：它给 `0`（一次性 ✓）或 `NaN`（认不出 ✓）
+ *   ⇒ 一律返回 `null` ✓ ⇒ 调用方据此**禁用按钮** ✓（"加一期"长度未知时不能猜 ✓✗）。
+ *
+ * ⚠️ **全程 UTC** ✓：只按"年月日"做算术 ✓，绝不让本机时区参与 ✓✗
+ *   （否则跨时区会算出差一天 ✓ —— 与日期字符串"不解析"的那条老规矩同源 ✓）。
+ * ⚠️ **月末要夹回** ✗✗：1 月 31 日 + 1 个月 ⇒ **2 月 28 日** ✓（不是 3 月 3 日 ✓）
+ *   —— 这是日期算术里最经典的那个坑 ✓。
+ */
+export function renewedExpiry(expiresAt: string | null, cycle: string, today: string): string | null {
+  const months = cycleMonths(cycle)
+  if (!Number.isFinite(months) || months <= 0) return null
+  const old = (expiresAt ?? "").slice(0, 10)
+  // ⚠️ ISO 日期字符串可以直接比大小 ✓（"2026-10-01" > "2026-09-30" ✓）——
+  // 所以这里**不需要** Date ✓，也就不会引入时区 ✓✓。
+  const base = /^\d{4}-\d{2}-\d{2}$/.test(old) && old > today ? old : today
+  const [y, m, d] = base.split("-").map(Number)
+  const first = new Date(Date.UTC(y, m - 1 + months, 1))
+  const lastDay = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate()
+  first.setUTCDate(Math.min(d, lastDay))
+  return first.toISOString().slice(0, 10)
+}
+
 export type CycleUnit = "months" | "years" | "once"
 
 /**

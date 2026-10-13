@@ -4,7 +4,7 @@
 // read used to be rewritten into one the form invented, so saving a price turned
 // `weekly` into `yearly`. These are the pure functions the form now calls.
 import assert from "node:assert/strict"
-import { cycleFields, cycleOk, cyclePatch, cycleValue, money, versionBelow } from "./format.ts"
+import { cycleFields, cycleOk, cyclePatch, cycleValue, money, renewedExpiry, versionBelow } from "./format.ts"
 
 // A named length and a length without a name are both readable, and a whole
 // number of years is shown in years.
@@ -75,3 +75,24 @@ assert.equal(versionBelow("v1.0.0", "1.0.1"), true, "带 v 前缀也认")
 assert.equal(versionBelow("", "1.1.1"), false, "空版本不评判")
 assert.equal(versionBelow("dev", "1.1.1"), false, "畸形不评判")
 assert.equal(versionBelow("1.1.1-rc1", "1.1.1"), false, "预发布后缀不评判")
+
+// ⭐ `renewedExpiry` —— "我已续费"按一期往后推 ✓。维护者定的规则 ✓：
+// **未到期**从原到期日加一个周期 ✓；**已到期**从今天起加一个周期 ✓（= max(原到期日, 今天) ✓）。
+// ⚠️ 这一段是**真测试** ✓（`npm test` 会跑到 ✓）——
+// 我先前只把算术搬到 node 里跑了一遍就写"验证过" ✓✗，那不是"跑过代码本身" ✓，已改到这里 ✓。
+const TODAY = "2026-10-13"
+// 未到期：从原日期接 ✓（周期不漂 ✓）
+assert.equal(renewedExpiry("2026-11-15", "monthly", TODAY), "2026-12-15")
+assert.equal(renewedExpiry("2026-11-15", "yearly", TODAY), "2027-11-15")
+assert.equal(renewedExpiry("2026-11-15", "3m", TODAY), "2027-02-15")
+// 已到期：从**今天**起算 ✓（否则会出现"续了还红着" ✓✗）
+assert.equal(renewedExpiry("2026-09-20", "monthly", TODAY), "2026-11-13")
+assert.equal(renewedExpiry("2024-01-01", "yearly", TODAY), "2027-10-13")
+// 没有到期日 ⇒ 视为"从今天起" ✓
+assert.equal(renewedExpiry(null, "monthly", TODAY), "2026-11-13")
+// ⚠️⚠️ 月末必须**夹回** ✗✗ —— 1/31 + 1 月 = 2/28 ✓（不是 3/3 ✓）；闰年是 2/29 ✓
+assert.equal(renewedExpiry("2027-01-31", "monthly", TODAY), "2027-02-28")
+assert.equal(renewedExpiry("2028-01-31", "monthly", TODAY), "2028-02-29")
+// ⚠️ 认不出 / 一次性 ⇒ **不能续** ✓（调用方据此禁用按钮 ✓ —— 长度未知时不能猜 ✗）
+assert.equal(renewedExpiry("2026-11-15", "weekly", TODAY), null)
+assert.equal(renewedExpiry("2026-11-15", "once", TODAY), null)
