@@ -661,7 +661,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const loadProbe = useCallback((node: Node) => {
     setProbeRows(null)
     setProbeErr(false)
-    probeHistory(node.id, 30)
+    probeHistory(node.id, 14)
       .then((r) => setProbeRows(r.rows))
       .catch(() => setProbeErr(true))
   }, [])
@@ -1817,7 +1817,14 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         >
           {/* 宽度用 `min(96vw, 1100px)`（用户要求再放大一些）。
               120 格 × 最小 3px + 119 道缝 ≈ 600px，加服务名 112px 与徽章 96px ≈ 860px。 */}
-          <DialogContent className="max-h-[85vh] w-[min(96vw,1100px)] max-w-none overflow-y-auto">
+          {/* ⚠️⚠️ 宽度用**内联 style** ✓✓ —— 本仓 DialogContent 自带 `w-full` ✓，
+              而两个同属性的工具类谁生效看的是**样式表顺序** ✓✗（不是 className 里的顺序 ✓），
+              所以我先前加的 `w-[…]` 一直被压住 ✓✗。内联 style 不参与那场优先级游戏 ✓。
+              ⚠️ 组件本身是 `left-[50%] translate-x-[-50%]` ✓ ⇒ 居中不用管 ✓，只管宽度 ✓。 */}
+          <DialogContent
+            className="max-h-[85vh] overflow-y-auto"
+            style={{ width: "min(96vw, 1100px)", maxWidth: "none" }}
+          >
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
             </DialogHeader>
@@ -1866,7 +1873,9 @@ const PROBE_LABELS: Record<string, string> = {
   youtube: "YouTube",
 }
 const PROBE_STEP = 6 * 3600
-const PROBE_SLOTS = 30 * 4
+// ⚠️ **14 天**（用户要求"不需要显示这么多天" ✓）—— 14 × 4 = **56 格** ✓。
+// ⚠️ 而 hub 那边的**保留仍是 30 天** ✓（数据留着 ✓，只是这里少画一些 ✓ —— 想看更多时改这一个数即可 ✓）。
+const PROBE_SLOTS = 14 * 4
 
 /// 一格的观感 ✓（四种色沿用本仓 `riskTone` 那一套 ✓，不发明 ✗）。
 /// ⚠️ 只给"值得看的"上色 ✗：正常解锁是**常态** ✓ ⇒ 淡绿 ✓；有问题的才抢眼 ✓✓。
@@ -1945,8 +1954,8 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
         <span className="w-28 shrink-0" />
         {/* ⚠️ **相对时间** ✓（同事第 ④ 条 ✓）：绝对时间又长又死板 ✓✗ ——
             精确到秒的那一刻留给悬停 ✓（每个点本来就有 title ✓✓）。 */}
-        <span>30 天前</span>
-        <span className="mx-auto">15 天前</span>
+        <span>14 天前</span>
+        <span className="mx-auto">7 天前</span>
         <span>今天</span>
       </div>
       {order.map(({ sv, m, last }) => (
