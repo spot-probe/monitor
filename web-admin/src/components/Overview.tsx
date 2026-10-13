@@ -1787,7 +1787,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             // ⚠️ 宽度按**点阵的真实需求**算 ✓：120 格 × 9px = 1080 ✓ + 服务名 112 ✓
             // + 状态徽章 80 ✓ + 内边距与列间距 ⇒ 约 1350px ✓ ⇒ 所以上限提到 1320 ✓
             //（再窄就会把点挤出容器 ✓✗ —— 而点的宽度是固定的 ✓，挤不掉 ✓）。
-            style={{ width: "min(96vw, 1320px)", maxWidth: "none" }}
+            // ⚠️ 宽度按**实测需求**算 ✓（不拍脑袋 ✓）：120 格 × 9px = 1080 ✓
+            // + 119 道 1px 缝 = 119 ✓ ⇒ 点阵本身 **1199px** ✓
+            // + 服务名 112 ✓ + 状态徽章 80 ✓ + 内边距 ≈ **1423px** ⇒ 上限取 1440 ✓✓
+            style={{ width: "min(96vw, 1440px)", maxWidth: "none" }}
           >
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
@@ -1960,7 +1963,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
             <span className="text-muted-foreground/60">这个服务还没有记录</span>
           ) : (
             <div
-              className="grid min-w-0 flex-1 gap-0"
+              className="grid min-w-0 flex-1 gap-px"
               // 这里是点阵"消失"的根因：原来是 minmax(0, 1fr) —— `0` 表示"可以压到 0 宽"，
               // 缝（120 格 × 2px）再加上行尾 w-24 的徽章（96px）一挤，每一列就变成 0 像素，
               // 于是中间看起来什么都没有（而文字与徽章都正常）。给一个最小宽度：宁可横向滚动。
