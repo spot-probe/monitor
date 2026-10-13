@@ -1560,43 +1560,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       </div>
 
       {/* 某一天的到期明细：**弹窗**而不是在卡内向下展开 —— 展开会把卡片和同行另一张卡一起撑高。 */}
-      {/* ⭐ **点阵卡** ✓（这一版先把数据摆出来 ✓ —— 点阵本身下一步画 ✓）。
-          ⚠️ 三态都在这里 ✓，而**失败那一态必须有出口** ✗（一个"重试"按钮 ✓）。 */}
-      <Dialog
-        open={probeNode !== null}
-        onOpenChange={(v) => {
-          if (!v) {
-            setProbeNode(null)
-            setProbeRows(null)
-            setProbeErr(false)
-          }
-        }}
-      >
-        <DialogContent className="max-h-[70vh] max-w-lg overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
-          </DialogHeader>
-          {probeErr ? (
-            <div className="space-y-2 text-xs">
-              <p className="text-destructive">没能取到探测历史。</p>
-              <p className="text-muted-foreground">
-                这通常是网络或 hub 刚重启造成的——点下面重试一次即可。
-              </p>
-              <Button size="sm" variant="outline" onClick={() => probeNode && loadProbe(probeNode)}>
-                重试
-              </Button>
-            </div>
-          ) : probeRows === null ? (
-            <p className="text-xs text-muted-foreground">读取中…</p>
-          ) : probeRows.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
-            </p>
-          ) : (
-            <ProbeMatrix rows={probeRows} />
-          )}
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={pickedDay !== null} onOpenChange={(v) => !v && setPickedDay(null)}>
         <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
@@ -1840,6 +1803,43 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       ) : (
         <CostBlock nodes={allNodes} group={group} />
       )}
+        {/* ⭐ **点阵卡** ✓（这一版先把数据摆出来 ✓ —— 点阵本身下一步画 ✓）。
+            ⚠️ 三态都在这里 ✓，而**失败那一态必须有出口** ✗（一个"重试"按钮 ✓）。 */}
+        <Dialog
+          open={probeNode !== null}
+          onOpenChange={(v) => {
+            if (!v) {
+              setProbeNode(null)
+              setProbeRows(null)
+              setProbeErr(false)
+            }
+          }}
+        >
+          <DialogContent className="max-h-[70vh] max-w-lg overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
+            </DialogHeader>
+            {probeErr ? (
+              <div className="space-y-2 text-xs">
+                <p className="text-destructive">没能取到探测历史。</p>
+                <p className="text-muted-foreground">
+                  这通常是网络或 hub 刚重启造成的——点下面重试一次即可。
+                </p>
+                <Button size="sm" variant="outline" onClick={() => probeNode && loadProbe(probeNode)}>
+                  重试
+                </Button>
+              </div>
+            ) : probeRows === null ? (
+              <p className="text-xs text-muted-foreground">读取中…</p>
+            ) : probeRows.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
+              </p>
+            ) : (
+              <ProbeMatrix rows={probeRows} />
+            )}
+          </DialogContent>
+        </Dialog>
     </div>
   )
 }
