@@ -1957,7 +1957,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
             <span className="text-muted-foreground/60">这个服务还没有记录</span>
           ) : (
             <div
-              className="grid min-w-0 flex-1 gap-[2px]"
+              className="grid min-w-0 flex-1 gap-px"
               // 这里是点阵"消失"的根因：原来是 minmax(0, 1fr) —— `0` 表示"可以压到 0 宽"，
               // 缝（120 格 × 2px）再加上行尾 w-24 的徽章（96px）一挤，每一列就变成 0 像素，
               // 于是中间看起来什么都没有（而文字与徽章都正常）。给一个最小宽度：宁可横向滚动。
@@ -1974,13 +1974,13 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                     // 而 56 格时每列宽约 15px ✓ ⇒ rounded-full 在 ~15×14 上就是个**椭圆** ✓✗。
                     // ⇒ 固定 9×12 ✓ + rounded-[3px] ✓（四角一点弧度 ✓）+ **居中** ✓
                     //（不居中的话它会被拉回满列宽 ✓✗，又变成椭圆 ✓）。
-                    className={`mx-auto h-3 w-[9px] rounded-[3px] ${probeTone(r.status)}`}
+                    className={`mx-auto h-[15px] w-[9px] rounded-[3px] ${probeTone(r.status)}`}
                   />
                 ) : (
                   <span
                     key={k}
                     title={`${fmt(at)} · 没有记录`}
-                    className="mx-auto h-3 w-[9px] rounded-[3px] bg-muted/60"
+                    className="mx-auto h-[15px] w-[9px] rounded-[3px] bg-muted/60"
                   />
                 )
               })}
@@ -1990,9 +1990,9 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
               看历史图时，第一眼最想确认的其实是"**现在通不通**" ✓；
               此前六行全绿的时候，这一点根本看不出来 ✓✗。 */}
           {m === undefined ? (
-            <span className="w-24 shrink-0" />
+            <span className="w-20 shrink-0" />
           ) : last ? (
-            <Badge variant="outline" className={`w-24 shrink-0 justify-center border-transparent ${probeTone(last.status)} font-normal`}>
+            <Badge variant="outline" className={`w-20 shrink-0 justify-center border-transparent ${probeTone(last.status)} font-normal`}>
               {probeWord(last.status)}
             </Badge>
           ) : null}
