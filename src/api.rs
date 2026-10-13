@@ -1681,6 +1681,46 @@ pub struct AtRiskQuery {
     group: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ProbeHistoryQuery {
+    days: Option<i64>,
+}
+
+/// 一台节点的**探测历史** ✓✓（面板那张点阵用它 ✓）。
+///
+/// ⚠️ **鉴权照 `metrics` 抄** ✗✓：它是**按节点**的数据 ✓ ⇒ 用同一道 `readable` 检查 ✓
+///（公开页只看得到公开节点 ✓ —— 历史同样是"这台机器的信息" ✓，不该因为换了路由就漏掉 ✓）。
+/// ⚠️ **一台没探过的节点返回空数组** ✓✓（不是 404 ✗、也不是报错 ✓）——
+/// 前端要靠"空"画出空点阵 ✓，并说明"从某日起才有记录" ✓。
+/// ⚠️ `days` 上限 **30** ✓ —— 与保留策略**同一个数** ✓✓（要更多也没有了 ✓）。
+pub async fn probe_history(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(q): Query<ProbeHistoryQuery>,
+) -> Response {
+    let full = authed(&app, &headers);
+    if !readable(&app, full, id) {
+        return (StatusCode::UNAUTHORIZED, "sign-in required").into_response();
+    }
+    let days = q.days.unwrap_or(7).clamp(1, 30);
+    // ⚠️ `since` 在这里算 ✓（而不是让 db 层自己取时间 ✓ —— 那样这一层就没法测了 ✓✗）
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let since = now - days * 86_400;
+    let rows = app
+        .db
+        .probe_history(id, since)
+        .into_iter()
+        .map(|(service, status, region, at)| {
+            json!({ "service": service, "status": status, "region": region, "at": at })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "days": days, "since": since, "rows": rows })).into_response()
+}
+
 pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Json<Value> {
     let days = q.days.unwrap_or(7).clamp(1, 90);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);

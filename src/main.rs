@@ -564,6 +564,7 @@ async fn main() -> Result<()> {
         .route("/api/me", get(api::me))
         .route("/api/nodes", get(api::nodes))
         .route("/api/nodes/{id}/metrics", get(api::metrics))
+        .route("/api/nodes/{id}/probe-history", get(api::probe_history))
         .route("/api/ws", get(api::live_ws))
         .route("/api/themes/{short}/config", get(api::theme_config))
         // Sign-in.

@@ -2166,6 +2166,26 @@ impl Db {
         Ok(())
     }
 
+    /// 取一台节点的探测历史 ✓✓（点阵要用它 ✓）—— 只要 `since` 之后的行 ✓，按时间升序 ✓。
+    ///
+    /// ⚠️ **一台从没探过的节点返回空** ✓（而不是报错 ✓，也不是"没有这一台"✓✗）——
+    /// 面板要靠"空"来画出**一格都没有的点阵** ✓✓，并且据此说明"**从某日起才有记录**" ✓。
+    /// ⚠️ 返回 `(service, status, region, at)` ✓：面板要按服务分组成行 ✓，
+    /// 而**排序交给 SQL** ✓（面板不该再排一遍 ✓）。
+    pub fn probe_history(&self, id: i64, since: i64) -> Vec<(String, String, Option<String>, i64)> {
+        let conn = self.conn();
+        let mut stmt = match conn.prepare(
+            "SELECT service, status, region, at FROM probe_history
+             WHERE node_id=?1 AND at>=?2 ORDER BY at",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(rusqlite::params![id, since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
     pub fn quality_allowed(&self, id: i64) -> bool {
         self.conn()
             .query_row("SELECT allow_ip_quality <> 0 FROM node WHERE id=?1", [id], |r| r.get(0))
@@ -7081,5 +7101,60 @@ mod heatmap_tests {
             .query_row("SELECT COUNT(*) FROM probe_history WHERE at >= ?1", [cutoff], |r| r.get(0))
             .unwrap();
         assert_eq!(fresh, 2, "30 天内的两行都该留着 ✓（第 1 步那行 + 刚写那行 ✓）");
+    }
+    /// ⭐ **没探过的节点返回空** ✓✓（不是报错 ✓、也不是"节点不存在" ✓）——
+    /// 面板要靠它画出**一格都没有的点阵** ✓，并据此说明"从某日起才有记录" ✓。
+    /// ⚠️ 这与"探测失败"是两件事 ✗：失败 ⇒ **不写行** ✓（与 `node.probe` 那条规矩一致 ✓）。
+    #[test]
+    fn a_never_probed_node_has_an_empty_history() {
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO node (id, name, token, ip, country, created_at) VALUES (1,'x','tok','','',0)",
+                [],
+            )
+            .unwrap();
+        assert!(db.probe_history(1, 0).is_empty(), "没探过 ⇒ 空 ✓");
+        // ⚠️ 而且**节点不存在**时也是空 ✓（同一个返回 ✓ —— 这一层不区分二者 ✓）
+        assert!(db.probe_history(999, 0).is_empty());
+    }
+
+    /// ⭐ 历史**按时间升序** ✓（点阵从左到右 ✓）· **只取 `since` 之后** ✓ ·
+    /// ⚠️ 不同服务**互不干扰** ✓（一台的行里混着多个服务 ✓，面板按服务分组 ✓）。
+    #[test]
+    fn probe_history_is_ordered_and_windowed() {
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO node (id, name, token, ip, country, created_at) VALUES (1,'x','tok','','',0)",
+                [],
+            )
+            .unwrap();
+        let now = 1_700_000_000i64;
+        // 三个时刻 ✓：老的（窗口外 ✓）· 中间 · 最新 —— 每个时刻两个服务 ✓
+        for at in [now - 10 * 86_400, now - 3600, now] {
+            db.save_probe(
+                1,
+                &serde_json::json!({"netflix": {"status": "unlocked", "region": "JP"},
+                                    "youtube": {"status": "blocked"}}),
+                at,
+            )
+            .unwrap();
+        }
+        let rows = db.probe_history(1, now - 7 * 86_400);
+        // ⚠️ 老的（10 天前 ✓）在窗口外 ⇒ 应当只剩 **2 个时刻 × 2 个服务 = 4 行** ✓
+        assert_eq!(rows.len(), 4, "窗口外的必须被排除 ✓");
+        let times: Vec<i64> = rows.iter().map(|r| r.3).collect();
+        let mut sorted = times.clone();
+        sorted.sort();
+        assert_eq!(times, sorted, "必须按时间升序 ✓（点阵从左到右 ✓）");
+        // 两个服务都在 ✓（互相不干扰 ✓）
+        let services: std::collections::HashSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(services.len(), 2, "两个服务都该在 ✓");
+        // ⚠️ 地区的 NULL 要原样带出来 ✓（面板要画"没有地区"的那一档 ✓）
+        let youtube = rows.iter().find(|r| r.0 == "youtube").unwrap();
+        assert_eq!(youtube.2, None, "没地区的服务 region 是 None ✓");
+        let netflix = rows.iter().find(|r| r.0 == "netflix").unwrap();
+        assert_eq!(netflix.2.as_deref(), Some("JP"));
     }
 }
