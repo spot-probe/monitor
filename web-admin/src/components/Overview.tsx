@@ -1815,7 +1815,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             }
           }}
         >
-          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+          {/* 宽度用 `min(96vw, 1100px)`（用户要求再放大一些）。
+              120 格 × 最小 3px + 119 道缝 ≈ 600px，加服务名 112px 与徽章 96px ≈ 860px。 */}
+          <DialogContent className="max-h-[85vh] w-[min(96vw,1100px)] max-w-none overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
             </DialogHeader>
@@ -1955,7 +1957,10 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
           ) : (
             <div
               className="grid min-w-0 flex-1 gap-[2px]"
-              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(0, 1fr))` }}
+              // 这里是点阵"消失"的根因：原来是 minmax(0, 1fr) —— `0` 表示"可以压到 0 宽"，
+              // 缝（120 格 × 2px）再加上行尾 w-24 的徽章（96px）一挤，每一列就变成 0 像素，
+              // 于是中间看起来什么都没有（而文字与徽章都正常）。给一个最小宽度：宁可横向滚动。
+              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(3px, 1fr))` }}
             >
               {Array.from({ length: PROBE_SLOTS }, (_, k) => {
                 const r = m.get(k)
