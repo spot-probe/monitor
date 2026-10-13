@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode, useCallback } from "react"
-import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
+import { ArrowUpCircle, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Search } from "lucide-react"
 
 import { api, behind, probeHistory } from "@/lib/api"
 import type { Node, ProbeHistoryRow } from "@/lib/api"
@@ -1328,7 +1328,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   className="min-w-0 space-y-0.5 rounded-md text-left transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                   title="查看这台节点的探测历史"
                 >
-                  <div className="truncate text-xs">
+                  {/* ⚠️ **能点的样子必须看得见** ✗✓：它此前只有 hover 底色 ✓ ——
+                      而白卡片上的 hover 底色几乎看不出来 ✓✗ ⇒ 静态时**毫无提示** ✓
+                      （用户原话："节点实测没有点击的按钮" ✓）。⇒ 挂一个常驻的箭头 ✓，
+                      与节点列表右侧那排图标是同一套语汇 ✓✓。 */}
+                  <div className="flex items-center gap-1 truncate text-xs">
                     {n.stream_probe === false ? (
                       <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                         版本不支持
@@ -1383,6 +1387,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         还没测过
                       </Badge>
                     )}
+                    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
                   </div>
                   {/* ⚠️ **时效** ✓✓ —— 这一格的命就是它：没有"多久之前"，
                       一条三周前的"解锁"看起来和刚测的一样 ✓✗。 */}
