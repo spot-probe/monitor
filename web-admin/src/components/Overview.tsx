@@ -1794,7 +1794,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             // 30 × 9px = 270 ✓ + 29 道 1px 缝 = 29 ✓ ⇒ 点阵 **299px** ✓
             // + 服务名 112 ✓ + 徽章 80 ✓ + 内边距 ≈ **520px** ⇒ 上限取 640 ✓✓
             // ⚠️ 不能沿用 1440 ✗：列会被拉宽 ✓✗ ⇒ 点与点的**视觉间距又变大** ✓（那正是刚改掉的东西 ✓）。
-            style={{ width: "min(96vw, 640px)", maxWidth: "none" }}
+            style={{ width: "min(96vw, 960px)", maxWidth: "none" }}
           >
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
@@ -1992,7 +1992,18 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
             {last?.region ? <span className="text-muted-foreground">({last.region})</span> : null}
           </span>
           {m === undefined ? (
-            <span className="text-muted-foreground/60">这个服务还没有记录</span>
+            <div
+              className="grid min-w-0 flex-1 gap-px"
+              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(3px, 1fr))` }}
+              title="这个服务还没有任何记录"
+            >
+              {Array.from({ length: PROBE_SLOTS }, (_, k) => (
+                <span
+                  key={k}
+                  className="mx-auto h-[15px] w-[9px] rounded-[3px] border border-muted-foreground/35"
+                />
+              ))}
+            </div>
           ) : (
             <div
               className="grid min-w-0 flex-1 gap-px"
@@ -2018,7 +2029,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                   <span
                     key={k}
                     title={`${fmt(at)} · 没有记录`}
-                    className="mx-auto h-[15px] w-[9px] rounded-[3px] bg-muted/60"
+                    className="mx-auto h-[15px] w-[9px] rounded-[3px] border border-muted-foreground/35"
                   />
                 )
               })}
