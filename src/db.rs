@@ -198,6 +198,27 @@ CREATE TABLE IF NOT EXISTS traffic (
     PRIMARY KEY (ip, provider, day)
   );
 
+  -- ⭐ **探测历史** ✓✓（用户提的"点阵"要用它 ✓）：**每探一次写一行** ✓，
+  -- 而不是像 `node.probe` 那样只留最后一次 ✗（那样就看不出趋势 ✓✗ ——
+  -- 而"这台昨天还行、今天不行"恰恰是最有用的信息 ✓）。
+  --
+  -- ⚠️ **保留策略是必须的** ✗（见 `probe_history_keep_days` ✓）：按 6 小时一次算 ✓，
+  -- 100 台 × 6 服务 × 4 次/天 ≈ **2400 行/天** ✓ ⇒ 一年 ~88 万行 ✗ ⇒ 默认只留 30 天 ✓✓
+  --（30 天足够看出趋势 ✓，而那是这个功能唯一的用途 ✓）。
+  --
+  -- ⚠️ `at` 由 **hub 盖** ✓（与 `probe_at` 同一条规矩 ✓：不收 agent 报的时间 ✓ ——
+  -- 一台不被担保的机器的时钟可以错 ✓，而这个字段正是"什么时候测的"的依据 ✓）。
+  -- ⚠️ `node_id` 上**不建外键** ✗（与其它历史表一致 ✓）：节点删了，历史留着不碍事 ✓，
+  -- 建了外键反而会让删节点变麻烦 ✓。
+  CREATE TABLE IF NOT EXISTS probe_history (
+    node_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    status  TEXT NOT NULL,
+    region  TEXT,
+    at      INTEGER NOT NULL,
+    PRIMARY KEY (node_id, service, at)
+  );
+
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
   ts      INTEGER NOT NULL,
@@ -312,7 +333,13 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
+
+/// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
+/// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
+/// ⚠️ 定这个数的理由是**量** ✗：100 台 × 6 服务 × 4 次/天 ≈ 2400 行/天 ✓
+/// ⇒ 一年 ~88 万行 ✗ ⇒ 必须有个上限 ✓✓。
+const PROBE_HISTORY_KEEP_DAYS: i64 = 30;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -681,6 +708,21 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         // 会不会探流媒体（能力 ✓）。默认 0 ✓ —— 而**缺席按 0 处理**是刻意的 ✓：
         // 老 agent 手里没有这段代码 ✓，所以对它来说这个 0 描述的是**事实** ✓（不是"暂不允许" ✓）。
         add_column(&tx, "node", "stream_probe INTEGER NOT NULL DEFAULT 0")?;
+    }
+    if from < 23 {
+        // ⭐ 探测历史表 ✓（含索引 ✓ —— 点阵要按"节点 + 时间"取一段 ✓，
+        // 没有索引时那是全表扫描 ✗）。
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS probe_history (
+               node_id TEXT NOT NULL,
+               service TEXT NOT NULL,
+               status  TEXT NOT NULL,
+               region  TEXT,
+               at      INTEGER NOT NULL,
+               PRIMARY KEY (node_id, service, at)
+             );
+             CREATE INDEX IF NOT EXISTS probe_history_at ON probe_history(node_id, at);",
+        )?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -2089,12 +2131,38 @@ impl Db {
     ///
     /// ⚠️ 两列一起写 ✓：只更新 JSON 不更新时间戳的话 ✓，
     /// 面板会用一个**旧的**时间去判断一条**新**结论 ✓✗（"新不新"就骗人了 ✓）。
+    /// 存下这次探测 ✓（`node.probe` 只留**最后一次** ✓）**并记一行历史** ✓✓。
+    ///
+    /// ⚠️ 历史是**每服务一行** ✗：面板那张点阵一行一个服务 ✓ ⇒ 一次上报六行 ✓。
+    /// ⚠️ `INSERT OR REPLACE` ✓：主键是 `(node_id, service, at)` ✓ ——
+    /// 同一秒里重复上报同一个服务时**覆盖** ✓（而不是报错 ✓，也不会长出两行 ✓）。
     pub fn save_probe(&self, id: i64, probe: &serde_json::Value, at: i64) -> Result<()> {
         let conn = self.conn();
         conn.execute(
             "UPDATE node SET probe=?2, probe_at=?3 WHERE id=?1",
             rusqlite::params![id, probe.to_string(), at],
         )?;
+        if let Some(o) = probe.as_object() {
+            for (service, item) in o {
+                conn.execute(
+                    "INSERT OR REPLACE INTO probe_history (node_id, service, status, region, at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        service,
+                        item.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                        item.get("region").and_then(|v| v.as_str()),
+                        at
+                    ],
+                )?;
+            }
+        }
+        // ⚠️ **保留策略** ✗（必须的 ✓ —— 见建表处那段说明 ✓）：
+        // 顺手在同一处清理 ✓，**不另造定时器** ✓（少一个会自己停掉的东西 ✓）。
+        // ⚠️ 这条按 `at` 删 ✓，而索引是 `(node_id, at)` ✗ ⇒ 它**用不上那个索引** ✓；
+        // 但历史表很小 ✓（30 天 × 最多几千行 ✓）⇒ 全表扫描无所谓 ✓✓
+        //（若哪天节点数上到几百 ✓，"按 at 建个索引"就是第一件该做的事 ✓）。
+        conn.execute("DELETE FROM probe_history WHERE at < ?1", [at - PROBE_HISTORY_KEEP_DAYS * 86_400])?;
         Ok(())
     }
 
@@ -6880,5 +6948,138 @@ mod heatmap_tests {
             .unwrap();
         assert_eq!(notnull, 1, "必须 NOT NULL ✓");
         assert_eq!(dflt, "0", "默认必须是 0 ✓（缺席 = 老 agent = 不会探 ✓）");
+    }
+    /// **升级路径的闸**：一个"22 版"的库迁移后必须有 `probe_history`、且戳到 23 ✓。
+    /// ⚠️ 新表与加列不同 ✗：加列只改一个表 ✓，新表要**建表 + 建索引** ✓ ——
+    /// 而"新库"那条路（[`SCHEMA`] ✓）里也必须有同一张表 ✓，
+    /// 否则 `an_upgraded_release_matches_a_fresh_database` 会当场抓住 ✓✓。
+    #[test]
+    fn migrating_from_22_creates_the_probe_history_table() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("DROP TABLE probe_history", []).unwrap();
+        conn.execute("PRAGMA user_version = 22", []).unwrap();
+        let has = |c: &rusqlite::Connection| -> bool {
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='probe_history'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                > 0
+        };
+        assert!(!has(&conn), "前提：表已删掉");
+        migrate(&conn, 22).unwrap();
+        assert!(has(&conn), "迁移后必须建出这张表 ✓");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // ⚠️ 索引也要在 ✓（点阵按"节点 + 时间"取一段 ✓ —— 缺了它是全表扫描 ✗）
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='probe_history_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "索引必须一起建 ✓");
+    }
+    /// ⭐ **一次上报 ⇒ 历史里每个服务一行** ✓✓（点阵一行一个服务 ✓）。
+    /// ⚠️ 而**同一秒重复上报**同一服务时是**覆盖** ✓（`INSERT OR REPLACE` ✓）——
+    /// 否则重连/重报会让同一时刻长出两行 ✓✗，点阵上就是两个点重叠 ✓。
+    #[test]
+    fn a_probe_report_also_lands_in_probe_history() {
+        let db = Db::open(":memory:").unwrap();
+        // 造一个节点 ✓ —— 照本仓其它测试的写法 ✓（原生 INSERT ✓；
+        // ⚠️ 我第一版写的 `db.add_node` **根本不存在** ✗ ⇒ 编译不过 ✓，
+        // 而当时的指标只数 `warning` 行 ✓ ⇒ 报了"0"，看着一切正常 ✗✗）
+        db.conn()
+            .execute(
+                "INSERT INTO node (id, name, token, ip, country, created_at) VALUES (1,'x','tok','','',0)",
+                [],
+            )
+            .unwrap();
+        let id = 1i64;
+        db.save_probe(
+            id,
+            &serde_json::json!({"netflix": {"status": "unlocked", "region": "JP"},
+                                "youtube": {"status": "blocked"}}),
+            1_700_000_000,
+        )
+        .unwrap();
+        let rows: Vec<(String, String, Option<String>)> = db
+            .conn()
+            .prepare("SELECT service, status, region FROM probe_history ORDER BY service")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("netflix".to_string(), "unlocked".to_string(), Some("JP".to_string())),
+                ("youtube".to_string(), "blocked".to_string(), None),
+            ],
+            "两个服务各一行 ✓，没地区的那个 region 是 NULL ✓"
+        );
+        // ⚠️ 同一秒再报一次 ⇒ **覆盖**，不是两行 ✓
+        db.save_probe(id, &serde_json::json!({"netflix": {"status": "blocked"}}), 1_700_000_000).unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM probe_history WHERE service='netflix'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "同一秒重复上报必须覆盖 ✓");
+        let st: String = db
+            .conn()
+            .query_row("SELECT status FROM probe_history WHERE service='netflix'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(st, "blocked", "而且取到的是后报的那次 ✓");
+    }
+
+    /// ⚠️ **保留策略** ✗：太老的行必须被清掉 ✓（否则一年会长到几十万行 ✓）。
+    /// ⚠️ 而**边界**要按"刚好 30 天"算 ✓ —— 用"小于"而不是"小于等于" ✓，
+    /// 免得把第 30 天那一格也削掉 ✓（点阵最左边那一列会莫名少一格 ✓✗）。
+    #[test]
+    fn old_probe_history_is_pruned_on_save() {
+        let db = Db::open(":memory:").unwrap();
+        // 造一个节点 ✓ —— 照本仓其它测试的写法 ✓（原生 INSERT ✓；
+        // ⚠️ 我第一版写的 `db.add_node` **根本不存在** ✗ ⇒ 编译不过 ✓，
+        // 而当时的指标只数 `warning` 行 ✓ ⇒ 报了"0"，看着一切正常 ✗✗）
+        db.conn()
+            .execute(
+                "INSERT INTO node (id, name, token, ip, country, created_at) VALUES (1,'x','tok','','',0)",
+                [],
+            )
+            .unwrap();
+        let id = 1i64;
+        let now = 1_700_000_000i64;
+        db.save_probe(id, &serde_json::json!({"netflix": {"status": "unlocked"}}), now).unwrap();
+        // 塞一行"31 天前"的 ✓（绕过 save_probe 的清理 ✓）
+        let old = now - 31 * 86_400;
+        db.conn()
+            .execute(
+                "INSERT INTO probe_history (node_id, service, status, region, at) VALUES (?1,'netflix','unlocked',NULL,?2)",
+                rusqlite::params![id, old],
+            )
+            .unwrap();
+        // 再报一次 ⇒ 顺手把老的清掉 ✓
+        db.save_probe(id, &serde_json::json!({"netflix": {"status": "unlocked"}}), now + 60).unwrap();
+        // ⚠️ 断言要**精确到"哪一行"** ✗✓，而不是数总数 ✓ ——
+        // 我第一版断言"总共剩 1 行" ✓✗，而第 1 步那行也**在 30 天内** ✓ ⇒ 它本来就该留着 ✓
+        // ⇒ 正确的总数是 **2** ✓。数总数会把"清理对不对"与"写入对不对"混成一句 ✓；
+        //   直接问"老的那行还在吗" ✓ 才是这条测试真正要说的事 ✓✓。
+        let cutoff = now - 30 * 86_400;
+        let old_left: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM probe_history WHERE at < ?1", [cutoff], |r| r.get(0))
+            .unwrap();
+        assert_eq!(old_left, 0, "超过 30 天的那行必须被清掉 ✓");
+        let fresh: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM probe_history WHERE at >= ?1", [cutoff], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fresh, 2, "30 天内的两行都该留着 ✓（第 1 步那行 + 刚写那行 ✓）");
     }
 }
