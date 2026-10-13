@@ -1858,11 +1858,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <div key={sec.key}>
                   {/* ⭐ **分组小字** ✓（用户要求 ✓）—— 它**同时**就是那条分隔 ✓✓：
                       上面一组的最后一行与它之间，靠 `divide-y` 自然有一条线 ✓。 */}
-                  {/* ⚠️ 这一行**要换行排** ✗✓（加了按钮之后一行放不下 ✓）：
-                      小字可能很长 ✓ ⇒ 让按钮 `ml-auto` 靠右 ✓，窄屏时自然折到第二行 ✓。 */}
+                  {/* ⚠️ **第一行 = 分组名 + 全部续期按钮；第二行 = 那行小字** ✗✓（用户要求 ✓）：
+                      三个元素本来就是兄弟 ✓ ⇒ **不搬动源码顺序** ✗，只用 flex 的 `order` 排 ✓：
+                      小字 `order-3 w-full` ⇒ **强制独占一行** ✓；
+                      按钮 `order-2 ml-auto` ⇒ 与分组名**同一行**、贴右 ✓✓。 */}
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-2.5">
                     <span className="text-xs font-medium text-foreground">{sec.title}</span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="order-3 w-full text-xs text-muted-foreground">
                       {sec.items.length} 台 · {sec.hint}
                     </span>
                     {/* ⭐ **分组粒度的一键续费** ✓✓（用户要求 ✓）——
@@ -1880,7 +1882,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         <Button
                           size="sm"
                           variant={asking ? "default" : "outline"}
-                          className="ml-auto h-7 text-xs"
+                          className="order-2 ml-auto h-7 text-xs"
                           disabled={renewing}
                           onClick={async () => {
                             if (!asking) {
