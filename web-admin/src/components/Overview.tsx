@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode, useCallback } from "react"
 import { ArrowUpCircle, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Search } from "lucide-react"
 
-import { api, behind, probeHistory } from "@/lib/api"
+import { api, behind, changes, probeHistory } from "@/lib/api"
 import type { Node, ProbeHistoryRow } from "@/lib/api"
-import { bytes, monthUsage } from "@/lib/format"
+import { bytes, monthUsage, renewedExpiry } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -701,6 +701,16 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
+  // ⭐ "我已续费"那张卡 ✓ + **正在确认的那一台** ✓（两步按钮：先点"我已续费" ⇒ 变成"确认" ✓）
+  const [renewOpen, setRenewOpen] = useState(false)
+  const [renewAsk, setRenewAsk] = useState<number | null>(null)
+  const [renewing, setRenewing] = useState(false)
+  // ⚠️ **"今天"必须按本地日历天取** ✗ —— 本文件里归组那张日历就是这么做的 ✓
+  // （绝不能用 `toISOString()` ✗：那是 UTC ✓，在东八区会差一天 ✓✗）。
+  const todayLocal = (() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+  })()
   // 「查看详情」弹窗：卡片只显示最急的 2 条、高度固定；全貌在弹窗里看。
   // 不用「卡内滚动」：同行两卡高度会互相牵扯，而滚轮落在卡片上会先滚卡片再滚页面，体验很碎。
   const [noticesOpen, setNoticesOpen] = useState(false)
@@ -778,10 +788,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
   const online = nodes.filter((n) => n.online).length
   const outdated = nodes.filter((n) => n.agent_old).length
-  const expiring = nodes.filter((n) => {
+  // ⚠️ **留数组、台数由它派生** ✓（原来只有 `.length` ✗）——
+  // "我已续费"那张卡要**逐台列出** ✓ ⇒ 需要数组 ✓；而两处各 filter 一遍迟早不一致 ✓✗。
+  const expiringNodes = nodes.filter((n) => {
     const d = daysUntil(n.expires_at)
     return d !== null && d >= 0 && d <= 30
-  }).length
+  })
+  const expiring = expiringNodes.length
   const expired = nodes.filter((n) => {
     const d = daysUntil(n.expires_at)
     return d !== null && d < 0
@@ -920,6 +933,19 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           </CardContent>
         </Card>
 
+        {/* ⭐ **这张卡同时是入口** ✓（用户提的 ✓）：点开列出临近到期的节点 ✓，
+            每行一个"我已续费" ✓。⚠️ 类**照抄隔壁那张可点的卡** ✓
+            （`block h-full rounded-xl` + `hover:ring-1 hover:ring-primary` ✓✓）——
+            本仓的做法就是把 `<Card>` 包在一个可点元素里 ✓，不发明新的 ✓。
+            ⚠️ 没有可续的机器时**不给点** ✓（点开一个空卡没有意义 ✓）。 */}
+        <button
+          type="button"
+          disabled={expiringNodes.length === 0}
+          onClick={() => setRenewOpen(true)}
+          className={`block h-full w-full rounded-xl text-left ${
+            expiringNodes.length > 0 ? "cursor-pointer transition-shadow hover:ring-1 hover:ring-primary" : "cursor-default"
+          }`}
+        >
         <Card>
           <CardContent>
             <div className="flex items-start justify-between gap-2">
@@ -938,6 +964,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </div>
           </CardContent>
         </Card>
+        </button>
 
         <a
           href={outdated > 0 || hubBehind ? "/admin/update" : undefined}
@@ -1770,8 +1797,73 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       ) : (
         <CostBlock nodes={allNodes} group={group} />
       )}
-        {/* ⭐ **点阵卡** ✓（这一版先把数据摆出来 ✓ —— 点阵本身下一步画 ✓）。
-            ⚠️ 三态都在这里 ✓，而**失败那一态必须有出口** ✗（一个"重试"按钮 ✓）。 */}
+        {/* ⭐ **"我已续费"那张卡** ✓（用户提的做法 ✓）：入口是总览页顶部
+            「30 天内到期」那张 KPI 卡 ✓（点它弹出来 ✓）。一行一台 ✓，
+            行尾「我已续费」⇒ **变成"确认续期？"** ✓（这就是二次确认 ✓——
+            而且每行本来就把**新日期**写出来了 ✓✓：看到的，就是将要写进去的 ✓）。
+            ⚠️ 续期走 `renewedExpiry`（纯函数 ✓ 带十个测试 ✓）：未到期从原日期接 ✓、
+            已到期从今天起 ✓；**认不出周期或一次性 ⇒ 不能续** ✓（按钮置灰 ✓）。 */}
+        <Dialog
+          open={renewOpen}
+          onOpenChange={(v) => {
+            if (!v) {
+              setRenewOpen(false)
+              setRenewAsk(null)
+            }
+          }}
+        >
+          <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="text-sm">临近到期的节点（{expiringNodes.length} 台）</DialogTitle>
+            </DialogHeader>
+            <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
+              {expiringNodes.map((n) => {
+                const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
+                const asking = renewAsk === n.id
+                return (
+                  <div key={n.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3">
+                    <span className="font-medium">{n.name}</span>
+                    <span className="text-xs text-muted-foreground">{n.group || "未分组"}</span>
+                    <Expiry date={n.expires_at} />
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {next ? `续一期 \u21d2 ${next}` : "未填计费周期"}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant={asking ? "default" : "outline"}
+                      disabled={!next || renewing}
+                      onClick={() => {
+                        if (!next) return
+                        if (!asking) {
+                          setRenewAsk(n.id)
+                          return
+                        }
+                        setRenewing(true)
+                        api(`/nodes/${n.id}`, {
+                          method: "PUT",
+                          body: JSON.stringify(changes(n, { expires_at: next })),
+                        })
+                          .then(() => {
+                            setRenewAsk(null)
+                            refresh()
+                          })
+                          .catch(() => {})
+                          .finally(() => setRenewing(false))
+                      }}
+                    >
+                      {asking ? "确认续期？" : "我已续费"}
+                    </Button>
+                  </div>
+                )
+              })}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* ⭐ **点阵卡** ✓（一行一个服务 ✓ 一格 = 一次 12 小时 ✓）。
+            ⚠️ 它必须待在三元表达式**之外** ✗✗ —— 我第一版把它贴在"某天到期明细"那个弹窗旁边 ✓，
+            而那个弹窗属于「资源/成本」那一支 ✓✗ ⇒ 在「IP 质量」下**根本没被渲染** ✓✗。
+            ⚠️ 三态都在这里 ✓，失败那一态有"重试" ✓。 */}
         <Dialog
           open={probeNode !== null}
           onOpenChange={(v) => {
