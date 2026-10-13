@@ -1950,6 +1950,10 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
   // ⚠️ 列号由**时间**算 ✓✓（不是数组下标 ✗ —— 见上面那段说明 ✓）
   const slotOf = (at: number) => Math.round((at - start) / PROBE_STEP)
   const byService = new Map<string, Map<number, ProbeHistoryRow>>()
+  // ⚠️ **另外记一份"这一格测到了几次"** ✓（用户要求 ✓）——
+  // 独立于上面那个 map ✓：那个存"最坏的那一次"（决定颜色 ✓），这个只用来写悬停 ✓。
+  // 分开的好处 ✓：改这个不影响颜色规则 ✓（一处负责一件事 ✓）。
+  const counts = new Map<string, Map<number, number>>()
   for (const r of rows) {
     const k = slotOf(r.at)
     if (k < 0 || k >= PROBE_SLOTS) continue
@@ -1961,6 +1965,10 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
     // 反过来（后写的覆盖前写的 ✓、或"只要好就算好" ✗）会把**一天的故障藏起来** ✓✗，
     // 而那正是这个界面最该让人看见的东西 ✓。
     if (!prev || probeRank(r.status) < probeRank(prev.status)) slot.set(k, r)
+    // 计数 ✓：与颜色**无关** ✓ —— 一格里有几次就记几次 ✓
+    if (!counts.has(r.service)) counts.set(r.service, new Map())
+    const c = counts.get(r.service)!
+    c.set(k, (c.get(k) ?? 0) + 1)
   }
   // ⚠️ **有问题的排在上面** ✓（运维先看坏的 ✓）
   // ⚠️ 顺手把"最新一格"也带出来 ✓（徽章要用 ✓）—— 在数据里算一次 ✓，
@@ -2021,7 +2029,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                 return r ? (
                   <span
                     key={k}
-                    title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""}`}
+                    title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""} · ${counts.get(sv)?.get(k) ?? 1} / 2 次`}
                     // ⚠️ **宽高比 3:4 的小长条** ✓（用户第 ① 条 ✓）—— 此前是 h-3.5 + rounded-full ✓，
                     // 而 56 格时每列宽约 15px ✓ ⇒ rounded-full 在 ~15×14 上就是个**椭圆** ✓✗。
                     // ⇒ 固定 9×12 ✓ + rounded-[3px] ✓（四角一点弧度 ✓）+ **居中** ✓
