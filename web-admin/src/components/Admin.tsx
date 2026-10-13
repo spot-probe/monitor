@@ -1032,7 +1032,19 @@ const VERSION_RETRY_MS = [1_500, 4_000]
 
 export function useVersions() {
   const [versions, setVersions] = useState<Versions | null>(null)
-  const load = useCallback(() => api<Versions>("/version").then(setVersions).catch(() => {}), [])
+  // ⚠️ **失败要重试一次** ✗✓（这条早先就记在 `notes/backlog.md` 里 ✓）：
+  // 原来是"一次请求、失败被吞、**没有第二次**" ✓✗ ⇒ 只要那一次撞上 hub 重启
+  // （升级、或崩了重启 ✓）✓，更新页那一行就一直显示"查不到版本" ✓，
+  // ⭐ 而且**要手动刷新才恢复** ✓✓（用户遇到的正是这个 ✓）。
+  // ⇒ 退避一秒半再试一次 ✓ —— 重启窗口通常就那几秒 ✓；再失败才放弃 ✓（它毕竟只是个后台轮询 ✓）。
+  const load = useCallback(() => {
+    const once = () => api<Versions>("/version").then(setVersions)
+    once().catch(() => {
+      window.setTimeout(() => {
+        once().catch(() => {})
+      }, 1500)
+    })
+  }, [])
   useEffect(() => {
     let stop = false
     let timer: ReturnType<typeof setTimeout> | undefined

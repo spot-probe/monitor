@@ -462,10 +462,22 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    ...init,
-    headers: init?.body ? { "content-type": "application/json", ...init?.headers } : init?.headers,
-  })
+  let res: Response
+  try {
+    res = await fetch(`/api${path}`, {
+      ...init,
+      headers: init?.body ? { "content-type": "application/json", ...init?.headers } : init?.headers,
+    })
+  } catch (e) {
+    // ⚠️⚠️ **网络层失败要翻译成人话** ✗✗ —— 此时 `fetch` 抛的是浏览器自己的
+    // `TypeError: Failed to fetch` ✓，而那句话**对用户没有任何意义** ✓✗
+    //（它既不是"权限不够" ✓ 也不是"服务端出错" ✓，而是**根本没连上** ✓）。
+    // 最常见的成因是 **hub 正在重启**（升级、或崩了重启 ✓）—— 那是一次性的 ✓。
+    // ⭐ 在这里翻译一次 ✓ ⇒ 所有调用者（~20 处 ✓）都受益 ✓，不必逐个改 ✓✓。
+    // ⚠️ 原话仍然打到控制台 ✓ —— 排查时它有用 ✓，只是不该摆在界面上 ✓。
+    console.warn(`api ${path}: network failure`, e)
+    throw new ApiError(0, "连不上 hub：网络中断，或 hub 正在重启。稍后重试一次通常就好。")
+  }
   if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText)
   return res.status === 204 ? (undefined as T) : res.json()
 }
