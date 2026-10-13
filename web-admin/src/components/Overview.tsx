@@ -1815,7 +1815,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             }
           }}
         >
-          <DialogContent className="max-h-[70vh] max-w-lg overflow-y-auto">
+          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
             </DialogHeader>
@@ -1925,30 +1925,36 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
     byService.get(r.service)!.set(k, r)
   }
   // ⚠️ **有问题的排在上面** ✓（运维先看坏的 ✓）
+  // ⚠️ 顺手把"最新一格"也带出来 ✓（徽章要用 ✓）—— 在数据里算一次 ✓，
+  // 好过在 JSX 里现算两遍 ✓（那种写法早晚会两处不一致 ✓）。
   const order = PROBE_SERVICES.map((sv) => {
     const m = byService.get(sv)
     const lastK = m && m.size ? Math.max(...m.keys()) : -1
     const st = lastK >= 0 ? m!.get(lastK)!.status : undefined
     // 名次：有问题的最前 ✓ · 正常的中间 ✓ · 从没测过的最后 ✓（它是"没有"，不该抢眼 ✓）
     const rank = m === undefined ? 2 : st === "unlocked" ? 1 : 0
-    return { sv, m, rank }
+    const last = lastK >= 0 ? m!.get(lastK) : undefined
+    return { sv, m, rank, last }
   }).sort((a, b) => a.rank - b.rank || a.sv.localeCompare(b.sv))
   const fmt = (at: number) => new Date(at * 1000).toLocaleString()
   return (
     <div className="space-y-2 text-xs">
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
-        <span className="w-20 shrink-0" />
-        <span>{fmt(start)}</span>
-        <span className="ml-auto">{fmt(end + PROBE_STEP)}</span>
+        <span className="w-28 shrink-0" />
+        {/* ⚠️ **相对时间** ✓（同事第 ④ 条 ✓）：绝对时间又长又死板 ✓✗ ——
+            精确到秒的那一刻留给悬停 ✓（每个点本来就有 title ✓✓）。 */}
+        <span>30 天前</span>
+        <span className="mx-auto">15 天前</span>
+        <span>今天</span>
       </div>
-      {order.map(({ sv, m }) => (
+      {order.map(({ sv, m, last }) => (
         <div key={sv} className="flex items-center gap-2">
-          <span className="w-20 shrink-0 truncate font-medium">{PROBE_LABELS[sv] ?? sv}</span>
+          <span className="w-28 shrink-0 truncate font-medium">{PROBE_LABELS[sv] ?? sv}</span>
           {m === undefined ? (
             <span className="text-muted-foreground/60">这个服务还没有记录</span>
           ) : (
             <div
-              className="grid min-w-0 flex-1 gap-px"
+              className="grid min-w-0 flex-1 gap-[2px]"
               style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(0, 1fr))` }}
             >
               {Array.from({ length: PROBE_SLOTS }, (_, k) => {
@@ -1958,27 +1964,57 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                   <span
                     key={k}
                     title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""}`}
-                    className={`h-2.5 rounded-[2px] ${probeTone(r.status)}`}
+                    className={`h-3.5 rounded-full ${probeTone(r.status)}`}
                   />
                 ) : (
                   <span
                     key={k}
                     title={`${fmt(at)} · 没有记录`}
-                    className="h-2.5 rounded-[2px] bg-muted/60"
+                    className="h-3.5 rounded-full bg-muted/60"
                   />
                 )
               })}
             </div>
           )}
+          {/* ⭐ **最新状态** ✓✓（前端同事的第 ③ 条 ✓ —— 也是最值钱的一条 ✗）：
+              看历史图时，第一眼最想确认的其实是"**现在通不通**" ✓；
+              此前六行全绿的时候，这一点根本看不出来 ✓✗。 */}
+          {m === undefined ? (
+            <span className="w-24 shrink-0" />
+          ) : last ? (
+            <Badge variant="outline" className={`w-24 shrink-0 justify-center border-transparent ${probeTone(last.status)} font-normal`}>
+              {probeWord(last.status)}
+            </Badge>
+          ) : null}
         </div>
       ))}
-      <p className="pt-1 text-[11px] leading-relaxed text-muted-foreground/70">
-        一行一个服务，一格 = 一次 6 小时（共 30 天）。
-        <span className="font-medium">越深表示那一次结论越需要注意</span>
-        ；很淡的空槽表示那一次
-        <span className="font-medium">没有记录</span>
-        ——它与"测了不通"是两回事。历史从 hub 开始记录那天起累积，更早的结果只保留了最后一次。
-      </p>
+      {/* ⚠️ **图例 + 一句收起** ✓（前端同事的第 ⑤ 条 ✓）：
+          原来那段像免责声明 ✓✗（"一格 = 6 小时 / 没测到与测了不通是两回事 / 从哪天开始记" ✓）
+          ⇒ 图例放在外面 ✓（一眼看懂 ✓），细节收进 `Help` 的悬停层 ✓✓（本仓现成的组件 ✓）。 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border pt-2 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-full bg-ok/45" />
+          解锁
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-full bg-warn" />
+          受限（机房 / 仅一边可用 / 买不到会员）
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-full bg-destructive" />
+          不通
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="size-2.5 rounded-full bg-muted/60" />
+          没有记录
+        </span>
+        <Help>
+          一格 = 一次 6 小时，共 30 天。很淡的空槽表示那一次
+          <span className="font-medium">没有记录</span>
+          ——它与"测了不通"是两回事，不要当成结论。历史从 hub 开始记录那天起累积，
+          更早的结果只保留了最后一次；把鼠标停在某一格上可以看到那一格的时间与结论。
+        </Help>
+      </div>
     </div>
   )
 }
