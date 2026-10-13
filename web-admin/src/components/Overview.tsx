@@ -1341,47 +1341,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       <Badge variant="outline" className="border-transparent bg-warn/10 font-medium text-warn">
                         未允许检测
                       </Badge>
-                    ) : n.probe?.netflix ? (
-                      <span>
-                        Netflix{" "}
-                        <span
-                          className={`inline-flex items-baseline rounded-full px-2 py-0.5 text-xs ${
-                            n.probe.netflix.status === "unlocked"
-                              ? "bg-ok/10 font-medium text-ok"
-                              : n.probe.netflix.status === "idc" ||
-                                  n.probe.netflix.status === "web" ||
-                                  n.probe.netflix.status === "app"
-                                ? "bg-warn/10 font-medium text-warn"
-                                : n.probe.netflix.status === "blocked"
-                                  ? "bg-destructive/10 font-medium text-destructive"
-                                  : "bg-muted text-muted-foreground"
-                          }`}
-                        >
-                          {/* ⚠️ 面板只说**自己的话** ✓（线上报文仍是 `unlocked` 等 ✓ —— 那套字符串由 hub 的测试钉住 ✓） */}
-                          {/* ⚠️ **四档** ✓（用户定"甲" ✓）：`idc` = 解锁、但被识别成**机房** ✓ ——
-                              它与"解锁"不是一回事 ✓（机房 IP 在很多服务上吃亏 ✓），
-                              也与"未解锁"不同 ✓ ⇒ 必须单独说 ✓✗（否则它会落进"没读明白" ✓ = 又一个假信息 ✓）。 */}
-                          {/* ⚠️ **六档** ✓：`idc` = 解锁但被识别成机房 ✓；`web` / `app` =
-                              只通一边 ✓（ChatGPT 会分别探 API 与 iOS 端 ✓）——
-                              它们**都必须单独说** ✗（否则会落进"没读明白" ✓ = 假信息 ✓）。 */}
-                          {n.probe.netflix.status === "unlocked"
-                            ? "解锁"
-                            : n.probe.netflix.status === "idc"
-                              ? "解锁（机房）"
-                              : n.probe.netflix.status === "web"
-                                ? "仅网页可用"
-                                : n.probe.netflix.status === "app"
-                                  ? "仅 App 可用"
-                                  : n.probe.netflix.status === "cn"
-                                    ? "中国区"
-                                    : n.probe.netflix.status === "noprem"
-                                      ? "可用·无会员"
-                                      : n.probe.netflix.status === "blocked"
-                                        ? "未解锁"
-                                        : "没读明白"}
-                        </span>
-                        {n.probe.netflix.region ? ` · ${n.probe.netflix.region}` : null}
-                      </span>
+                    ) : probeSummary(n.probe) ? (
+                      <span className="truncate font-medium">{probeSummary(n.probe)}</span>
                     ) : (
                       <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
                         还没测过
@@ -1922,6 +1883,31 @@ function probeWord(status: string): string {
   }
 }
 
+/// ⭐ **那一格的摘要** ✓✓（用户第 ③ 条 ✓）：**点名有问题的** ✓，正常的只计数 ✓。
+///
+/// ⚠️ 取舍写在前面 ✗："六项全正常"是常态 ✓ ⇒ 逐项列出来只会让那一格变高 ✓✗；
+/// 而运维真正要的是"**哪台不对劲**" ✓ ⇒ 所以坏消息点名、好消息计数 ✓✓
+///（与那一列"坏消息在前"的排法同一条 ✓）。
+/// ⚠️ 纯函数 ✓：输入就是 hub 给的 `probe` 对象 ✓ ⇒ 不依赖任何组件状态 ✓，逻辑一眼可验 ✓。
+/// ⚠️ 顺序固定按 `PROBE_SERVICES` ✓（不按对象键序 ✓✗ —— 那个顺序在 JS 里是"看起来稳定但没说死"的 ✓）。
+function probeSummary(probe?: Record<string, { status?: string; region?: string }> | null): string | null {
+  if (!probe) return null
+  const bad: string[] = []
+  let ok = 0
+  for (const sv of PROBE_SERVICES) {
+    const r = probe[sv]
+    if (!r) continue
+    if (r.status === "unlocked") ok += 1
+    else bad.push(PROBE_LABELS[sv] ?? sv)
+  }
+  if (bad.length === 0) return ok > 0 ? `${ok} 项正常` : null
+  const rest = ok > 0 ? ` · 其余 ${ok} 项正常` : ""
+  // ⚠️ 坏消息太多时也不铺满 ✗：最多点两个名 ✓ + 一个计数 ✓（那一格只有一行 ✓）。
+  const named = bad.slice(0, 2).join(" · ")
+  const more = bad.length > 2 ? ` 等 ${bad.length} 项` : ""
+  return `${named}${more}${rest}`
+}
+
 function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
   const latest = rows.reduce((m, r) => Math.max(m, r.at), 0)
   const end = Math.ceil(latest / PROBE_STEP) * PROBE_STEP
@@ -1960,7 +1946,13 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
       </div>
       {order.map(({ sv, m, last }) => (
         <div key={sv} className="flex items-center gap-2">
-          <span className="w-28 shrink-0 truncate font-medium">{PROBE_LABELS[sv] ?? sv}</span>
+          {/* ⚠️ 名字后带**最新地域** ✓（用户第 ② 条 ✓："YouTube(UK)" ✓）——
+                数据里本来就有 `last.region` ✓，只是先前没显示 ✓。
+                ⚠️ 用 `last`（最新一格 ✓）而不是历史里随便一个 ✓ —— 与右端徽章同源 ✓✓。 */}
+          <span className="w-28 shrink-0 truncate font-medium" title={last?.region ? `${PROBE_LABELS[sv] ?? sv}(${last.region})` : undefined}>
+            {PROBE_LABELS[sv] ?? sv}
+            {last?.region ? <span className="text-muted-foreground">({last.region})</span> : null}
+          </span>
           {m === undefined ? (
             <span className="text-muted-foreground/60">这个服务还没有记录</span>
           ) : (
@@ -1978,13 +1970,17 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
                   <span
                     key={k}
                     title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""}`}
-                    className={`h-3.5 rounded-full ${probeTone(r.status)}`}
+                    // ⚠️ **宽高比 3:4 的小长条** ✓（用户第 ① 条 ✓）—— 此前是 h-3.5 + rounded-full ✓，
+                    // 而 56 格时每列宽约 15px ✓ ⇒ rounded-full 在 ~15×14 上就是个**椭圆** ✓✗。
+                    // ⇒ 固定 9×12 ✓ + rounded-[3px] ✓（四角一点弧度 ✓）+ **居中** ✓
+                    //（不居中的话它会被拉回满列宽 ✓✗，又变成椭圆 ✓）。
+                    className={`mx-auto h-3 w-[9px] rounded-[3px] ${probeTone(r.status)}`}
                   />
                 ) : (
                   <span
                     key={k}
                     title={`${fmt(at)} · 没有记录`}
-                    className="h-3.5 rounded-full bg-muted/60"
+                    className="mx-auto h-3 w-[9px] rounded-[3px] bg-muted/60"
                   />
                 )
               })}
