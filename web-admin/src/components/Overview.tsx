@@ -795,12 +795,25 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 正是为它们写的 ✓ ⇒ 去掉下界 ✓（只看上限 30 天 ✓）。
   // ⚠️ 而**必须排序** ✗：原来只是 filter ✓ ⇒ 顺序是**节点顺序** ✓✗（不是紧急度 ✓）。
   // ⇒ 按 `days` 升序 ✓（**最负的（过期最久）排最前** ✓ ⇒ 越靠上越该处理 ✓）。
-  const expiringNodes = nodes
+  // ⚠️ **拆成两组** ✗✓（用户要求 ✓）—— 而且顺序按他定的 ✓：
+  // **临近到期在上 ✓、已过期在下** ✓（他的理由比我的对 ✓：
+  // "**要去处理的**"该先看见 ✓；已过期是**另一类问题** ✓，不是"更紧急" ✓）。
+  // ⚠️ 组内各自按天数升序 ✓（快到的在前 ✓；过期最久的在前 ✓）。
+  const byDays = (a: Node, b: Node) => (daysUntil(a.expires_at) ?? 0) - (daysUntil(b.expires_at) ?? 0)
+  const upcomingNodes = nodes
     .filter((n) => {
       const d = daysUntil(n.expires_at)
-      return d !== null && d <= 30
+      return d !== null && d >= 0 && d <= 30
     })
-    .sort((a, b) => (daysUntil(a.expires_at) ?? 0) - (daysUntil(b.expires_at) ?? 0))
+    .sort(byDays)
+  const overdueNodes = nodes
+    .filter((n) => {
+      const d = daysUntil(n.expires_at)
+      return d !== null && d < 0
+    })
+    .sort(byDays)
+  // ⚠️ 这个仍然要留 ✓：它给那张 KPI 卡当"可不可点"的依据 ✓（两组任一非空 ⇒ 可点 ✓）。
+  const expiringNodes = [...upcomingNodes, ...overdueNodes]
   const expiring = expiringNodes.length
   const expired = nodes.filter((n) => {
     const d = daysUntil(n.expires_at)
@@ -1821,30 +1834,40 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         >
           <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
             <DialogHeader>
-              <DialogTitle className="text-sm">临近到期的节点（{expiringNodes.length} 台）</DialogTitle>
+              {/* ⚠️ 标题**不能说谎** ✗✓：它原来写着"临近到期的节点" ✓，
+                而现在里面**还含着已过期的** ✓✗ ⇒ 换成中性说法 ✓（两组各带小字说明 ✓）。 */}
+              <DialogTitle className="text-sm">需要续费的节点（{expiringNodes.length} 台）</DialogTitle>
             </DialogHeader>
             <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
-              {expiringNodes.map((n, i) => {
-                const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
-                const asking = renewAsk === n.id
-                const days = daysUntil(n.expires_at)
-                // ⭐ **两组之间那条微弱的分隔线** ✓（用户第 2 条的后半句 ✓）：
-                // 列表按紧急度升序 ✓ ⇒ "已过期"全在前面 ✓；**进入第一台未过期**时画一条线 ✓
-                // （用条件边框 ✓ 不新增元素 ✓ —— 与那条 `divide-y` 同一种做法 ✓）。
-                const boundary =
-                  i > 0 &&
-                  (daysUntil(expiringNodes[i - 1].expires_at) ?? 0) < 0 &&
-                  (days ?? 0) >= 0
-                return (
-                  // ⚠️ **左信息 / 右操作 两栏** ✗✓（前端同事第 ② 条 ✓ —— 也是这里最要紧的一条 ✓）：
-                  // 原来是 `flex-wrap` ✓ ⇒ 东西一多，"我已续费"就**被挤到第二行** ✓✗
-                  // （他截图里正是那样 ✓）。⚠️ 而**不套小卡片** ✗：本仓那张姊妹弹窗
-                  // （"某天到期明细" ✓ 就是我们复用它的那张 ✓）用的是 `divide-y` ✓
-                  // ⇒ 保持**同一套语汇** ✓，但把行距加大 ✓（"呼吸感"那句他说得对 ✓）。
-                  <div
-                      key={n.id}
-                      className={`flex items-center justify-between gap-3 py-3.5 ${boundary ? "border-t border-border/60" : ""}`}
-                    >
+              {[
+                {
+                  key: "soon",
+                  title: "临近到期",
+                  hint: "还没到期。续一期从**原到期日**往后接，周期不会漂。",
+                  items: upcomingNodes,
+                },
+                {
+                  key: "past",
+                  title: "已过期",
+                  hint: "已经过期（但 hub 还留着它）。续一期从**今天**起算。",
+                  items: overdueNodes,
+                },
+              ].map((sec) => (
+                <div key={sec.key}>
+                  {/* ⭐ **分组小字** ✓（用户要求 ✓）—— 它**同时**就是那条分隔 ✓✓：
+                      上面一组的最后一行与它之间，靠 `divide-y` 自然有一条线 ✓。 */}
+                  <div className="flex items-baseline gap-2 py-2.5">
+                    <span className="text-xs font-medium text-foreground">{sec.title}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {sec.items.length} 台 · {sec.hint}
+                    </span>
+                  </div>
+                  {sec.items.map((n) => {
+                    const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
+                    const asking = renewAsk === n.id
+                    const days = daysUntil(n.expires_at)
+                    return (
+                      <div key={n.id} className="flex items-center justify-between gap-3 py-3.5">
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{n.name}</span>
@@ -1913,8 +1936,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       </Button>
                     </div>
                   </div>
-                )
-              })}
+                    )
+                  })}
+                </div>
+              ))}
             </div>
           </DialogContent>
         </Dialog>
