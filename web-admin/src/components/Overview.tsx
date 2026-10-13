@@ -1,8 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode, useCallback } from "react"
 import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
 
-import { api, behind } from "@/lib/api"
-import type { Node } from "@/lib/api"
+import { api, behind, probeHistory } from "@/lib/api"
+import type { Node, ProbeHistoryRow } from "@/lib/api"
 import { bytes, monthUsage } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -651,6 +651,21 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
   // ⭐ IP 质量表的**筛选** ✓（用户要求 ✓）：一个"只看有数据"开关 ✓ + 一个搜索框 ✓。
   // 判据"有数据" = 这台节点**有 `quality`** ✓（即 hub 到底查没查过它 ✓）。
+  // ⭐ **点阵卡** ✓（用户提的 ✓）：点「节点实测」那一格 ⇒ 弹出这台节点的探测历史 ✓。
+  // ⚠️ 三态分开写 ✓：加载中 ✓ / 失败（人话 + 重试 ✓）/ 拿到数据 ✓ ——
+  // 失败时**不把浏览器的原文摆出来** ✗（"Failed to fetch" 是 `fetch()` 的原话 ✓，
+  // 对用户没有任何意义 ✓✗；而且它**不会自己消失** ✗ ⇒ 必须给一个重试 ✓✓）。
+  const [probeNode, setProbeNode] = useState<Node | null>(null)
+  const [probeRows, setProbeRows] = useState<ProbeHistoryRow[] | null>(null)
+  const [probeErr, setProbeErr] = useState(false)
+  const loadProbe = useCallback((node: Node) => {
+    setProbeRows(null)
+    setProbeErr(false)
+    probeHistory(node.id, 30)
+      .then((r) => setProbeRows(r.rows))
+      .catch(() => setProbeErr(true))
+  }, [])
+
   const [onlyData, setOnlyData] = useState(false)
   const [q, setQ] = useState("")
   // ⚠️ **不能去过滤 `nodes`** ✗ —— 资源与成本两个视图也在用它 ✓，
@@ -1301,7 +1316,18 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     ⇒ 混成一句会让人**去等一个永远不会来的结果** ✓✗（或去查一个其实没坏的东西 ✓）。
                     ⚠️ 判据顺序是刻意的 ✗：**先问"允许吗"、再问"会吗"** ✓ ——
                     因为"没允许"是**这台机器自己的政策** ✓，比"版本支不支持"更该先说 ✓。 */}
-                <div className="min-w-0 space-y-0.5">
+                {/* ⚠️ **这一格同时是入口** ✓（用户提的"点击弹出 card" ✓）——
+                    所以它是个 `button` ✓（键盘可达 ✓、有焦点环 ✓），而**内容一字未改** ✓。
+                    ⚠️ 行高不变 ✓：点阵卡是弹出的 ✓，不占表格的地方 ✓✓。 */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProbeNode(n)
+                    loadProbe(n)
+                  }}
+                  className="min-w-0 space-y-0.5 rounded-md text-left transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  title="查看这台节点的探测历史"
+                >
                   <div className="truncate text-xs">
                     {n.stream_probe === false ? (
                       <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
@@ -1371,7 +1397,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       })()}
                     </div>
                   ) : null}
-                </div>
+                </button>
                 </div>
               ))}
             </div>
@@ -1529,6 +1555,55 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       </div>
 
       {/* 某一天的到期明细：**弹窗**而不是在卡内向下展开 —— 展开会把卡片和同行另一张卡一起撑高。 */}
+      {/* ⭐ **点阵卡** ✓（这一版先把数据摆出来 ✓ —— 点阵本身下一步画 ✓）。
+          ⚠️ 三态都在这里 ✓，而**失败那一态必须有出口** ✗（一个"重试"按钮 ✓）。 */}
+      <Dialog
+        open={probeNode !== null}
+        onOpenChange={(v) => {
+          if (!v) {
+            setProbeNode(null)
+            setProbeRows(null)
+            setProbeErr(false)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[70vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
+          </DialogHeader>
+          {probeErr ? (
+            <div className="space-y-2 text-xs">
+              <p className="text-destructive">没能取到探测历史。</p>
+              <p className="text-muted-foreground">
+                这通常是网络或 hub 刚重启造成的——点下面重试一次即可。
+              </p>
+              <Button size="sm" variant="outline" onClick={() => probeNode && loadProbe(probeNode)}>
+                重试
+              </Button>
+            </div>
+          ) : probeRows === null ? (
+            <p className="text-xs text-muted-foreground">读取中…</p>
+          ) : probeRows.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
+            </p>
+          ) : (
+            <div className="space-y-1 text-xs">
+              {probeRows.map((r, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="font-mono text-muted-foreground/70">
+                    {new Date(r.at * 1000).toLocaleString()}
+                  </span>
+                  <span className="font-medium">{r.service}</span>
+                  <span>{r.status}</span>
+                  {r.region ? <span className="text-muted-foreground">{r.region}</span> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={pickedDay !== null} onOpenChange={(v) => !v && setPickedDay(null)}>
         <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden sm:max-w-lg">
           <DialogHeader>

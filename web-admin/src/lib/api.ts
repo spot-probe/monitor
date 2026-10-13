@@ -347,6 +347,19 @@ export function trafficCorrection(
  * ranks its interfaces and the hub picks the country's address by the same
  * ranges; the three lists are to be changed together.
  */
+/** 一台节点的**探测历史** ✓✓（点阵卡用它 ✓）—— 每行 = 某个服务在某个时刻的结论 ✓。 */
+export type ProbeHistoryRow = {
+  service: string
+  status: string
+  region?: string | null
+  at: number
+}
+
+export function probeHistory(id: number, days: number): Promise<{ days: number; since: number; rows: ProbeHistoryRow[] }> {
+  // ⚠️ 走本仓的 `api<T>` ✓（会话/错误处理与别处一致 ✓ —— 不自己写 fetch ✓）
+  return api(`/nodes/${id}/probe-history?days=${days}`)
+}
+
 export function isPublic(ip: string): boolean {
   if (ip.includes(":")) return (parseInt(ip.split(":")[0] || "0", 16) & 0xe000) === 0x2000
   const [a, b, c] = ip.split(".").map(Number)
