@@ -1790,7 +1790,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             // ⚠️ 宽度按**实测需求**算 ✓（不拍脑袋 ✓）：120 格 × 9px = 1080 ✓
             // + 119 道 1px 缝 = 119 ✓ ⇒ 点阵本身 **1199px** ✓
             // + 服务名 112 ✓ + 状态徽章 80 ✓ + 内边距 ≈ **1423px** ⇒ 上限取 1440 ✓✓
-            style={{ width: "min(96vw, 1440px)", maxWidth: "none" }}
+            // ⚠️ 宽度按**现在的点数**重算 ✓（一格一天 ⇒ 30 格 ✓）：
+            // 30 × 9px = 270 ✓ + 29 道 1px 缝 = 29 ✓ ⇒ 点阵 **299px** ✓
+            // + 服务名 112 ✓ + 徽章 80 ✓ + 内边距 ≈ **520px** ⇒ 上限取 640 ✓✓
+            // ⚠️ 不能沿用 1440 ✗：列会被拉宽 ✓✗ ⇒ 点与点的**视觉间距又变大** ✓（那正是刚改掉的东西 ✓）。
+            style={{ width: "min(96vw, 640px)", maxWidth: "none" }}
           >
             <DialogHeader>
               <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
@@ -1839,17 +1843,39 @@ const PROBE_LABELS: Record<string, string> = {
   amazonpv: "Prime Video",
   youtube: "YouTube",
 }
-const PROBE_STEP = 6 * 3600
+// ⚠️ **一格 = 一天** ✓（用户要求"用更少的点表达相同的天数" ✓）——
+// 30 天 = **30 格** ✓（原先是每 6 小时一格 ⇒ 120 格 ⇒ 卡片被撑得很宽 ✓✗）。
+const PROBE_STEP = 86_400
 // ⚠️ **14 天**（用户要求"不需要显示这么多天" ✓）—— 14 × 4 = **56 格** ✓。
 // ⚠️ 而 hub 那边的**保留仍是 30 天** ✓（数据留着 ✓，只是这里少画一些 ✓ —— 想看更多时改这一个数即可 ✓）。
-const PROBE_SLOTS = 30 * 4
+/// 状态的"严重程度" ✓（**数字越小越严重** ✓）—— 同一格里合成时用它 ✓（见下面那段说明 ✓）。
+function probeRank(status?: string): number {
+  switch (status) {
+    case "blocked":
+    case "cn":
+      return 0
+    case "idc":
+    case "web":
+    case "app":
+    case "noprem":
+      return 1
+    case "unknown":
+      return 2
+    case "unlocked":
+      return 3
+    default:
+      return 4
+  }
+}
+
+const PROBE_SLOTS = 30
 
 /// 一格的观感 ✓（四种色沿用本仓 `riskTone` 那一套 ✓，不发明 ✗）。
 /// ⚠️ 只给"值得看的"上色 ✗：正常解锁是**常态** ✓ ⇒ 淡绿 ✓；有问题的才抢眼 ✓✓。
 function probeTone(status?: string): string {
   switch (status) {
     case "unlocked":
-      return "bg-ok/45"
+      return "bg-ok/60"
     case "blocked":
       return "bg-destructive"
     case "idc":
@@ -1925,7 +1951,13 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
     const k = slotOf(r.at)
     if (k < 0 || k >= PROBE_SLOTS) continue
     if (!byService.has(r.service)) byService.set(r.service, new Map())
-    byService.get(r.service)!.set(k, r)
+    const slot = byService.get(r.service)!
+    const prev = slot.get(k)
+    // ⚠️⚠️ **同一天里"坏消息优先"** ✗✗ —— 一刻度变成一天之后 ✓，一天会有四次探测 ✓，
+    // 它们要合成一格 ✓ ⇒ 规则必须是"**只要有一次不好，这格就不好**" ✓✓：
+    // 反过来（后写的覆盖前写的 ✓、或"只要好就算好" ✗）会把**一天的故障藏起来** ✓✗，
+    // 而那正是这个界面最该让人看见的东西 ✓。
+    if (!prev || probeRank(r.status) < probeRank(prev.status)) slot.set(k, r)
   }
   // ⚠️ **有问题的排在上面** ✓（运维先看坏的 ✓）
   // ⚠️ 顺手把"最新一格"也带出来 ✓（徽章要用 ✓）—— 在数据里算一次 ✓，
