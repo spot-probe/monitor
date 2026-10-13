@@ -727,7 +727,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 没有到期日（∞）的没有"剩余"可言，已过期的也不在计费里。
   // 注意因此它与成本 tab 的「每月成本（全部机器）」**是两个不同的问题**，不该相等。
   // 缺汇率的机器一律跳过（绝不 1:1）。
-  const dated = allNodes.map((n) => ({ n, r: costRow(n, perUnitTop), d: daysUntil(n.expires_at) }))
+  // ⚠️ 用 **`nodes`（跟着分组走的那个集合 ✓）**，不是 `allNodes` ✗ ——
+  // 用户报的正是这里 ✓：切分组时"3 台"那几张卡跟着变 ✓，而**成本这两张不变** ✗
+  //（同文件里别的 KPI 全用 `nodes` ✓，只有这一处用了全部 ✓✗）。
+  // ⚠️ 上面那句注释讲的是"与**成本 tab** 的口径不同" ✓（"有到期日且未过期" ✓）——
+  // 那是**统计范围**的差别 ✓，与**分组**无关 ✓ ⇒ 改成 `nodes` 不违背它的本意 ✓✓。
+  // ⚠️ 顺带 ✓：`noExpiry` / `expiredCount` / `noRate` 也由它派生 ✓ ⇒ 一并跟着分组走 ✓（本就应该 ✓）。
+  const dated = nodes.map((n) => ({ n, r: costRow(n, perUnitTop), d: daysUntil(n.expires_at) }))
   const inScope = dated.filter((x) => x.r.monthly !== null && x.d !== null && x.d >= 0)
   const monthlyNow = inScope.reduce((a, x) => a + (x.r.monthly ?? 0), 0)
   // 剩余价值 = 价格 ÷ 周期天数 × 剩余天数（例：600/年、剩 180 天 → 600/365×180 = ¥295.89）
