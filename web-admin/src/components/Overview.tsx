@@ -790,10 +790,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const outdated = nodes.filter((n) => n.agent_old).length
   // ⚠️ **留数组、台数由它派生** ✓（原来只有 `.length` ✗）——
   // "我已续费"那张卡要**逐台列出** ✓ ⇒ 需要数组 ✓；而两处各 filter 一遍迟早不一致 ✓✗。
-  const expiringNodes = nodes.filter((n) => {
-    const d = daysUntil(n.expires_at)
-    return d !== null && d >= 0 && d <= 30
-  })
+  // ⚠️⚠️ **已过期的也要收进来** ✗✗（用户要求 ✓）—— 原来条件是 `d >= 0 && d <= 30` ✓
+  // ⇒ "**过期了但还活着**"（他最早问的那种 ✓）**进不来** ✓✗，而"从今天起算"那条规则
+  // 正是为它们写的 ✓ ⇒ 去掉下界 ✓（只看上限 30 天 ✓）。
+  // ⚠️ 而**必须排序** ✗：原来只是 filter ✓ ⇒ 顺序是**节点顺序** ✓✗（不是紧急度 ✓）。
+  // ⇒ 按 `days` 升序 ✓（**最负的（过期最久）排最前** ✓ ⇒ 越靠上越该处理 ✓）。
+  const expiringNodes = nodes
+    .filter((n) => {
+      const d = daysUntil(n.expires_at)
+      return d !== null && d <= 30
+    })
+    .sort((a, b) => (daysUntil(a.expires_at) ?? 0) - (daysUntil(b.expires_at) ?? 0))
   const expiring = expiringNodes.length
   const expired = nodes.filter((n) => {
     const d = daysUntil(n.expires_at)
@@ -1817,17 +1824,27 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <DialogTitle className="text-sm">临近到期的节点（{expiringNodes.length} 台）</DialogTitle>
             </DialogHeader>
             <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain pr-1">
-              {expiringNodes.map((n) => {
+              {expiringNodes.map((n, i) => {
                 const next = renewedExpiry(n.expires_at, n.billing_cycle, todayLocal)
                 const asking = renewAsk === n.id
                 const days = daysUntil(n.expires_at)
+                // ⭐ **两组之间那条微弱的分隔线** ✓（用户第 2 条的后半句 ✓）：
+                // 列表按紧急度升序 ✓ ⇒ "已过期"全在前面 ✓；**进入第一台未过期**时画一条线 ✓
+                // （用条件边框 ✓ 不新增元素 ✓ —— 与那条 `divide-y` 同一种做法 ✓）。
+                const boundary =
+                  i > 0 &&
+                  (daysUntil(expiringNodes[i - 1].expires_at) ?? 0) < 0 &&
+                  (days ?? 0) >= 0
                 return (
                   // ⚠️ **左信息 / 右操作 两栏** ✗✓（前端同事第 ② 条 ✓ —— 也是这里最要紧的一条 ✓）：
                   // 原来是 `flex-wrap` ✓ ⇒ 东西一多，"我已续费"就**被挤到第二行** ✓✗
                   // （他截图里正是那样 ✓）。⚠️ 而**不套小卡片** ✗：本仓那张姊妹弹窗
                   // （"某天到期明细" ✓ 就是我们复用它的那张 ✓）用的是 `divide-y` ✓
                   // ⇒ 保持**同一套语汇** ✓，但把行距加大 ✓（"呼吸感"那句他说得对 ✓）。
-                  <div key={n.id} className="flex items-center justify-between gap-3 py-3.5">
+                  <div
+                      key={n.id}
+                      className={`flex items-center justify-between gap-3 py-3.5 ${boundary ? "border-t border-border/60" : ""}`}
+                    >
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{n.name}</span>
@@ -1846,7 +1863,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         )}
                       </div>
                     </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1.5">
+                    {/* ⚠️ **同一行、不要竖排** ✗✓（用户第 1 条 ✓）：我先前写成 `flex-col` ✓ ⇒
+                        胶囊一行 + 按钮一行 ✓ ⇒ **每一行被撑到 70px+** ✓✗（他截图里一眼可见 ✓）。
+                        左侧本来就是两行 ✓ ⇒ 右侧**一行**正好配平 ✓✓。 */}
+                    <div className="flex shrink-0 items-center gap-2">
                       {/* ⚠️ **紧急程度分级** ✓（同事第 ③ 条 ✓）—— 但**颜色走 token** ✗✗：
                           他写的是 `bg-rose-50 text-rose-600` ✓ 那是写死颜色 ✓
                           ⇒ 本仓一律 `bg-destructive/10` / `bg-warn/10` ✓（换主题不会漏 ✓）。 */}
