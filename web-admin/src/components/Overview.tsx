@@ -1588,18 +1588,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
             </p>
           ) : (
-            <div className="space-y-1 text-xs">
-              {probeRows.map((r, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="font-mono text-muted-foreground/70">
-                    {new Date(r.at * 1000).toLocaleString()}
-                  </span>
-                  <span className="font-medium">{r.service}</span>
-                  <span>{r.status}</span>
-                  {r.region ? <span className="text-muted-foreground">{r.region}</span> : null}
-                </div>
-              ))}
-            </div>
+            <ProbeMatrix rows={probeRows} />
           )}
         </DialogContent>
       </Dialog>
@@ -1849,6 +1838,146 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
     </div>
   )
 }
+/// ⭐ **探测点阵** ✓✓（用户提的做法 ✓）：一行一个服务 ✓ · 一格 = 一次 6 小时 ✓ ——
+/// 点会汇成一张阵 ✓，于是"**从什么时候开始不对劲**"一眼可见 ✓✓。
+///
+/// ⚠️⚠️ **列的位置由时间算，不是"有几个点就画几个"** ✗✗ —— 这是整个组件最要紧的地方 ✓：
+/// 夹具里就有"整整一天没有记录"的情形 ✓，若按顺序画 ✓，缺的那一天会让**后面的每个点都左移** ✓✗
+/// ⇒ 点阵会**谎报时间** ✓✗（正是"错值看起来完全正常"那一类 ✓）。
+/// ⇒ 第 k 列固定是 `start + k×6h` ✓✓。
+///
+/// ⚠️ **空格与"测了不通"必须长得不一样** ✓✓：没数据 ⇒ 一个很淡的**空槽** ✓
+///（不是灰点 ✓ 也不是红点 ✓）—— 这与"失败不是结论"是同一条 ✓，只是这次它**看得见** ✓。
+/// ⚠️ **整行没有数据**（这个服务从没测过 ✓）⇒ 单独写一句 ✓，而不是画 120 个空槽 ✓✗。
+const PROBE_SERVICES = ["netflix", "tiktok", "reddit", "chatgpt", "amazonpv", "youtube"] as const
+const PROBE_LABELS: Record<string, string> = {
+  netflix: "Netflix",
+  tiktok: "TikTok",
+  reddit: "Reddit",
+  chatgpt: "ChatGPT",
+  amazonpv: "Prime Video",
+  youtube: "YouTube",
+}
+const PROBE_STEP = 6 * 3600
+const PROBE_SLOTS = 30 * 4
+
+/// 一格的观感 ✓（四种色沿用本仓 `riskTone` 那一套 ✓，不发明 ✗）。
+/// ⚠️ 只给"值得看的"上色 ✗：正常解锁是**常态** ✓ ⇒ 淡绿 ✓；有问题的才抢眼 ✓✓。
+function probeTone(status?: string): string {
+  switch (status) {
+    case "unlocked":
+      return "bg-ok/45"
+    case "blocked":
+      return "bg-destructive"
+    case "idc":
+    case "web":
+    case "app":
+    case "noprem":
+      return "bg-warn"
+    case "cn":
+      return "bg-destructive/70"
+    case "unknown":
+      return "bg-muted-foreground/40"
+    default:
+      return ""
+  }
+}
+
+function probeWord(status: string): string {
+  switch (status) {
+    case "unlocked":
+      return "解锁"
+    case "blocked":
+      return "未解锁"
+    case "idc":
+      return "解锁（机房）"
+    case "web":
+      return "仅网页可用"
+    case "app":
+      return "仅 App 可用"
+    case "cn":
+      return "中国区"
+    case "noprem":
+      return "可用·无会员"
+    case "unknown":
+      return "没读明白"
+    default:
+      return status
+  }
+}
+
+function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
+  const latest = rows.reduce((m, r) => Math.max(m, r.at), 0)
+  const end = Math.ceil(latest / PROBE_STEP) * PROBE_STEP
+  const start = end - (PROBE_SLOTS - 1) * PROBE_STEP
+  // ⚠️ 列号由**时间**算 ✓✓（不是数组下标 ✗ —— 见上面那段说明 ✓）
+  const slotOf = (at: number) => Math.round((at - start) / PROBE_STEP)
+  const byService = new Map<string, Map<number, ProbeHistoryRow>>()
+  for (const r of rows) {
+    const k = slotOf(r.at)
+    if (k < 0 || k >= PROBE_SLOTS) continue
+    if (!byService.has(r.service)) byService.set(r.service, new Map())
+    byService.get(r.service)!.set(k, r)
+  }
+  // ⚠️ **有问题的排在上面** ✓（运维先看坏的 ✓）
+  const order = PROBE_SERVICES.map((sv) => {
+    const m = byService.get(sv)
+    const lastK = m && m.size ? Math.max(...m.keys()) : -1
+    const st = lastK >= 0 ? m!.get(lastK)!.status : undefined
+    // 名次：有问题的最前 ✓ · 正常的中间 ✓ · 从没测过的最后 ✓（它是"没有"，不该抢眼 ✓）
+    const rank = m === undefined ? 2 : st === "unlocked" ? 1 : 0
+    return { sv, m, rank }
+  }).sort((a, b) => a.rank - b.rank || a.sv.localeCompare(b.sv))
+  const fmt = (at: number) => new Date(at * 1000).toLocaleString()
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
+        <span className="w-20 shrink-0" />
+        <span>{fmt(start)}</span>
+        <span className="ml-auto">{fmt(end + PROBE_STEP)}</span>
+      </div>
+      {order.map(({ sv, m }) => (
+        <div key={sv} className="flex items-center gap-2">
+          <span className="w-20 shrink-0 truncate font-medium">{PROBE_LABELS[sv] ?? sv}</span>
+          {m === undefined ? (
+            <span className="text-muted-foreground/60">这个服务还没有记录</span>
+          ) : (
+            <div
+              className="grid min-w-0 flex-1 gap-px"
+              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(0, 1fr))` }}
+            >
+              {Array.from({ length: PROBE_SLOTS }, (_, k) => {
+                const r = m.get(k)
+                const at = start + k * PROBE_STEP
+                return r ? (
+                  <span
+                    key={k}
+                    title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""}`}
+                    className={`h-2.5 rounded-[2px] ${probeTone(r.status)}`}
+                  />
+                ) : (
+                  <span
+                    key={k}
+                    title={`${fmt(at)} · 没有记录`}
+                    className="h-2.5 rounded-[2px] bg-muted/60"
+                  />
+                )
+              })}
+            </div>
+          )}
+        </div>
+      ))}
+      <p className="pt-1 text-[11px] leading-relaxed text-muted-foreground/70">
+        一行一个服务，一格 = 一次 6 小时（共 30 天）。
+        <span className="font-medium">越深表示那一次结论越需要注意</span>
+        ；很淡的空槽表示那一次
+        <span className="font-medium">没有记录</span>
+        ——它与"测了不通"是两回事。历史从 hub 开始记录那天起累积，更早的结果只保留了最后一次。
+      </p>
+    </div>
+  )
+}
+
 
 // ───────────────────────── 成本 ─────────────────────────
 
