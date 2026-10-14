@@ -13,6 +13,7 @@ use axum::Json;
 use chrono::{Local, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -477,7 +478,26 @@ pub async fn nodes(State(app): State<Shared>, headers: HeaderMap) -> Response {
     // The same rendered frame the browser streams receive, for the same reason:
     // otherwise every visitor would rebuild every node's row against the
     // connection the agents write through.
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], live_snapshot(&app, full).as_str().to_owned())
+    let snapshot = live_snapshot(&app, full);
+    // 条件请求：内容没变就只回一个 304。
+    // 面板在流断掉时会退回每 5 秒轮询一次，而那时拉的是整份快照；
+    // 快照本身有 1.9 秒的缓存，所以这里省下的是**传输与客户端的解析**，不是服务端的计算。
+    // ETag 用内容自己的摘要，所以它只在内容真的变了时才变。
+    let etag = axum::http::HeaderValue::from_str(&format!(
+        "\"{}\"",
+        &hex::encode(Sha256::digest(snapshot.as_bytes()))[..32]
+    ))
+    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"\""));
+    if headers.get(axum::http::header::IF_NONE_MATCH) == Some(&etag) {
+        return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json")),
+            (axum::http::header::ETAG, etag),
+        ],
+        snapshot.as_str().to_owned(),
+    )
         .into_response()
 }
 
@@ -774,15 +794,24 @@ pub async fn live_ws(State(app): State<Shared>, headers: HeaderMap, upgrade: Web
 
 async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+    // 上一帧推出去的是什么。没变就不再推：快照有 1.9 秒的缓存，
+    // 空闲时相邻两跳往往是同一份，而推过去面板就会整张表重渲染一次。
+    // 只比字节，不做解析——这是每秒每连接都要跑的一行。
+    let mut last: Option<Utf8Bytes> = None;
     loop {
         ticker.tick().await;
         // Closed rather than downgraded to the public frame, which would leave the
         // panel rendering a list with every admin field missing. The close allows
         // a client to re-query /api/me and determine its current state.
         let Some(full) = stream_audience(&app, session.as_deref()) else { break };
-        if socket.send(Message::Text(live_snapshot(&app, full))).await.is_err() {
+        let frame = live_snapshot(&app, full);
+        if last.as_ref().is_some_and(|previous| previous == &frame) {
+            continue;
+        }
+        if socket.send(Message::Text(frame.clone())).await.is_err() {
             break;
         }
+        last = Some(frame);
     }
 }
 
