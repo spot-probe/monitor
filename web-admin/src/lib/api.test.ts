@@ -1,5 +1,6 @@
 /// <reference types="node" />
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { addresses, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, isPublic, matchingGroups, provisioningSite, shortAddress, trafficCorrection } from "./api.ts"
 
 assert.deepEqual(changes({ public: true, price: 5 }, { price: 20 }), { price: 20 })
@@ -136,3 +137,20 @@ assert.equal(shortAddress("fe80::1"), "fe80::1")
 assert.equal(shortAddress("aaaa:bbbb:cccc:dddddddddd"), "aaaa:bbbb:cccc:dddddddddd", "too few groups to cut one from each end")
 
 console.log("partial edits, traffic corrections, provisioning and address checks and theme-config checks passed")
+
+// ⚠️⚠️ **回归闸：`refresh` 必须是稳定引用** ✗✗
+// 它原来是 `refresh: () => setReload((n) => n + 1)` —— **内联箭头** ✓ ⇒
+// **每次渲染都是新函数** ✓✗，而消费者把它放进 effect 依赖里 ⇒
+// 调用 refresh() ⇒ setReload ⇒ 重渲染 ⇒ 新 refresh ⇒ effect 依赖变了 ⇒ **立即再调** ⇒ 失控回路。
+// 实测后果：打开「自动刷新」后，面板以**每秒上百次**请求 `/api/nodes`，
+// 生产上出现过 **21 万次**失败请求，而且那个循环**把自己的 hub 压垮**（满屏"连不上 hub"）。
+// ⚠️ 这种事**注释挡不住** ✗ —— 所以让这条测试挡住 ✓：写成内联箭头就红 ✓。
+const apiSrc = readFileSync(new URL("./api.ts", import.meta.url), "utf8")
+assert.ok(
+  !/refresh:\s*\(\)\s*=>/.test(apiSrc),
+  "refresh 不能写成内联箭头（会让消费者 effect 的依赖每渲染都变，形成请求回路）",
+)
+assert.ok(
+  /const refresh = useCallback\(/.test(apiSrc),
+  "refresh 应当用 useCallback 固定住",
+)

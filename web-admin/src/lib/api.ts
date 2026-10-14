@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useCallback, useState } from "react"
 
 export type Metrics = {
   uptime: number
@@ -461,6 +461,9 @@ export class ApiError extends Error {
   }
 }
 
+/// 已经为哪几条路径报过"网络失败" ✓（成功一次就清掉 ✓ ⇒ 下次故障仍会报 ✓）。
+const netWarned = new Set<string>()
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
@@ -475,9 +478,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     // 最常见的成因是 **hub 正在重启**（升级、或崩了重启 ✓）—— 那是一次性的 ✓。
     // ⭐ 在这里翻译一次 ✓ ⇒ 所有调用者（~20 处 ✓）都受益 ✓，不必逐个改 ✓✓。
     // ⚠️ 原话仍然打到控制台 ✓ —— 排查时它有用 ✓，只是不该摆在界面上 ✓。
-    console.warn(`api ${path}: network failure`, e)
+    // ⚠️ **同一个路径只报一次** ✗✓：否则那段 5 秒轮询在 hub 挂掉时会把控制台刷爆 ✓✗
+    //（它恢复正常后再失败 ⇒ 会重新报一次 ✓ —— 不会把后续故障吞掉 ✓）。
+    if (!netWarned.has(path)) {
+      netWarned.add(path)
+      console.warn(`api ${path}: network failure`, e)
+    }
     throw new ApiError(0, "连不上 hub：网络中断，或 hub 正在重启。稍后重试一次通常就好。")
   }
+  netWarned.delete(path)
   if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText)
   return res.status === 204 ? (undefined as T) : res.json()
 }
@@ -616,5 +625,16 @@ export function useNodes() {
     }
   }, [reload])
 
-  return { nodes, admin, agentLatest, error, refresh: () => setReload((n) => n + 1) }
+  // ⚠️⚠️ **`refresh` 必须是稳定引用** ✗✗ —— 原来它写成内联箭头 ✓
+  // ⇒ **每次渲染都是一个新的函数** ✓✗ ⇒ 而消费者把它放进 effect 依赖里 ✓
+  // ⇒ 就出现了一条**失控回路** ✗✗：
+  //     调用 refresh() ⇒ setReload ⇒ 这里重渲染 ⇒ 返回**新的 refresh**
+  //     ⇒ 父组件重渲染 ⇒ 消费者的 effect 依赖变了 ⇒ **立即再调一次** ⇒ 转个不停。
+  // ⚠️ 实测后果 ✓：打开「自动刷新」之后，面板会以**每秒上百次**的速度请求 `/api/nodes` ✓✗
+  //    —— 生产上出现过 **21 万次**失败请求 ✓，而且那个循环**把自己的 hub 压垮** ✓
+  //    （于是满屏"连不上 hub" ✓ —— 自伤 ✓）。
+  // ⇒ 用 useCallback 固定它 ✓：依赖为空 ⇒ 无论渲染多少次都是同一个函数 ✓✓。
+  const refresh = useCallback(() => setReload((n) => n + 1), [])
+
+  return { nodes, admin, agentLatest, error, refresh }
 }
