@@ -558,6 +558,11 @@ export function useNodes() {
   useEffect(() => {
     let socket: WebSocket | null = null
     let poll: ReturnType<typeof setInterval> | null = null
+    // 上一次拿到的 ETag（轮询时带回去，内容没变 hub 只回一个 304）与上一帧的原文。
+    // 后者对流与轮询两条路都有效：一模一样就不 setNodes——那会给 React 一个新数组，
+    // 整张表因此重渲染一次，而屏幕上什么都没有变。
+    let etag: string | null = null
+    let lastFrame: string | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
     let closed = false
 
@@ -565,23 +570,30 @@ export function useNodes() {
     // still arrive afterwards; it is dropped rather than written over the newer
     // one. The 401 below is the reason it matters: a stale refusal would turn a
     // working session back into an anonymous one.
-    const fetchOnce = () =>
-      api<{ nodes: Node[]; admin: boolean; agent_latest?: string | null }>("/nodes")
-        .then((d) => {
-          if (closed) return
-          setNodes(d.nodes)
-          setAdmin(d.admin)
-          setAgentLatest(d.agent_latest ?? null)
-          setError(null)
-        })
-        .catch((e: Error) => {
-          if (closed) return
-          setError(e.message)
-          // With the public page switched off, a revoked session receives a 401
-          // here and on the stream, so the frame that would report admin=false
-          // never arrives and the panel would retain the list it already had.
-          if (e instanceof ApiError && e.status === 401) setAdmin(false)
-        })
+    const fetchOnce = async () => {
+      try {
+        const res = await fetch("/api/nodes", etag ? { headers: { "if-none-match": etag } } : undefined)
+        if (closed) return
+        // 304：内容与上次一样，什么都别做（这正是带上 ETag 的目的）。
+        if (res.status === 304) return
+        if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText)
+        etag = res.headers.get("etag")
+        const d = (await res.json()) as { nodes: Node[]; admin: boolean; agent_latest?: string | null }
+        if (closed) return
+        lastFrame = JSON.stringify(d)
+        setNodes(d.nodes)
+        setAdmin(d.admin)
+        setAgentLatest(d.agent_latest ?? null)
+        setError(null)
+      } catch (e) {
+        if (closed) return
+        setError((e as Error).message)
+        // With the public page switched off, a revoked session receives a 401
+        // here and on the stream, so the frame that would report admin=false
+        // never arrives and the panel would retain the list it already had.
+        if (e instanceof ApiError && e.status === 401) setAdmin(false)
+      }
+    }
 
     fetchOnce()
 
@@ -597,6 +609,10 @@ export function useNodes() {
         return
       }
       socket.onmessage = (event) => {
+        // 与上一帧一模一样就不动状态：setNodes 会给 React 一个新数组，
+        // 整张表因此重渲染一次，而屏幕上什么都没有变（空闲机群上这是常态）。
+        if (typeof event.data === "string" && event.data === lastFrame) return
+        lastFrame = typeof event.data === "string" ? event.data : null
         const frame = JSON.parse(event.data)
         setNodes(frame.nodes)
         setAdmin(frame.admin)
