@@ -724,7 +724,12 @@ fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
     // `cn` = 响应里出现 `www.google.cn` ✓（YouTube 在中国那一档 ✓）；
     // `noprem` = "Premium is not available in your country" ✓
     // ⇒ "**YouTube 能用，但 Premium 在这个国家买不到**" ✓✓（又一个"部分可用" ✓）。
-    const STATUSES: [&str; 8] = ["unlocked", "blocked", "unknown", "idc", "web", "app", "cn", "noprem"];
+    // ⚠️ **`org` 必须排在 agent 之前发** ✗✗：agent 一旦上报这个词 ✓，
+    // 而这里还不认 ⇒ **整项被静默丢掉** ✓（不报错 ✓ 只是那台机器少一格 ✓ —— 最难查的那种 ✓）。
+    // ⭐ `org` = Netflix「**仅自制**」✓（参考实现的 `NF.Only` ✓）：那一档**能用** ✓，
+    // 但只有自制剧能看 ✓ ⇒ 与 `web`/`app`/`noprem` 同属"**能用但有条件**" ✓✓。
+    const STATUSES: [&str; 9] =
+        ["unlocked", "blocked", "unknown", "idc", "web", "app", "cn", "noprem", "org"];
 
     // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
     let raw = serde_json::to_string(params).ok()?;

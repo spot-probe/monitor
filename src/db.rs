@@ -1170,6 +1170,14 @@ fn rolled(conn: &Connection) -> Result<Option<i64>> {
     Ok(value.and_then(|v| v.parse().ok()))
 }
 
+/// 这个节点**最早的分钟行** ✓（没有就是 `None`）。
+/// ⚠️ 按主键 `(node_id, ts)` 寻道 ✓，不是全表扫描 ✓ —— 与上面 `oldest` 同一个理由 ✓。
+fn oldest_minute(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached("SELECT MIN(ts) FROM metric WHERE node_id=?1")?
+        .query_row([node_id], |r| r.get(0))?)
+}
+
 /// The earliest `ts` across `tables`, sought one node at a time: every key in
 /// these tables begins with `node_id`, so `MIN(ts)` over a whole table scans it
 /// (15.9 s at 90 days of 100 nodes) where this seeks (1.8 ms).
@@ -2715,6 +2723,19 @@ impl Db {
     pub fn metrics_window(&self, node_id: i64, since: i64, step: i64) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn();
         let rolled = rolled(&conn)?.unwrap_or(0);
+        // ⚠️⚠️ **分钟行还在的范围内，优先用分钟行** ✗✗ —— 它比小时行细 ✓。
+        // 分界取「折桶水印」与「这个节点最早的分钟行」里**更早**的那个 ✓：
+        //   · 正常情形（分钟层还在、水印在最近一两小时）⇒ 取最早的分钟行
+        //     ⇒ **整个窗口都由分钟行回答** ✓✓ —— 主题那几档的步长全都比一小时细
+        //     （60 / 60 / 60 / 420 / 1800 秒 ✓），从此**不再有接缝** ✓；
+        //   · 折桶落后于分钟层（hub 停机一段时间）⇒ 取水印 ⇒ 与从前一致 ✓，
+        //     不会去读那一小时还没生成的小时行 ✓；
+        //   · 这个节点没有分钟行 ⇒ 取水印 ✓（整窗由小时行回答 ✓）。
+        // ⚠️ 之所以能这样换 ✓：小时行**是从分钟行折出来的** ✓ ⇒ 同一段时间里
+        // 分钟行只会更细、不会更少 ✓；而 `prune` 只删"已经折过"的那部分分钟行
+        //（它取 `keep_days.min(DETAIL_DAYS)` 与水印里更早的那个 ✓）⇒ 不会出现
+        // "分钟行删了、小时行还没折"的空档 ✓。
+        let split = oldest_minute(&conn, node_id)?.map_or(rolled, |first| rolled.min(first));
         let mut stmt = conn.prepare_cached(
             "SELECT (b.ts/?4)*?4, SUM(b.cpu*b.w)*1.0/SUM(b.w),
                     CAST(SUM(b.mem_used*b.w)*1.0/SUM(b.w) AS INTEGER),
@@ -2735,7 +2756,7 @@ impl Db {
                  FROM metric WHERE node_id=?1 AND ts>=?2 AND ts>=?3
              ) b GROUP BY (b.ts/?4)*?4 ORDER BY (b.ts/?4)*?4",
         )?;
-        let rows = stmt.query_map(params![node_id, since, rolled, step], |r| {
+        let rows = stmt.query_map(params![node_id, since, split, step], |r| {
             Ok(serde_json::json!({
                 "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
                 "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
@@ -5193,6 +5214,52 @@ mod tests {
             }
         }
         let _ = until;
+    }
+
+    /// ⚠️⚠️ **窗口跨折桶水印、而步长比一小时细**时，两种来源也必须给出同样的桶 ✗✗。
+    ///
+    /// 上面那条只测了 1 小时及更粗的步长 —— 那种步长下，小时行恰好一个小时落进一个桶，
+    /// 于是两份结果相等，**接缝看不见**。而主题真正请求的步长**全都比一小时细**
+    /// （`points` 按设备像素算、hub 再夹到 1440 ⇒ 1 小时到 30 天档的 step 是
+    /// 60 / 60 / 60 / 420 / 1800 秒）。那种步长下，小时行**每小时只能填一个桶** ✗
+    /// ⇒ 图上前一段一小时一个点、最近一两小时一分钟一个点 ⇒ 看着像"最近一小时开始抖了" ✓✗。
+    #[test]
+    fn a_window_across_the_watermark_stays_dense_at_a_fine_step() {
+        let db = db();
+        let id = node(&db, 1);
+        let start = 472_224 * 3_600;
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                db.insert_metric(
+                    id,
+                    start + h * 3_600 + m * 60,
+                    &serde_json::json!({"cpu": h as f64 + m as f64 / 100.0, "mem_used": 1_000 + m,
+                        "swap_used": 10, "disk_used": 5, "net_rx": 100 + m, "net_tx": 50,
+                        "load1": 0.25, "net_rx_max": 900 + m, "net_tx_max": 400}),
+                )
+                .unwrap();
+            }
+        }
+        // 三小时折进汇总表、三小时仍是分钟行 ⇒ 接缝落在窗口中间 ✓
+        for h in 0..3i64 {
+            let when = start + h * 3_600 + 7_200;
+            db.roll_up(when, 30).unwrap();
+            db.fold_hour(start + h * 3_600).unwrap();
+        }
+        for step in [60i64, 300, 900] {
+            let window = db.metrics_window(id, start, step).unwrap();
+            let minutes = db.metrics(id, start, step).unwrap();
+            assert_eq!(
+                window.len(),
+                minutes.len(),
+                "step {step}: 分钟行还在的范围内，窗内桶数必须与纯分钟行一致（现在更少 ⇒ 接缝 ✗）"
+            );
+            assert_eq!(
+                window.first().map(|r| r["ts"].clone()),
+                minutes.first().map(|r| r["ts"].clone()),
+                "step {step}: 第一个桶也要一致"
+            );
+        }
     }
 
     /// The hourly tier's probe series answer what the minute rows do, hour per point

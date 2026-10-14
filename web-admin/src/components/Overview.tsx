@@ -2093,6 +2093,7 @@ function probeRank(status?: string): number {
     case "web":
     case "app":
     case "noprem":
+    case "org":
       return 1
     case "unknown":
       return 2
@@ -2117,6 +2118,7 @@ function probeTone(status?: string): string {
     case "web":
     case "app":
     case "noprem":
+    case "org":
       return "bg-warn"
     case "cn":
       return "bg-destructive/70"
@@ -2143,6 +2145,9 @@ function probeWord(status: string): string {
       return "中国区"
     case "noprem":
       return "可用·无会员"
+     case "org":
+       // ⭐ Netflix「仅自制」✓ —— 用户那张参考实现的图上就是这四个字 ✓，照它写 ✓。
+       return "仅自制"
     case "unknown":
       return "没读明白"
     default:
@@ -2300,7 +2305,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
         </span>
         <span className="flex items-center gap-1.5">
           <span className="size-2.5 rounded-full bg-warn" />
-          受限（机房 / 仅一边可用 / 买不到会员）
+          受限（机房 / 仅一边可用 / 买不到会员 / 仅自制）
         </span>
         <span className="flex items-center gap-1.5">
           <span className="size-2.5 rounded-full bg-destructive" />
