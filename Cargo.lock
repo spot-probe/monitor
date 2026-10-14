@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-hub"
-version = "1.11.18"
+version = "1.11.19"
 dependencies = [
  "anyhow",
  "argon2",
