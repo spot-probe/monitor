@@ -1407,10 +1407,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   </div>
                   {/* ⚠️ **时效** ✓✓ —— 这一格的命就是它：没有"多久之前"，
                       一条三周前的"解锁"看起来和刚测的一样 ✓✗。 */}
-                  {n.probe_at ? (
+                  {oldestProbeAt(n) > 0 ? (
                     <div className="truncate text-[11px] text-muted-foreground/70">
                       {(() => {
-                        const mins = Math.max(0, Math.round((Date.now() / 1000 - n.probe_at) / 60))
+                        const mins = Math.max(0, Math.round((Date.now() / 1000 - oldestProbeAt(n)) / 60))
                         if (mins < 2) return "刚刚测的"
                         if (mins < 90) return `${mins} 分钟前`
                         const hours = Math.round(mins / 60)
@@ -2127,6 +2127,20 @@ function probeTone(status?: string): string {
     default:
       return ""
   }
+}
+
+/// ⚠️ **这些结论里最旧的那条自己的时间** ✗✓ —— 用它代替 `probe_at` ✓：
+/// `probe_at` 是"**最后一次收到上报**"的时间 ✓，而 hub 现在会**保留**这一轮没测到的服务 ✓
+/// ⇒ 拿它说"这些结论有多新"会**偏新** ✓✗。取最旧的那条 ⇒ 至少不会把旧的当成新的 ✓✓。
+/// ⚠️ 升级前存的老数据**没有 `at`** ✗ ⇒ 退回 `probe_at` ✓（不因为缺字段就不显示 ✓）。
+/// ⚠️ 返回 `number` 而**不是 `number | null`** ✗ —— JSX 里同一个表达式会被调用两次 ✓，
+/// 而 TypeScript 收窄不了"第二次调用也不为 null" ✓✗（我第一版就是那样 ⇒ `TS2531` ✓）。
+/// ⇒ **没有数据就返回 0** ✓，调用方用 `> 0` 判断 ✓。
+function oldestProbeAt(n: Node): number {
+  const ats = Object.values(n.probe ?? {})
+    .map((v) => v.at)
+    .filter((x): x is number => typeof x === "number")
+  return ats.length > 0 ? Math.min(...ats) : (n.probe_at ?? 0)
 }
 
 function probeWord(status: string): string {

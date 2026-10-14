@@ -2146,10 +2146,45 @@ impl Db {
     /// 同一秒里重复上报同一个服务时**覆盖** ✓（而不是报错 ✓，也不会长出两行 ✓）。
     pub fn save_probe(&self, id: i64, probe: &serde_json::Value, at: i64) -> Result<()> {
         let conn = self.conn();
+        // ⚠️⚠️ **合并，而不是整份覆盖** ✗✗ —— agent 只上报**成功**的服务 ✓
+        // ⇒ 整份覆盖会把这一轮没测到的那些键**抹掉** ✓✗ ⇒ 面板显示成"从来没测过" ✓
+        //（上一轮的已知值也一起没了 ✓）。
+        // ⇒ 改成：**本次报上来的覆盖 ✓ 没报的保留** ✓✓（缺键 = 这次没测到，不是没有过 ✓）。
+        // ⚠️⚠️ **配套的另一半不可省** ✗：面板必须把**每个服务自己的年龄**显示出来 ✓
+        //（它的真年龄在 `probe_history` 里那一行 ✓）—— 只做合并、不显示年龄 ⇒
+        // 就是把一个**几天前的结论**当成"现在的"摆出来 ✓✗（正是本仓最怕的那类错 ✓）。
+        let previous: serde_json::Map<String, serde_json::Value> =
+            match conn
+                .query_row("SELECT probe FROM node WHERE id=?1", [id], |r| r.get::<_, Option<String>>(0))
+            {
+                Ok(Some(raw)) => serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default(),
+                // ⚠️ 没有这一行 / 旧值是坏的 JSON ⇒ 当作"没有上一轮" ✓（不因为一格坏了整次上报失败 ✓）
+                _ => Default::default(),
+            };
+        let mut merged = previous;
+        if let Some(o) = probe.as_object() {
+            for (service, item) in o {
+                // ⚠️⚠️ **给这一条盖上它自己的测量时间** ✗✓ —— 这是"年龄"的**出处** ✓✓：
+                // 面板要能回答"这个结论是什么时候的" ✓ ⇒ 靠 `node.probe` 就够 ✓，
+                // 不必为每台节点再去拉一次历史 ✓。
+                // ⚠️ 而**结转下来**的那些**不动** ✗ ⇒ 它们的 `at` 还是**上一轮真测到**的时刻 ✓✓
+                //（⭐ 这正是"缺键保留"与"标出年龄"能一起成立的原因 ✓）。
+                let mut one = item.clone();
+                if let Some(m) = one.as_object_mut() {
+                    m.insert("at".to_string(), serde_json::json!(at));
+                }
+                merged.insert(service.clone(), one);
+            }
+        }
         conn.execute(
             "UPDATE node SET probe=?2, probe_at=?3 WHERE id=?1",
-            rusqlite::params![id, probe.to_string(), at],
+            rusqlite::params![id, serde_json::Value::Object(merged).to_string(), at],
         )?;
+        // ⚠️ 历史**只写本次真报上来的** ✗（保持原样 ✓）——
+        // 于是"这一轮没测到"在点阵上自然表现为**一个空格** ✓✓（那正是它该有的样子 ✓）。
         if let Some(o) = probe.as_object() {
             for (service, item) in o {
                 conn.execute(
@@ -2167,9 +2202,6 @@ impl Db {
         }
         // ⚠️ **保留策略** ✗（必须的 ✓ —— 见建表处那段说明 ✓）：
         // 顺手在同一处清理 ✓，**不另造定时器** ✓（少一个会自己停掉的东西 ✓）。
-        // ⚠️ 这条按 `at` 删 ✓，而索引是 `(node_id, at)` ✗ ⇒ 它**用不上那个索引** ✓；
-        // 但历史表很小 ✓（30 天 × 最多几千行 ✓）⇒ 全表扫描无所谓 ✓✓
-        //（若哪天节点数上到几百 ✓，"按 at 建个索引"就是第一件该做的事 ✓）。
         conn.execute("DELETE FROM probe_history WHERE at < ?1", [at - PROBE_HISTORY_KEEP_DAYS * 86_400])?;
         Ok(())
     }
@@ -7223,5 +7255,60 @@ mod heatmap_tests {
         assert_eq!(youtube.2, None, "没地区的服务 region 是 None ✓");
         let netflix = rows.iter().find(|r| r.0 == "netflix").unwrap();
         assert_eq!(netflix.2.as_deref(), Some("JP"));
+    }
+
+    /// ⚠️⚠️ **缺键 = 这次没测到，不是"从来没有过"** ✗✗ —— 这正是本仓最怕那类错的**反面** ✓：
+    /// agent 只上报成功的服务 ✓ ⇒ 全覆盖会把这一轮没测到的键**抹掉** ✓✗
+    /// ⇒ 面板显示成"从来没测过" ✓，而上一轮的已知值也一起没了 ✓。
+    #[test]
+    fn a_report_that_omits_a_service_keeps_the_previous_one() {
+        let db = Db::open(":memory:").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO node (id, name, token, ip, country, created_at) VALUES (1,'x','tok','','',0)",
+                [],
+            )
+            .unwrap();
+        let id = 1i64;
+        // 第一轮：两个服务都测到了
+        db.save_probe(
+            id,
+            &serde_json::json!({"netflix": {"status": "unlocked", "region": "JP"},
+                                "youtube": {"status": "unlocked", "region": "US"}}),
+            1_700_000_000,
+        )
+        .unwrap();
+        // 第二轮：只报了 netflix（youtube 这一轮**没测到**）
+        db.save_probe(id, &serde_json::json!({"netflix": {"status": "blocked"}}), 1_700_086_400).unwrap();
+        let probe: serde_json::Value = serde_json::from_str(
+            &db.conn().query_row("SELECT probe FROM node WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(probe["netflix"]["status"], "blocked", "本轮报上来的要覆盖 ✓");
+        assert_eq!(probe["youtube"]["status"], "unlocked", "本轮没报的必须**保留** ✓（不是抹掉 ✗）");
+        assert_eq!(probe["youtube"]["region"], "US", "连地区一起保留 ✓");
+        // ⚠️ 而"年龄"就靠这一对 `at` 区分 ✓✓：本轮的盖本轮时间 ✓，结转的**保留它自己的** ✓
+        // ⇒ 面板因此能说"这个结论是那时的" ✓（而不是把旧的当成新的 ✓✗）。
+        assert_eq!(probe["netflix"]["at"], 1_700_086_400, "本轮这条盖本轮时间 ✓");
+        assert_eq!(probe["youtube"]["at"], 1_700_000_000, "结转下来的保留**它自己的**时间 ✓✓");
+        // ⚠️ 而历史里**只应有两轮真报上来的行** ✓（youtube 只有第一轮那行 ✓）
+        // ⇒ 于是点阵上 youtube 那一格自然是一个**空格** ✓✓（那正是它该有的样子 ✓）。
+        let rows: Vec<(String, i64)> = db
+            .conn()
+            .prepare("SELECT service, at FROM probe_history ORDER BY at, service")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("netflix".to_string(), 1_700_000_000),
+                ("youtube".to_string(), 1_700_000_000),
+                ("netflix".to_string(), 1_700_086_400),
+            ],
+            "历史只记本次真报上来的 ✓"
+        );
     }
 }

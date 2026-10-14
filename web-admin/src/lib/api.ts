@@ -100,7 +100,7 @@ export type Node = {
    * ⚠️ 那几个状态字符串与 hub 的白名单**逐字一致** ✓（hub 那边有测试钉住它们 ✓；
    * 面板这边只**显示**、不判断 ✓ —— 判据一处就够 ✓）。
    */
-  probe?: Record<string, { status?: string; region?: string }> | null
+  probe?: Record<string, { status?: string; region?: string; at?: number }> | null
   /**
    * 那次探测**什么时候**做的 ✓（Unix 秒 ✓，**由 hub 盖** ✓）。
    * ⚠️ 这一块的命就是"时效" ✓：没有它，一条三周前的"解锁"看起来和刚测的一样 ✓✗。
