@@ -521,6 +521,14 @@ pub struct Window {
     series: Option<String>,
 }
 
+/// 一次请求最多点名多少个探测任务。
+///
+/// ⚠️ 这条上限是**载荷**的护栏，不是性能的：返回的行数是「节点数 × 桶数 × 任务数」，
+/// 而桶数由 `points` 决定（不传就是 1440 ⇒ 24 小时窗口下一分钟一个点）。
+/// 100 台机器 × 1440 桶 × 20 个任务 ≈ 288 万行 —— 那已经是一条响应存不下的量级 ✓✗。
+/// ⇒ 点名很多任务时**一定**要同时传 `points`；这里只是不让一次请求失控到无法挽回。
+const MAX_TASKS_PER_REQUEST: usize = 20;
+
 fn default_hours() -> i64 {
     6
 }
@@ -1785,6 +1793,12 @@ pub struct PingSeriesQuery {
     /// 历史查询闸门只有 4 个许可，6 个任务并发会有两条被 503 拒掉，而被前端 catch 吞掉 ⇒ 静默少线）。
     #[serde(default)]
     task: Option<i64>,
+    /// 逗号分隔的任务 id，如 `tasks=1,2,3` ✓。与 `task` 二选一；两个都不给 = 全部 ✓。
+    ///
+    /// 为什么不只用"全部"：返回的行数是 **节点数 × 桶数 × 任务数** ✓ ⇒ 任务很多时一条响应会很大，
+    /// 所以调用者要能点名自己真正要画的那几个。上界见 [`MAX_TASKS_PER_REQUEST`]。
+    #[serde(default)]
+    tasks: Option<String>,
     hours: Option<i64>,
     points: Option<i64>,
     /// 只看某个分组；不传即全部节点。空串归一成 None（与其它端点同一套规矩）。
@@ -1801,17 +1815,39 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
     let since = Utc::now().timestamp() - hours * 3_600;
     // **Owned**：借用 `q.group` 活不过这一帧，而 `spawn_blocking` 的闭包要求 `'static`。
     let group = q.group.filter(|g| !g.is_empty());
-    let task = q.task;
-    let built =
-        tokio::task::spawn_blocking(move || app.db.ping_series_by_task(task, since, step, group.as_deref()))
-            .await;
+    // ⭐ 选择哪些任务：`tasks=1,2` 优先，其次单个 `task`，都不给 = 全部 ✓。
+    // 转成 JSON 数组文本交给 db —— 那边用 `json_each` 吃它，不必动态拼占位符。
+    let chosen: Option<Vec<i64>> = match (q.tasks.as_deref(), q.task) {
+        (Some(list), _) => Some(list.split(',').filter_map(|x| x.trim().parse::<i64>().ok()).collect()),
+        (None, Some(id)) => Some(vec![id]),
+        (None, None) => None,
+    };
+    if let Some(ids) = &chosen {
+        if ids.len() > MAX_TASKS_PER_REQUEST {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("一次最多点名 {MAX_TASKS_PER_REQUEST} 个任务；要更多请缩小窗口或分开取"),
+            )
+                .into_response();
+        }
+    }
+    let task = chosen.as_ref().and_then(|ids| ids.first().copied());
+    let tasks: Option<String> =
+        chosen.map(|ids| format!("[{}]", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")));
+    // 闭包要走所有权 ⇒ 复制一份给查询，响应那一份留给调用者看"这次要了哪些"。
+    let tasks_for_query = tasks.clone();
+    let _ = &task;
+    let built = tokio::task::spawn_blocking(move || {
+        app.db.ping_series_by_task(tasks_for_query.as_deref(), since, step, group.as_deref())
+    })
+    .await;
     match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
         Ok(by_node) => {
             let nodes: serde_json::Map<String, Value> = by_node
                 .into_iter()
                 .map(|(id, (ping, loss))| (id.to_string(), json!({"ping": ping, "loss": loss})))
                 .collect();
-            Json(json!({ "hours": hours, "task": task, "nodes": nodes })).into_response()
+            Json(json!({ "hours": hours, "task": task, "tasks": tasks, "nodes": nodes })).into_response()
         }
         Err(e) => fail(e),
     }

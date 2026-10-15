@@ -1202,11 +1202,14 @@ fn oldest_ping_record(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
 
 /// 同上 ✓，但按**探测**问 ✓：`ping_series_by_task`（后台面板按任务看某个探测 ✓）
 /// 的窗口是按 task 切的 ✗ ⇒ 它需要"这个探测最早的逐分钟记录" ✓。
-fn oldest_ping_record_for_task(conn: &Connection, task_id: Option<i64>) -> Result<Option<i64>> {
-    // ⚠️ 可空是给"一次要全部任务"用的（面板刷新时不再一个任务一条请求）。
+fn oldest_ping_record_for_task(conn: &Connection, tasks: Option<&str>) -> Result<Option<i64>> {
+    // `tasks` 是 JSON 数组文本（`["1","2"]`），None = 全部任务；见 `ping_series_by_task`。
     Ok(conn
-        .prepare_cached("SELECT MIN(ts) FROM ping_record WHERE (?1 IS NULL OR task_id=?1)")?
-        .query_row([task_id], |r| r.get(0))?)
+        .prepare_cached(
+            "SELECT MIN(ts) FROM ping_record \
+             WHERE (?1 IS NULL OR task_id IN (SELECT value FROM json_each(?1)))",
+        )?
+        .query_row([tasks], |r| r.get(0))?)
 }
 
 /// The earliest `ts` across `tables`, sought one node at a time: every key in
@@ -2052,7 +2055,7 @@ impl Db {
     /// 图里静默少一条线。一次全要之后请求数从"任务数"降到 1，闸门也不会再被撞到。
     pub fn ping_series_by_task(
         &self,
-        task_id: Option<i64>,
+        tasks: Option<&str>,
         since: i64,
         step: i64,
         group: Option<&str>,
@@ -2063,11 +2066,11 @@ impl Db {
         // 原先把滚存水位直接当分界 ✓ ⇒ 水位以前一律读 `ping_hour` 的小时均值 ✓，
         // 哪怕 `ping_record` 的逐分钟行还在（能留 7 天 ✗）
         // ⇒ 后台面板那条"按任务看某个探测"的延迟曲线上，最近一段会突然变细、发颤 ✓✗。
-        let split = oldest_ping_record_for_task(&conn, task_id)?.map_or(rolled, |first| rolled.min(first));
+        let split = oldest_ping_record_for_task(&conn, tasks)?.map_or(rolled, |first| rolled.min(first));
         let mut stmt = conn.prepare_cached(
             "SELECT (ts/?5)*?5 AS bucket, node_id, task_id, latency, answered, lost, lo, hi FROM (
                SELECT ts, node_id, task_id, latency, answered, lost, lo, hi FROM ping_hour
-                WHERE (?1 IS NULL OR task_id=?1) AND ts>=?2 AND ts<?3
+                WHERE (?1 IS NULL OR task_id IN (SELECT value FROM json_each(?1))) AND ts>=?2 AND ts<?3
                   AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
                UNION ALL
                SELECT ts, node_id, task_id,
@@ -2076,11 +2079,11 @@ impl Db {
                       CASE WHEN latency < 0 THEN 1 ELSE 0 END,
                       CASE WHEN latency >= 0 THEN latency END,
                       CASE WHEN latency >= 0 THEN latency END
-                 FROM ping_record WHERE (?1 IS NULL OR task_id=?1) AND ts>=?2 AND ts>=?3
+                 FROM ping_record WHERE (?1 IS NULL OR task_id IN (SELECT value FROM json_each(?1))) AND ts>=?2 AND ts>=?3
                   AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
              ) ORDER BY node_id, (ts/?5)*?5",
         )?;
-        let mut rows = stmt.query(params![task_id, since, split, split, step, group])?;
+        let mut rows = stmt.query(params![tasks, since, split, split, step, group])?;
         let mut out: NodeTotals = Default::default();
         let mut node = -1i64;
         let mut bucket = -1i64;
@@ -5513,9 +5516,10 @@ mod tests {
             }
         }
         for step in [60i64, 300, 900] {
-            let by_task =
-                serde_json::to_value(db.ping_series_by_task(Some(probe), start, step, None).unwrap())
-                    .unwrap();
+            let by_task = serde_json::to_value(
+                db.ping_series_by_task(Some(&format!("[{probe}]")), start, step, None).unwrap(),
+            )
+            .unwrap();
             let mut by_task_ts = std::collections::BTreeSet::new();
             collect_ts(&by_task, &mut by_task_ts);
             let (minutes, _) = db.ping_records(id, start, step).unwrap();
@@ -7122,10 +7126,21 @@ mod tests {
             }
         }
         // ① 单个任务照旧 ✓
-        let one = db.ping_series_by_task(Some(1), minute - 3_600, 60, None).unwrap();
+        let one = db.ping_series_by_task(Some("[1]"), minute - 3_600, 60, None).unwrap();
         let rows = one.get(&n).expect("这台节点要有数据").0.clone();
         assert!(rows.iter().all(|r| r["task_id"] == serde_json::json!(1)), "只要任务 1 ✓");
-        // ② 不指定任务 ⇒ 两个任务都要在，而且各自可分辨 ✓
+        // ② 点名两个任务 ⇒ 一次取回、各自可分辨 ✓（面板"只画我要的"就靠这条 ✓）
+        let both = db.ping_series_by_task(Some("[1,2]"), minute - 3_600, 60, None).unwrap();
+        let rows = both.get(&n).expect("这台节点要有数据").0.clone();
+        let mut seen: Vec<i64> = rows.iter().filter_map(|r| r["task_id"].as_i64()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, vec![1, 2], "点名两个任务 ⇒ 两个都要在 ✓：{rows:?}");
+        // ③ 只点名一个 ⇒ 只要那一个 ✓
+        let only2 = db.ping_series_by_task(Some("[2]"), minute - 3_600, 60, None).unwrap();
+        let rows = only2.get(&n).expect("这台节点要有数据").0.clone();
+        assert!(rows.iter().all(|r| r["task_id"] == serde_json::json!(2)), "只要任务 2 ✓");
+        // ④ 不指定任务 ⇒ 两个任务都要在，而且各自可分辨 ✓
         let all = db.ping_series_by_task(None, minute - 3_600, 60, None).unwrap();
         let rows = all.get(&n).expect("这台节点要有数据").0.clone();
         let mut seen: Vec<i64> = rows.iter().filter_map(|r| r["task_id"].as_i64()).collect();
@@ -7170,7 +7185,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let many = db.ping_series_by_task(Some(1), minute - 3_600, 300, None).unwrap();
+        let many = db.ping_series_by_task(Some("[1]"), minute - 3_600, 300, None).unwrap();
         assert_eq!(many.len(), 2, "两台节点都该有序列");
         for n in &ids {
             let (one_rows, one_loss) = db.ping_window(*n, minute - 3_600, 300).unwrap();
@@ -7189,7 +7204,7 @@ mod tests {
             );
         }
         // 分组过滤：只取 east，应当只剩一台
-        let east = db.ping_series_by_task(Some(1), minute - 3_600, 300, Some("east")).unwrap();
+        let east = db.ping_series_by_task(Some("[1]"), minute - 3_600, 300, Some("east")).unwrap();
         assert_eq!(east.len(), 1, "按分组应当只剩一台");
     }
 

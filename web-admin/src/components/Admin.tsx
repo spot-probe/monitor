@@ -2267,8 +2267,12 @@ function Ping({ nodes }: { nodes: Node[] }) {
     // 此前是每个任务各一条、且全部并发，而 hub 的历史查询闸门只有 4 个许可 ⇒ 6 个任务时
     // 第 5、6 条必然被拒（503 too many history queries in flight），而下面那个 catch 又把
     // 失败吞掉 ⇒ 图上静默少一条线，只能靠 DevTools 发现。请求数从此是 1。
+    //
+    // ⚠️ **`points` 必须传** ✓：不传就是 hub 的默认 1440 ⇒ 24 小时窗口下一分钟一个点，
+    // 而一条线上的点数是「节点数 × 桶数 × 任务数」⇒ 任务一多，响应会大到画不动。
+    // 360 是"够画"与"别浪费"之间的选择（24 小时合每 4 分钟一个点）。
     api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
-      `/nodes/ping-series?hours=${winHours}`,
+      `/nodes/ping-series?hours=${winHours}&points=360`,
     )
       .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
       .catch((e) => {
