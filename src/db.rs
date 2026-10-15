@@ -1178,6 +1178,15 @@ fn oldest_minute(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
         .query_row([node_id], |r| r.get(0))?)
 }
 
+/// ping 那条路的同款 ✓：`ping_record`（逐分钟 ✓）里最早的一条 ✓，没有则 None ✓。
+/// ⚠️ 它与 `oldest_minute` 是两回事 ✗：metric 与 ping 的保留是各自 prune 的 ✓，
+/// 所以两个系列各自要问自己那一层还剩多少 ✓。
+fn oldest_ping_record(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached("SELECT MIN(ts) FROM ping_record WHERE node_id=?1")?
+        .query_row([node_id], |r| r.get(0))?)
+}
+
 /// The earliest `ts` across `tables`, sought one node at a time: every key in
 /// these tables begins with `node_id`, so `MIN(ts)` over a whole table scans it
 /// (15.9 s at 90 days of 100 nodes) where this seeks (1.8 ms).
@@ -3487,6 +3496,13 @@ impl Db {
     ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
         let conn = self.conn();
         let rolled = rolled(&conn)?.unwrap_or(0);
+        // ⚠️⚠️ 这一行是与 `metrics_window` **同一个 bug 的同一个修法** ✗✗：
+        // 原来直接拿滚存水位当分界 ✓ ⇒ 水位（约两小时前 ✓）以前的部分一律读
+        // `ping_hour`（小时均值 ✓），哪怕 `ping_record` 的逐分钟行**还在**（能留 7 天 ✗）
+        // ⇒ 结果同一张图上"远处是小时均值、最近一两小时是逐分钟" ✓✗
+        // ⇒ 看着就是"最近开始抖了" ✓（用户的截图正是这个 ✗）。
+        // 分界取"水位"与"最早一条分钟记录"里**更早**的那个 ✓ ⇒ 分钟行还在就按分钟 ✓。
+        let split = oldest_ping_record(&conn, node_id)?.map_or(rolled, |first| rolled.min(first));
         let mut stmt = conn.prepare_cached(
             "SELECT (ts/?4)*?4 AS bucket, task_id, latency, answered, lost, lo, hi FROM (
                SELECT ts, task_id, latency, answered, lost, lo, hi FROM ping_hour
@@ -3503,7 +3519,7 @@ impl Db {
                   AND task_id IN (SELECT task_id FROM ping_node WHERE node_id=?1)
              ) ORDER BY (ts/?4)*?4",
         )?;
-        let mut rows = stmt.query(params![node_id, since, rolled, step])?;
+        let mut rows = stmt.query(params![node_id, since, split, step])?;
         let mut out = Vec::new();
         let mut totals: HashMap<i64, (i64, i64)> = HashMap::new();
         let mut open: Option<(i64, std::collections::BTreeMap<i64, Tally>)> = None;
@@ -5290,6 +5306,54 @@ mod tests {
                 window.first().map(|r| r["ts"].clone()),
                 minutes.first().map(|r| r["ts"].clone()),
                 "step {step}: 第一个桶也要一致"
+            );
+        }
+    }
+
+    /// ping 这条路与上面 metrics 那条是**同一个 bug** ✓：窗口跨过滚存水位时，
+    /// 水位（约两小时前）以前的部分被换成 `ping_hour` 的小时均值 ✓ —— 哪怕
+    /// `ping_record` 的逐分钟行**还在**（能留 7 天 ✗）⇒ 同一张图上"前一段一小时一个点、
+    /// 最近一两小时一分钟一个点" ⇒ 看着就是"最近开始抖了" ✓✗（用户的截图正是这个 ✓）。
+    ///
+    /// ⚠️ 这里比的是**时间桶的集合**，不是行数 ✗：`ping_window` 与 `ping_records`
+    /// 返回的行形状不同（前者带 answered/lost/lo/hi ✓），行数相等并不是这条 bug 的性质 ✓，
+    /// "同一段时间落在同样的桶里"才是 ✓。
+    #[test]
+    fn a_ping_window_across_the_watermark_stays_dense_at_a_fine_step() {
+        let db = db();
+        let id = node(&db, 1);
+        let probe = db
+            .save_ping_task(&PingTask {
+                kind: None,
+                id: 0,
+                name: "p".into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+            })
+            .unwrap();
+        let start = 472_224 * 3_600;
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                let latency = if m % 13 == 0 { -1 } else { 20 + h * 10 + m % 5 };
+                db.insert_ping(id, probe, start + h * 3_600 + m * 60, latency).unwrap();
+            }
+        }
+        // 三小时折进汇总表、三小时仍是分钟行 ⇒ 接缝落在窗口中间 ✓
+        for h in 0..3i64 {
+            db.roll_up(start + h * 3_600 + 7_200, 30).unwrap();
+            db.fold_hour(start + h * 3_600).unwrap();
+        }
+        let buckets = |rows: &[serde_json::Value]| -> std::collections::BTreeSet<i64> {
+            rows.iter().filter_map(|r| r["ts"].as_i64()).collect()
+        };
+        for step in [60i64, 300, 900] {
+            let (window, _) = db.ping_window(id, start, step).unwrap();
+            let (minutes, _) = db.ping_records(id, start, step).unwrap();
+            assert_eq!(
+                buckets(&window),
+                buckets(&minutes),
+                "step {step}: 分钟行还在的范围内，窗内的时间桶必须与纯分钟行一致（现在更少 ⇒ 接缝 ✗）"
             );
         }
     }
