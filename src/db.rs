@@ -296,6 +296,7 @@ CREATE TABLE IF NOT EXISTS metric_hour (
   net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
   load1 REAL,
   net_rx_max INTEGER NOT NULL, net_tx_max INTEGER NOT NULL,
+  tcp INTEGER, udp INTEGER, procs INTEGER,
   PRIMARY KEY (node_id, ts)
 ) WITHOUT ROWID;
 
@@ -333,7 +334,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 23;
+const SCHEMA_VERSION: i64 = 24;
 
 /// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
 /// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
@@ -529,6 +530,7 @@ fn migrate_to_12(conn: &Connection) -> Result<()> {
   net_rx INTEGER NOT NULL, net_tx INTEGER NOT NULL,
   load1 REAL,
   net_rx_max INTEGER NOT NULL, net_tx_max INTEGER NOT NULL,
+          tcp INTEGER, udp INTEGER, procs INTEGER,
   PRIMARY KEY (node_id, ts)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ping_hour (
@@ -723,6 +725,17 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
              );
              CREATE INDEX IF NOT EXISTS probe_history_at ON probe_history(node_id, at);",
         )?;
+    }
+
+    if from < 24 {
+        // ⭐ 进程数与连接数也要能画历史 ✓。分钟表（`metric`）一直有这三列 ✓，
+        // 而小时表当年折桶时没带上它们 ⇒ **7 天以外读不到** ✓✗（`DETAIL_DAYS` = 7 ✓）。
+        //
+        // **可空**是刻意的 ✓：迁移之前折出来的小时行没有这些数 ✓，而它们的分钟行早被
+        // 清掉 ⇒ 那是"没有"而不是 0 ✓（`load1` 是同一个先例 ✓）。读路径按 `Option` 取 ✓。
+        add_column(&tx, "metric_hour", "tcp INTEGER")?;
+        add_column(&tx, "metric_hour", "udp INTEGER")?;
+        add_column(&tx, "metric_hour", "procs INTEGER")?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -2799,14 +2812,17 @@ impl Db {
                     CAST(SUM(b.net_tx*b.w)*1.0/SUM(b.w) AS INTEGER),
                     CASE WHEN SUM(CASE WHEN b.load1 IS NOT NULL THEN b.w END) > 0
                          THEN SUM(b.load1*b.w)*1.0/SUM(CASE WHEN b.load1 IS NOT NULL THEN b.w END) END,
-                    MAX(b.net_rx_max), MAX(b.net_tx_max)
+                    MAX(b.net_rx_max), MAX(b.net_tx_max),
+                    CAST(SUM(b.tcp*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.udp*b.w)*1.0/SUM(b.w) AS INTEGER),
+                    CAST(SUM(b.procs*b.w)*1.0/SUM(b.w) AS INTEGER)
              FROM (
                SELECT ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
-                      net_rx_max, net_tx_max, minutes AS w
+                      net_rx_max, net_tx_max, tcp, udp, procs, minutes AS w
                  FROM metric_hour WHERE node_id=?1 AND ts>=?2 AND ts<?3
                UNION ALL
                SELECT ts, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
-                      MAX(net_rx, net_rx_max), MAX(net_tx, net_tx_max), 1
+                      MAX(net_rx, net_rx_max), MAX(net_tx, net_tx_max), tcp, udp, procs, 1
                  FROM metric WHERE node_id=?1 AND ts>=?2 AND ts>=?3
              ) b GROUP BY (b.ts/?4)*?4 ORDER BY (b.ts/?4)*?4",
         )?;
@@ -2818,6 +2834,9 @@ impl Db {
                 "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
                 "load1": r.get::<_, Option<f64>>(7)?,
                 "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
+                // 这三列可空：小时行里、迁移之前折出来的那些没有（`load1` 同理）。
+                "tcp": r.get::<_, Option<i64>>(10)?, "udp": r.get::<_, Option<i64>>(11)?,
+                "procs": r.get::<_, Option<i64>>(12)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -2855,7 +2874,10 @@ impl Db {
                     CAST(SUM(net_tx*minutes)*1.0/SUM(minutes) AS INTEGER),
                     CASE WHEN SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) > 0
                          THEN SUM(load1*minutes)*1.0/SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) END,
-                    MAX(net_rx_max), MAX(net_tx_max)
+                    MAX(net_rx_max), MAX(net_tx_max),
+                    CAST(SUM(tcp*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(udp*minutes)*1.0/SUM(minutes) AS INTEGER),
+                    CAST(SUM(procs*minutes)*1.0/SUM(minutes) AS INTEGER)
              FROM metric_hour WHERE node_id=?1 AND ts>=?2 AND ts<?3
              GROUP BY ts/?4 ORDER BY ts/?4",
         )?;
@@ -2867,6 +2889,9 @@ impl Db {
                 "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
                 "load1": r.get::<_, Option<f64>>(7)?,
                 "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
+                // 这三列可空：小时行里、迁移之前折出来的那些没有（`load1` 同理）。
+                "tcp": r.get::<_, Option<i64>>(10)?, "udp": r.get::<_, Option<i64>>(11)?,
+                "procs": r.get::<_, Option<i64>>(12)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -2880,7 +2905,8 @@ impl Db {
                     CAST(AVG(disk_used) AS INTEGER),
                     CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER),
                     AVG(load1),
-                    MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max))
+                    MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max)),
+                    CAST(AVG(tcp) AS INTEGER), CAST(AVG(udp) AS INTEGER), CAST(AVG(procs) AS INTEGER)
              FROM metric WHERE node_id=?1 AND ts>=?2 GROUP BY ts/?3 ORDER BY ts/?3",
         )?;
         let rows = stmt.query_map(params![node_id, since, step], |r| {
@@ -2891,6 +2917,9 @@ impl Db {
                 "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
                 "load1": r.get::<_, Option<f64>>(7)?,
                 "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
+                // 这三列可空：小时行里、迁移之前折出来的那些没有（`load1` 同理）。
+                "tcp": r.get::<_, Option<i64>>(10)?, "udp": r.get::<_, Option<i64>>(11)?,
+                "procs": r.get::<_, Option<i64>>(12)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -3048,11 +3077,12 @@ impl Db {
             let metric_sql = format!(
                 "INSERT OR REPLACE INTO metric_hour
                    (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used, net_rx, net_tx, load1,
-                    net_rx_max, net_tx_max)
+                    net_rx_max, net_tx_max, tcp, udp, procs)
                  SELECT node_id, ?{h}, COUNT(*), AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
                         CAST(AVG(swap_used) AS INTEGER), CAST(AVG(disk_used) AS INTEGER),
                         CAST(AVG(net_rx) AS INTEGER), CAST(AVG(net_tx) AS INTEGER), AVG(load1),
-                        MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max))
+                        MAX(MAX(net_rx, net_rx_max)), MAX(MAX(net_tx, net_tx_max)),
+                        CAST(AVG(tcp) AS INTEGER), CAST(AVG(udp) AS INTEGER), CAST(AVG(procs) AS INTEGER)
                  FROM metric WHERE node_id IN ({}) AND ts>=?{h} AND ts<?{h}+3600
                  GROUP BY node_id",
                 first.join(",")
@@ -7213,6 +7243,46 @@ mod heatmap_tests {
     /// ⚠️ 新表与加列不同 ✗：加列只改一个表 ✓，新表要**建表 + 建索引** ✓ ——
     /// 而"新库"那条路（[`SCHEMA`] ✓）里也必须有同一张表 ✓，
     /// 否则 `an_upgraded_release_matches_a_fresh_database` 会当场抓住 ✓✓。
+    /// **升级路径的闸**：一个"23 版"的库迁移后，小时表必须多出 `tcp`/`udp`/`procs` ✓、且戳到 24 ✓。
+    ///
+    /// ⚠️ 三列**可空**是刻意的 ✓：迁移之前折出来的小时行没有这些数 ✓，而它们的分钟行早被
+    /// 清掉 ⇒ 那是"没有"而不是 0 ✓（`load1` 是同一个先例 ✓）。所以这里既验列在、也验它可空 ✓。
+    #[test]
+    fn migrating_from_23_adds_the_socket_and_process_columns() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        // 回到"23 版"的样子：老库的小时表没有这三列 ✓。
+        for c in ["tcp", "udp", "procs"] {
+            conn.execute(&format!("ALTER TABLE metric_hour DROP COLUMN {c}"), []).unwrap();
+        }
+        conn.execute("PRAGMA user_version = 23", []).unwrap();
+        let has = |c: &rusqlite::Connection, col: &str| -> bool {
+            c.query_row("SELECT COUNT(*) FROM pragma_table_info('metric_hour') WHERE name=?1", [col], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+                > 0
+        };
+        for c in ["tcp", "udp", "procs"] {
+            assert!(!has(&conn, c), "前提：{c} 已撤掉");
+        }
+        migrate(&conn, 23).unwrap();
+        for c in ["tcp", "udp", "procs"] {
+            assert!(has(&conn, c), "迁移后必须有 {c} ✓");
+        }
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        // 可空：老的小时行是"没有"，不是 0 ✓
+        let notnull: i64 = conn
+            .query_row("SELECT [notnull] FROM pragma_table_info('metric_hour') WHERE name='procs'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(notnull, 0, "必须可空 ✓：迁移前的那些小时行没有这些数 ✓");
+    }
+
     #[test]
     fn migrating_from_22_creates_the_probe_history_table() {
         let db = Db::open(":memory:").unwrap();
