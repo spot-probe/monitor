@@ -5261,6 +5261,64 @@ mod tests {
     /// Two hours and a day per point are the cases that matter: a bucket then spans
     /// both halves, and it is the `GROUP BY` in `metrics_window` that has to merge
     /// them rather than let the same `ts` out twice.
+    /// ⭐ **主题要画的三个数必须在历史窗口里** ✓✓ —— 进程数与 TCP/UDP 连接数。
+    ///
+    /// 它们此前只在实时帧里（`PUBLIC_METRICS` 白名单里就有 ✓），历史窗口一直不返回：
+    /// 分钟表 `metric` 存着这三列 ✓，而小时表 `metric_hour` 当年折桶时没带上 ✗
+    /// ⇒ `DETAIL_DAYS`（7 天）以外读不到 ✓✗。
+    ///
+    /// 这一条钉住三件事：
+    ///   · 分钟行那一层要给 ✓；
+    ///   · **折桶之后**（分钟行已被折掉、窗口只能由小时行回答）也要给 ✓ —— 那正是漏掉的那半 ✓；
+    ///   · 迁移之前折出来的老小时行必须是 **null**，不是 0 ✓（那是"没有"，不是"零个进程" ✓）。
+    #[test]
+    fn a_history_window_carries_the_process_and_connection_counts() {
+        let db = db();
+        let id = node(&db, 1);
+        let start = 472_224 * 3_600;
+        for m in 0..60i64 {
+            db.insert_metric(
+                id,
+                start + m * 60,
+                &serde_json::json!({"cpu": 1.0, "mem_used": 1_000, "swap_used": 10, "disk_used": 5,
+                    "net_rx": 100, "net_tx": 50, "load1": 0.25,
+                    "net_rx_max": 900, "net_tx_max": 400,
+                    "tcp": 40 + m, "udp": 7, "procs": 200}),
+            )
+            .unwrap();
+        }
+        // ① 分钟行那一层：窗口由分钟行回答 ✓
+        let rows = db.metrics_window(id, start, 3_600).unwrap();
+        assert_eq!(rows.len(), 1, "一小时一个桶");
+        assert_eq!(rows[0]["tcp"], serde_json::json!(69), "桶内均值 40..99 = 69.5 ⇒ 69 ✓");
+        assert_eq!(rows[0]["udp"], serde_json::json!(7));
+        assert_eq!(rows[0]["procs"], serde_json::json!(200));
+
+        // ② 折桶之后分钟行没了 ⇒ 窗口只能由小时行回答 ✓（漏掉的就是这一半 ✓）
+        db.roll_up(start + 7_200, 30).unwrap();
+        db.fold_hour(start).unwrap();
+        assert_eq!(count(&db, "metric_hour"), 1, "这一小时已折 ✓");
+        let rows = db.metrics_window(id, start, 3_600).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["tcp"], serde_json::json!(69), "均值 40..99 = 69.5 ⇒ 69 ✓");
+        assert_eq!(rows[0]["udp"], serde_json::json!(7), "全是 7 ✓");
+        assert_eq!(rows[0]["procs"], serde_json::json!(200), "全是 200 ✓");
+
+        // ③ 迁移之前折出来的小时行：没有这三个数 ⇒ null ✓（不是 0 ✓）
+        db.conn()
+            .execute(
+                "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                          net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                 VALUES (?1, ?2, 60, 1.0, 10, 1, 1, 1, 1, 0.1, 1, 1)",
+                rusqlite::params![id, start - 3_600],
+            )
+            .unwrap();
+        let rows = db.metrics_window(id, start - 3_600, 3_600).unwrap();
+        assert!(rows[0]["tcp"].is_null(), "老小时行是 null ✓：{}", rows[0]);
+        assert!(rows[0]["udp"].is_null(), "{}", rows[0]);
+        assert!(rows[0]["procs"].is_null(), "{}", rows[0]);
+    }
+
     #[test]
     fn a_window_across_the_watermark_draws_what_the_minutes_would() {
         let db = db();
