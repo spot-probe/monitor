@@ -2262,17 +2262,21 @@ function Ping({ nodes }: { nodes: Node[] }) {
     // **`hours` 必须传**：这条端点不给 `hours` 时返回的是空窗口，而这里此前恰好没传 ——
     // 也就是说这一页的图一直是空的（公开页那条传了 `hours`，所以它一直有图）。
     // 24 是**实测过两条路径完全一致**的那组参数（逐点 JSON 全等）。
-    Promise.all(
-      tasks.map((t) =>
-        api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
-          `/nodes/ping-series?task=${t.id}&hours=${winHours}`,
-        )
-          .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
-          .catch(() => []),
-      ),
-    ).then((perTask) => {
-      // 与原来那套 `[id, {ping, loss}]` 完全同形 —— 下面的归约因此一行都不用改。
-      const answers = perTask.flat()
+    // ⭐ **一条请求拿全部任务** ✓✓（不传 `task` 就是全部）。
+    //
+    // 此前是每个任务各一条、且全部并发，而 hub 的历史查询闸门只有 4 个许可 ⇒ 6 个任务时
+    // 第 5、6 条必然被拒（503 too many history queries in flight），而下面那个 catch 又把
+    // 失败吞掉 ⇒ 图上静默少一条线，只能靠 DevTools 发现。请求数从此是 1。
+    api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
+      `/nodes/ping-series?hours=${winHours}`,
+    )
+      .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
+      .catch((e) => {
+        // 失败不再静默：图会缺线，而缺线必须有人知道 ✓
+        console.error("延迟序列取不到，图会缺线：", e)
+        return [] as (readonly [number, { ping: PingPoint[]; loss?: Record<string, number> }])[]
+      })
+      .then((answers) => {
       if (!alive) return
       const buckets = new Map<number, Map<number, number[]>>()
         // 逐桶丢包：每个任务一张 (ts → 最差那台的百分比) 的表。上面解析每一行时填，

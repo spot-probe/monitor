@@ -1781,7 +1781,10 @@ pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRisk
 /// 没有闸就等于给匿名调用者开了一个放大器。
 #[derive(Deserialize)]
 pub struct PingSeriesQuery {
-    task: i64,
+    /// 不传 = **全部探测任务** ✓（面板刷新时一条请求拿全，而不是每个任务一条：
+    /// 历史查询闸门只有 4 个许可，6 个任务并发会有两条被 503 拒掉，而被前端 catch 吞掉 ⇒ 静默少线）。
+    #[serde(default)]
+    task: Option<i64>,
     hours: Option<i64>,
     points: Option<i64>,
     /// 只看某个分组；不传即全部节点。空串归一成 None（与其它端点同一套规矩）。
@@ -1832,7 +1835,9 @@ pub async fn ping_heatmap(State(app): State<Shared>, Query(q): Query<PingSeriesQ
     let step = sample_step(hours, q.points);
     let since = Utc::now().timestamp() - hours * 3_600;
     let group = q.group.filter(|g| !g.is_empty());
-    let task = q.task;
+    let Some(task) = q.task else {
+        return (StatusCode::BAD_REQUEST, "task is required for the heatmap").into_response();
+    };
     let built =
         tokio::task::spawn_blocking(move || app.db.ping_heatmap(task, since, step, group.as_deref())).await;
     match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {

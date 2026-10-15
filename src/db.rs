@@ -1202,9 +1202,10 @@ fn oldest_ping_record(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
 
 /// 同上 ✓，但按**探测**问 ✓：`ping_series_by_task`（后台面板按任务看某个探测 ✓）
 /// 的窗口是按 task 切的 ✗ ⇒ 它需要"这个探测最早的逐分钟记录" ✓。
-fn oldest_ping_record_for_task(conn: &Connection, task_id: i64) -> Result<Option<i64>> {
+fn oldest_ping_record_for_task(conn: &Connection, task_id: Option<i64>) -> Result<Option<i64>> {
+    // ⚠️ 可空是给"一次要全部任务"用的（面板刷新时不再一个任务一条请求）。
     Ok(conn
-        .prepare_cached("SELECT MIN(ts) FROM ping_record WHERE task_id=?1")?
+        .prepare_cached("SELECT MIN(ts) FROM ping_record WHERE (?1 IS NULL OR task_id=?1)")?
         .query_row([task_id], |r| r.get(0))?)
 }
 
@@ -2044,9 +2045,14 @@ impl Db {
         Ok(Heatmap { edges, buckets })
     }
 
+    /// `task_id = None` ⇒ **全部任务一次取回** ✓（每一行都带自己的 `task_id`，折叠本来也按它分组 ✓）。
+    ///
+    /// 为什么要有这条路：面板刷新延迟页时对**每个任务各发一条**请求、且全部并发，而历史查询
+    /// 闸门只有 4 个许可 ⇒ 6 个任务时第 5、6 条被 503 拒掉，前端 `catch` 又把失败吞了 ⇒
+    /// 图里静默少一条线。一次全要之后请求数从"任务数"降到 1，闸门也不会再被撞到。
     pub fn ping_series_by_task(
         &self,
-        task_id: i64,
+        task_id: Option<i64>,
         since: i64,
         step: i64,
         group: Option<&str>,
@@ -2061,7 +2067,7 @@ impl Db {
         let mut stmt = conn.prepare_cached(
             "SELECT (ts/?5)*?5 AS bucket, node_id, task_id, latency, answered, lost, lo, hi FROM (
                SELECT ts, node_id, task_id, latency, answered, lost, lo, hi FROM ping_hour
-                WHERE task_id=?1 AND ts>=?2 AND ts<?3
+                WHERE (?1 IS NULL OR task_id=?1) AND ts>=?2 AND ts<?3
                   AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
                UNION ALL
                SELECT ts, node_id, task_id,
@@ -2070,7 +2076,7 @@ impl Db {
                       CASE WHEN latency < 0 THEN 1 ELSE 0 END,
                       CASE WHEN latency >= 0 THEN latency END,
                       CASE WHEN latency >= 0 THEN latency END
-                 FROM ping_record WHERE task_id=?1 AND ts>=?2 AND ts>=?3
+                 FROM ping_record WHERE (?1 IS NULL OR task_id=?1) AND ts>=?2 AND ts>=?3
                   AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
              ) ORDER BY node_id, (ts/?5)*?5",
         )?;
@@ -5508,7 +5514,8 @@ mod tests {
         }
         for step in [60i64, 300, 900] {
             let by_task =
-                serde_json::to_value(db.ping_series_by_task(probe, start, step, None).unwrap()).unwrap();
+                serde_json::to_value(db.ping_series_by_task(Some(probe), start, step, None).unwrap())
+                    .unwrap();
             let mut by_task_ts = std::collections::BTreeSet::new();
             collect_ts(&by_task, &mut by_task_ts);
             let (minutes, _) = db.ping_records(id, start, step).unwrap();
@@ -7074,6 +7081,59 @@ mod tests {
     /// 面板从此只发一个请求，但用户看到的数**一个也不能变** —— 这条测试就是那个保证。
     /// 注意参照必须是**线上在用的**那条（`ping_records`，分钟级），不是 `ping_records_hourly`
     /// 那条还没接上的小时级路径 —— 一开始我正是拿后者当了参照，那样写等于拿死代码证明一致性。
+    /// ⭐ **一次请求拿到全部任务** ✓✓ —— 面板刷新时不再"一个任务一条请求"。
+    ///
+    /// 起因是一个真实的 503：hub 的历史查询闸门只有 4 个许可，而面板对每个任务各发一条、
+    /// 且 `Promise.all` 全部并发 ⇒ 6 个任务时第 5、6 条必然被拒（`too many history queries
+    /// in flight`），被拒的那条又被前端 `catch` 吞掉 ⇒ 图里静默少一条线。
+    ///
+    /// `task_id = None` 就是"全部任务"：折叠本来按任务分组（`open.entry(task)`），
+    /// 输出的每一行也都带自己的 `task_id`，所以这里只验"该来的都来了、且分得开"。
+    #[test]
+    fn a_ping_series_query_without_a_task_returns_every_task() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let minute = (now / 60) * 60;
+        for t in [1i64, 2] {
+            db.conn()
+                .execute(
+                    "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (?1,'t','x',60,0,'icmp')",
+                    params![t],
+                )
+                .unwrap();
+        }
+        let n = db
+            .create_node(
+                &Node { name: "a".into(), mem_total: 1000, disk_total: 1000, ..Default::default() },
+                "t",
+            )
+            .unwrap();
+        for t in [1i64, 2] {
+            db.conn()
+                .execute("INSERT INTO ping_node (task_id,node_id) VALUES (?1,?2)", params![t, n])
+                .unwrap();
+            for m in 0..4i64 {
+                db.conn()
+                    .execute(
+                        "INSERT INTO ping_record (node_id,task_id,ts,latency) VALUES (?1,?2,?3,?4)",
+                        params![n, t, minute - m * 60, 20 + t],
+                    )
+                    .unwrap();
+            }
+        }
+        // ① 单个任务照旧 ✓
+        let one = db.ping_series_by_task(Some(1), minute - 3_600, 60, None).unwrap();
+        let rows = one.get(&n).expect("这台节点要有数据").0.clone();
+        assert!(rows.iter().all(|r| r["task_id"] == serde_json::json!(1)), "只要任务 1 ✓");
+        // ② 不指定任务 ⇒ 两个任务都要在，而且各自可分辨 ✓
+        let all = db.ping_series_by_task(None, minute - 3_600, 60, None).unwrap();
+        let rows = all.get(&n).expect("这台节点要有数据").0.clone();
+        let mut seen: Vec<i64> = rows.iter().filter_map(|r| r["task_id"].as_i64()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, vec![1, 2], "一次查询必须同时给出两个任务 ✓：{rows:?}");
+    }
+
     #[test]
     fn ping_series_by_task_matches_the_per_node_path() {
         let db = Db::open(":memory:").unwrap();
@@ -7110,7 +7170,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let many = db.ping_series_by_task(1, minute - 3_600, 300, None).unwrap();
+        let many = db.ping_series_by_task(Some(1), minute - 3_600, 300, None).unwrap();
         assert_eq!(many.len(), 2, "两台节点都该有序列");
         for n in &ids {
             let (one_rows, one_loss) = db.ping_window(*n, minute - 3_600, 300).unwrap();
@@ -7129,7 +7189,7 @@ mod tests {
             );
         }
         // 分组过滤：只取 east，应当只剩一台
-        let east = db.ping_series_by_task(1, minute - 3_600, 300, Some("east")).unwrap();
+        let east = db.ping_series_by_task(Some(1), minute - 3_600, 300, Some("east")).unwrap();
         assert_eq!(east.len(), 1, "按分组应当只剩一台");
     }
 
