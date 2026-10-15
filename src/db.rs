@@ -1187,6 +1187,14 @@ fn oldest_ping_record(conn: &Connection, node_id: i64) -> Result<Option<i64>> {
         .query_row([node_id], |r| r.get(0))?)
 }
 
+/// 同上 ✓，但按**探测**问 ✓：`ping_series_by_task`（后台面板按任务看某个探测 ✓）
+/// 的窗口是按 task 切的 ✗ ⇒ 它需要"这个探测最早的逐分钟记录" ✓。
+fn oldest_ping_record_for_task(conn: &Connection, task_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .prepare_cached("SELECT MIN(ts) FROM ping_record WHERE task_id=?1")?
+        .query_row([task_id], |r| r.get(0))?)
+}
+
 /// The earliest `ts` across `tables`, sought one node at a time: every key in
 /// these tables begins with `node_id`, so `MIN(ts)` over a whole table scans it
 /// (15.9 s at 90 days of 100 nodes) where this seeks (1.8 ms).
@@ -2032,6 +2040,11 @@ impl Db {
     ) -> Result<ByTaskSeries> {
         let conn = self.conn();
         let rolled = rolled(&conn)?.unwrap_or(0);
+        // ⚠️ 与 `metrics_window` / `ping_window` **同一个 bug 的第三个实例** ✗✗：
+        // 原先把滚存水位直接当分界 ✓ ⇒ 水位以前一律读 `ping_hour` 的小时均值 ✓，
+        // 哪怕 `ping_record` 的逐分钟行还在（能留 7 天 ✗）
+        // ⇒ 后台面板那条"按任务看某个探测"的延迟曲线上，最近一段会突然变细、发颤 ✓✗。
+        let split = oldest_ping_record_for_task(&conn, task_id)?.map_or(rolled, |first| rolled.min(first));
         let mut stmt = conn.prepare_cached(
             "SELECT (ts/?5)*?5 AS bucket, node_id, task_id, latency, answered, lost, lo, hi FROM (
                SELECT ts, node_id, task_id, latency, answered, lost, lo, hi FROM ping_hour
@@ -2048,7 +2061,7 @@ impl Db {
                   AND (?6 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?6))
              ) ORDER BY node_id, (ts/?5)*?5",
         )?;
-        let mut rows = stmt.query(params![task_id, since, rolled, rolled, step, group])?;
+        let mut rows = stmt.query(params![task_id, since, split, split, step, group])?;
         let mut out: NodeTotals = Default::default();
         let mut node = -1i64;
         let mut bucket = -1i64;
@@ -5354,6 +5367,70 @@ mod tests {
                 buckets(&window),
                 buckets(&minutes),
                 "step {step}: 分钟行还在的范围内，窗内的时间桶必须与纯分钟行一致（现在更少 ⇒ 接缝 ✗）"
+            );
+        }
+    }
+
+    /// ⭐ 第三处同款接缝 ✓（扫出来的 ✓）：`ping_series_by_task` 是**按探测**取的
+    /// （后台面板那条"按任务看某个探测的延迟"用它 ✓），它的分界同样直接是滚存水位 ✗
+    /// ⇒ 水位以前一律走 `ping_hour` 的小时均值 ✓✗，哪怕逐分钟行还在 ✓。
+    /// 症状与 `ping_window` 那条一模一样 ✓：最近一段比前面细、看着像"最近开始抖" ✓。
+    ///
+    /// ⚠️ 它返回的是"节点 → 序列"的映射 ✓，形状与 `ping_records` 不同 ✗
+    /// ⇒ 这里把两边的 **`ts` 字段递归收集**出来比集合 ✓，不依赖返回类型 ✓。
+    #[test]
+    fn a_by_task_series_across_the_watermark_stays_dense_at_a_fine_step() {
+        let db = db();
+        let id = node(&db, 1);
+        let probe = db
+            .save_ping_task(&PingTask {
+                kind: None,
+                id: 0,
+                name: "p".into(),
+                target: "1.1.1.1:443".into(),
+                interval: 60,
+                nodes: vec![id],
+            })
+            .unwrap();
+        let start = 472_224 * 3_600;
+        for h in 0..6i64 {
+            for m in 0..(60 - h * 7) {
+                let latency = if m % 13 == 0 { -1 } else { 20 + h * 10 + m % 5 };
+                db.insert_ping(id, probe, start + h * 3_600 + m * 60, latency).unwrap();
+            }
+        }
+        // 三小时折进汇总表、三小时仍是分钟行 ⇒ 接缝落在窗口中间 ✓
+        for h in 0..3i64 {
+            db.roll_up(start + h * 3_600 + 7_200, 30).unwrap();
+            db.fold_hour(start + h * 3_600).unwrap();
+        }
+        fn collect_ts(v: &serde_json::Value, out: &mut std::collections::BTreeSet<i64>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if let Some(ts) = map.get("ts").and_then(|t| t.as_i64()) {
+                        out.insert(ts);
+                    }
+                    for child in map.values() {
+                        collect_ts(child, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| collect_ts(i, out)),
+                _ => {}
+            }
+        }
+        for step in [60i64, 300, 900] {
+            let by_task =
+                serde_json::to_value(db.ping_series_by_task(probe, start, step, None).unwrap()).unwrap();
+            let mut by_task_ts = std::collections::BTreeSet::new();
+            collect_ts(&by_task, &mut by_task_ts);
+            let (minutes, _) = db.ping_records(id, start, step).unwrap();
+            let mut minute_ts = std::collections::BTreeSet::new();
+            for m in &minutes {
+                collect_ts(m, &mut minute_ts);
+            }
+            assert_eq!(
+                by_task_ts, minute_ts,
+                "step {step}: 分钟行还在的范围内，按任务取的时间桶必须与纯分钟行一致（现在更少 ⇒ 接缝 ✗）"
             );
         }
     }
