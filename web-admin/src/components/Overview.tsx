@@ -1066,12 +1066,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
       {/* 分组与自动刷新**同一行**：左边是"看什么"（页面级控件，影响一整页），右边是"多久看一次"。
           分成两行会让右边那个孤零零占一行，左边却挤在一起 —— 看着像排版错位。 */}
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
       {/* 分组选择器：**页面级**控件，因为它影响的是一整页（KPI / 事项 / 版本分布 / 日历 / 趋势）。
           只在一处过滤（组件入口的那个 `nodes`），所以不存在"一半按分组、一半不按"。 */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span className="text-muted-foreground">分组</span>
-        <span aria-hidden className="h-4 w-px bg-border" />
         <div className={TRACK}>
           <button type="button" onClick={() => setGroup("")} aria-pressed={group === ""} className={pill(group === "")}>
             全部
@@ -1100,8 +1099,57 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         )}
       </div>
 
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-l border-border pl-5 text-xs">
+          <span className="text-muted-foreground">视图</span>
+          <div className={TRACK}>
+            {([["resource", "资源"], ["cost", "成本"], ["quality", "IP 质量"]] as const).map(([k, label]) => (
+              <button key={k} type="button" onClick={() => pickPage(k)} aria-pressed={page === k} className={pill(page === k)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* 筛选控件 ✓（用户要求 ✓）—— 放在同一行的右端 ✓（`ml-auto` ✓），不新起一行 ✓
+              （免得又多一条横向带 ✓）。
+              ⚠️ 只在「IP 质量」这一栏显示 ✗：另外两栏没有『有数据 / 无数据』这个概念 ✓，
+              放上去会让人以为它对资源与成本也生效 ✓。 */}
+          {page === "quality" ? (
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              {/* ⚠️ **它原来是个"看起来像文字"的按钮** ✗（用户报的 ✓）：
+                  用的是 `pill(false)` —— 未激活态只有灰字、**没有边框也没有底色** ✓ ⇒
+                  与旁边一串说明文字长得一样 ✓，一眼看不出能点 ✓。
+                  ⇒ 改成**标准外框按钮** ✓：常驻边框 ✓ · 激活时蓝底 ✓ · 前缀点指示状态 ✓ ·
+                  带**计数徽章**（当前会显示几台 ✓）· 高度 `h-7` 与右侧搜索框**对齐** ✓。 */}
+              <button
+                type="button"
+                onClick={() => setOnlyData((v) => !v)}
+                aria-pressed={onlyData}
+                className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${
+                  onlyData
+                    ? "border-primary bg-primary/10 font-medium text-primary"
+                    : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                {/* 前缀点 ✓：亮 = 正在筛选 ✓、暗 = 未启用 ✓（同事说的"前缀点"正是这个作用 ✓） */}
+                <span className={`size-1.5 rounded-full ${onlyData ? "bg-primary" : "bg-muted-foreground/40"}`} />
+                只看有数据
+                {/* 计数徽章 ✓（用户要求 ✓）—— 只在激活时显示 ✓：
+                    它顺便回答了"筛掉了几台" ✓，与表下那句"已隐藏 N 台"是同一个数 ✓（`qualityRows` ✓）。 */}
+                {onlyData ? (
+                  <span className="rounded bg-primary/15 px-1 font-mono text-[11px]">{qualityRows.length}</span>
+                ) : null}
+              </button>
+              <Input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="搜名称 / IP / ASN / 城市"
+                className="h-7 w-56 text-xs"
+              />
+            </div>
+          ) : null}
+        </div>
+
       {/* 自动刷新那一条：细、右对齐，不占卡片。开关本身就是"暂停"—— 再点一下即停。 */}
-      <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground">
         <button
           type="button"
           onClick={() => {
@@ -1157,55 +1205,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
         </DialogContent>
       </Dialog>
 
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-        <span className="text-muted-foreground">视图</span>
-        <span aria-hidden className="h-4 w-px bg-border" />
-        <div className={TRACK}>
-          {([["resource", "资源"], ["cost", "成本"], ["quality", "IP 质量"]] as const).map(([k, label]) => (
-            <button key={k} type="button" onClick={() => pickPage(k)} aria-pressed={page === k} className={pill(page === k)}>
-              {label}
-            </button>
-          ))}
-        </div>
-        {/* 筛选控件 ✓（用户要求 ✓）—— 放在同一行的右端 ✓（`ml-auto` ✓），不新起一行 ✓
-            （免得又多一条横向带 ✓）。
-            ⚠️ 只在「IP 质量」这一栏显示 ✗：另外两栏没有『有数据 / 无数据』这个概念 ✓，
-            放上去会让人以为它对资源与成本也生效 ✓。 */}
-        {page === "quality" ? (
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            {/* ⚠️ **它原来是个"看起来像文字"的按钮** ✗（用户报的 ✓）：
-                用的是 `pill(false)` —— 未激活态只有灰字、**没有边框也没有底色** ✓ ⇒
-                与旁边一串说明文字长得一样 ✓，一眼看不出能点 ✓。
-                ⇒ 改成**标准外框按钮** ✓：常驻边框 ✓ · 激活时蓝底 ✓ · 前缀点指示状态 ✓ ·
-                带**计数徽章**（当前会显示几台 ✓）· 高度 `h-7` 与右侧搜索框**对齐** ✓。 */}
-            <button
-              type="button"
-              onClick={() => setOnlyData((v) => !v)}
-              aria-pressed={onlyData}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${
-                onlyData
-                  ? "border-primary bg-primary/10 font-medium text-primary"
-                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-              }`}
-            >
-              {/* 前缀点 ✓：亮 = 正在筛选 ✓、暗 = 未启用 ✓（同事说的"前缀点"正是这个作用 ✓） */}
-              <span className={`size-1.5 rounded-full ${onlyData ? "bg-primary" : "bg-muted-foreground/40"}`} />
-              只看有数据
-              {/* 计数徽章 ✓（用户要求 ✓）—— 只在激活时显示 ✓：
-                  它顺便回答了"筛掉了几台" ✓，与表下那句"已隐藏 N 台"是同一个数 ✓（`qualityRows` ✓）。 */}
-              {onlyData ? (
-                <span className="rounded bg-primary/15 px-1 font-mono text-[11px]">{qualityRows.length}</span>
-              ) : null}
-            </button>
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="搜名称 / IP / ASN / 城市"
-              className="h-7 w-56 text-xs"
-            />
-          </div>
-        ) : null}
-      </div>
 
       {/* ⭐ 「IP 质量」视图 ✓ —— 用户要的：把 IP 质量/风险从"逐台点开编辑框"搬到一个
           **能横向比较**的地方 ✓（"哪几台同 ASN / 哪个风险高"在单台对话框里根本比不出来 ✓）。
