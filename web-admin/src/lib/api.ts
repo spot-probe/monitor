@@ -159,7 +159,9 @@ export type PingError = {
 
 export type PingTask = {
   /** `"icmp"` for an echo request; absent or `"tcp"` is a handshake. */
-  kind?: string; id: number; name: string; target: string; interval: number; nodes: number[] }
+  kind?: string; id: number; name: string; target: string; interval: number; nodes: number[]
+  /** 最近一次**拿到结果**的时间（秒）✓。缺席或 null = 未上报，不是 0。 */
+  last?: number | null }
 
 /** Form snapshots must never overwrite fields the user did not edit. */
 /// The groups worth offering under what has been typed, case-insensitively.

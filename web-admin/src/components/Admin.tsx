@@ -2474,14 +2474,25 @@ function Ping({ nodes }: { nodes: Node[] }) {
       </div>
 
       <Card className="overflow-x-auto p-0">
-        <Table className="min-w-[760px]">
+{/* ⚠️ **不要**把这张表改成按内容收缩（`!w-auto` 加卡片 `w-fit`）：试过了，**不行**。
+            理由不是审美，是一致性 —— 这个面板里每一张表都铺满（节点表 `min-w-[880px]`、
+            另一张 `min-w-[620px]`，都是组件自带的 `w-full` 生效）。只让这一张收缩，它就成了
+            全页唯一的例外，看上去缺一块；而空出来的宽度并没有消失，只是移到了卡片外面，
+            反而更显眼。宽屏后台里表格右侧留白是常态，别为它动布局：
+            要么接受留白，要么**用内容填**（加真正该有的列），不要拉伸也不要收缩。 */}
+        <Table className="min-w-[420px]">
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[18%]">名称</TableHead>
-              <TableHead className="w-[24%]">目标</TableHead>
+              {/* ⚠️ 这一行删掉「延迟」「丢包」两列之后，宽度还剩 59% 没分配 —— 余量会落到
+                  最后一列上，而它内容右对齐，于是看起来是"节点与操作之间一大片空白"。
+                  现在的分法是：**只有「目标」不给宽度** ⇒ 余量全归它（那本来是最长的一列），
+                  「操作」用 1% + nowrap 收到内容宽度（三个图标）。列宽合起来也不必凑满 100%。 */}
+              <TableHead className="w-[16%]">名称</TableHead>
+              <TableHead>目标</TableHead>
               <TableHead className="w-[9%]">间隔</TableHead>
               <TableHead className="w-[8%]">节点</TableHead>
-              <TableHead className="text-right">操作</TableHead>
+              <TableHead className="w-[10%]">最近上报</TableHead>
+              <TableHead className="w-[1%] text-right whitespace-nowrap">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -2569,7 +2580,26 @@ function Ping({ nodes }: { nodes: Node[] }) {
                   </span>
                 </TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {/* ⭐ 名字，不只是个数 ✓✓：这页顶部问的就是"覆盖 100/100 个节点"，
+                      而"谁在跑、谁没跑"用两位数答不了。`nodeName` 是本组件早有的映射
+                      （逐节点那一栏就在用它 ✓），所以这是零新增数据、零新增请求的一改。
+                      只列前两台 + 等 N 台：100 台全列出来会把这一列撑爆。 */}
+                  {t.nodes.length === 0 ? (
+                    "—"
+                  ) : (
+                    <>
+                      {t.nodes.slice(0, 2).map(nodeName).join("、")}
+                      {t.nodes.length > 2 ? ` 等 ${t.nodes.length} 台` : ""}
+                    </>
+                  )}
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {/* ⭐ 最近一次**拿到结果**的时间 ✓。数据来自 hub 的 /ping-tasks（运行时事实，
+                      不落库）。`since` 是本文件已有的格式化函数，它把"没有"渲染成 `—` ——
+                      与这一页其它地方同一个写法，所以这里不引入新的颜色或新的措辞。 */}
+                  {since(t.last ?? 0)}
+                </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
                   {/* 只有一台节点时，明细与上面那一行是同一个数字，所以不显示这个开关。 */}
                   {t.nodes.length >= 2 && (

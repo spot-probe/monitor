@@ -1492,6 +1492,23 @@ pub async fn ping_tasks(_: Admin, State(app): State<Shared>) -> Response {
                     }
                 }
             }
+            // ⭐ 每个任务带上"最近一次拿到结果的时间" ✓（`ping_last` 是运行时事实，不落库）。
+            // **缺席写成 null** ✗ 而不是 0：0 是 1970，面板会显示成"很久以前"，
+            // 而正确的意思是"未上报"。所以这里逐项注入，不动 `PingTask` 本身。
+            let seen = app.db.ping_last();
+            let tasks: Vec<Value> = tasks
+                .into_iter()
+                .map(|t| {
+                    let mut v = serde_json::to_value(&t).unwrap_or(Value::Null);
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "last".into(),
+                            seen.get(&t.id).copied().map(Value::from).unwrap_or(Value::Null),
+                        );
+                    }
+                    v
+                })
+                .collect();
             Json(json!({"tasks": tasks, "errors": errors, "needs": needs})).into_response()
         }
         Err(e) => fail(e),

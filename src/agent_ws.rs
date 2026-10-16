@@ -415,6 +415,9 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             if let (true, Some(latency)) = (task_id > 0, latency) {
                 // A sample is the end of any explanation this task was carrying.
                 app.db.note_ping_error(node_id, task_id, None);
+                // ⭐ 同一处再记一笔"刚拿到结果" ✓：面板上那一列"最近上报"就是它。
+                // 只记成功的那条路，所以失败与超时不会刷新它 —— 那正是想要的语义。
+                app.db.note_ping_seen(task_id);
                 app.db.insert_ping(node_id, task_id, Utc::now().timestamp(), latency)?;
             } else if task_id > 0 {
                 // No sample, and the agent said why: kept so the panel can show it

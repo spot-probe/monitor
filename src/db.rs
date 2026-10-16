@@ -22,6 +22,12 @@ pub struct Db {
     /// write per probe round. It is what keeps a probe that cannot run (no permission,
     /// no route) from reaching the panel as an unexplained 100% loss.
     ping_errors: Mutex<std::collections::HashMap<(i64, i64), (String, i64)>>,
+    /// 每个探测任务**最近一次拿到结果**的时间（`task_id -> ts`）✓。
+    ///
+    /// 与 `ping_errors` 并列、且**不落库**：这是运行时事实 ✓ —— agent 掉线、hub 重启之后
+    /// 它本就该是空的，不代表"从没探测过"（那是 `ping_record` 的事）。
+    /// 面板上要回答的是"这个监控还活着吗" ✓，所以只保留最近一次，不需要历史。
+    ping_last: Mutex<std::collections::HashMap<i64, i64>>,
 }
 
 /// How long a reason stays worth showing. A probe that failed once and has been quiet
@@ -1452,7 +1458,7 @@ impl Db {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         migrate(&conn, if fresh { SCHEMA_VERSION } else { version })?;
-        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default() })
+        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default(), ping_last: Default::default() })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1471,6 +1477,18 @@ impl Db {
                 errors.remove(&(node_id, task_id));
             }
         }
+    }
+
+    /// 记一笔"这个任务刚拿到结果" ✓。调用点是探测成功那一条路（`agent_ws` 里紧接着
+    /// `note_ping_error(…, None)` 之后），所以它只记成功，不记失败与超时。
+    pub fn note_ping_seen(&self, task_id: i64) {
+        self.ping_last.lock().unwrap_or_else(|e| e.into_inner()).insert(task_id, Utc::now().timestamp());
+    }
+
+    /// 每个任务最近一次拿到结果的时间 ✓。**没有记录的任务不出现在表里** ✗ ——
+    /// 读的人必须把"缺席"当"不知道"，不能当 0（0 是 1970 年，会显示成"很久以前"而不是"未上报"）。
+    pub fn ping_last(&self) -> std::collections::HashMap<i64, i64> {
+        self.ping_last.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The reasons still worth showing, by `(node, task)`. Anything older than
@@ -7147,6 +7165,25 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen, vec![1, 2], "一次查询必须同时给出两个任务 ✓：{rows:?}");
+    }
+
+    /// ⭐ **最近上报时间** ✓：记成功的那些，而且**没记录的任务必须是"缺席"** ✗。
+    ///
+    /// 后半句是这条用例的重点：面板要显示"未上报"，而不是"很久以前" ——
+    /// 如果读的人把缺席当 0（1970），那一列就会显示成 55 年前，比不显示更糟。
+    #[test]
+    fn ping_last_records_only_what_has_reported() {
+        let db = Db::open(":memory:").unwrap();
+        assert!(db.ping_last().is_empty(), "还没人上报 ⇒ 空 ✓");
+        let before = Utc::now().timestamp();
+        db.note_ping_seen(7);
+        let seen = db.ping_last();
+        let at = *seen.get(&7).expect("任务 7 该有记录 ✓");
+        assert!(at >= before && at <= Utc::now().timestamp(), "记的是当下 ✓：{at}");
+        assert!(!seen.contains_key(&8), "没上报过的任务**不在表里** ✗（不是 0）");
+        // 再报一次是覆盖，不是追加 ✓（只保留最近一次 ✓）
+        db.note_ping_seen(7);
+        assert_eq!(db.ping_last().len(), 1, "一个任务只留一条 ✓");
     }
 
     #[test]
