@@ -231,24 +231,29 @@ fn uptime_map(app: &App, now: i64, nodes: &[Node]) -> HashMap<i64, Uptime> {
 /// outage is shown to the minute. Each is `{start, minutes}`; consecutive
 /// missing minutes are one entry, and a silent node has one entry spanning the
 /// whole window rather than none.
-fn availability(minutes: &[i64], from: i64, to: i64) -> Value {
-    const HOUR: i64 = 3_600;
+fn availability(minutes: &[i64], from: i64, to: i64, slot: i64) -> Value {
+    // ⚠️ `slot` 是**分组宽度**（秒）✓：3600 ⇒ 一小时一格（面板那条老路径），
+    // 1800 ⇒ 半小时一格（主题的日历格要 48 列，24 列铺不满卡片）。
+    // 它**只影响分组**：上报/应有的分钟总数、以及故障清单都按分钟算，与它无关 ——
+    // 这一点由 `a_finer_bucket_changes_the_grouping_but_not_the_totals` 钉住 ✓✓。
+    // 下限 60 秒：`div_euclid` 遇到 0 会 panic，而这里也不该接受比一分钟更细的桶。
+    let slot = slot.max(60);
     let mut buckets = Vec::new();
-    let mut cursor = from.div_euclid(HOUR) * HOUR;
+    let mut cursor = from.div_euclid(slot) * slot;
     let mut i = 0;
     while cursor < to {
         let lo = cursor.max(from);
-        let hi = (cursor + HOUR).min(to);
+        let hi = (cursor + slot).min(to);
         // Every minute in the slice is already within [from, to), so this only
         // has to consume the ones belonging to this bucket.
         let start = i;
-        while i < minutes.len() && minutes[i] < cursor + HOUR {
+        while i < minutes.len() && minutes[i] < cursor + slot {
             i += 1;
         }
         if hi > lo {
             buckets.push(json!({"ts": cursor, "n": i - start, "m": (hi - lo) / 60}));
         }
-        cursor += HOUR;
+        cursor += slot;
     }
 
     // Gaps between consecutive reported minutes, plus the run before the first
@@ -519,6 +524,12 @@ pub struct Window {
     /// carries the minute the window ends on, so a caller comparing two
     /// responses byte for byte must be able to leave it out.
     series: Option<String>,
+    /// 可用率那条 series 的**分组宽度**（秒）✓。不传 = 3600，即一小时一格 —— 与从前完全一致。
+    ///
+    /// ⚠️ 它**只影响分组**：上报分钟、应有分钟、故障清单都按分钟算，与桶宽无关
+    /// （由 `a_finer_bucket_changes_the_grouping_but_not_the_totals` 钉住 ✓✓）。
+    /// 主题的日历格要 48 列（7 天 × 半小时，24 列铺不满卡片），那里传 1800。
+    slot: Option<i64>,
 }
 
 /// 一次请求最多点名多少个探测任务。
@@ -594,6 +605,9 @@ pub async fn metrics(
     let wants = |name: &str| series.is_empty() || series.contains(&name);
     let (want_metrics, want_ping, want_availability) =
         (wants("metrics"), wants("ping"), wants("availability"));
+    // ⚠️ 在进 `spawn_blocking` 之前绑定 ✓（`w` 之后要被移动）。
+    // 夹取范围：一分钟到一天 —— 与 `hours.clamp(...)` 同一个风格，异常值不报错而是收进来。
+    let slot = w.slot.unwrap_or(3_600).clamp(60, 86_400);
     // Off the runtime, for the reason given in `db_stats` below: this reads every
     // probe result the node has retained within the window and holds the
     // connection the agents report through throughout. That route is behind
@@ -633,7 +647,7 @@ pub async fn metrics(
             let created = app.db.node(id).ok().flatten().map(|n| n.created_at).unwrap_or(0);
             let (from, to) = uptime_window(created, since.max(retained_from(&app, now)), now);
             let minutes = app.db.reported_minutes(id, from, to)?;
-            availability(&minutes, from, to)
+            availability(&minutes, from, to, slot)
         } else {
             Value::Null
         };
@@ -4241,6 +4255,37 @@ mod tests {
         assert_eq!(uptime_fraction(20_000, from7, to), 1.0);
     }
 
+    /// ⭐ **桶宽只是分组方式，不改变总量** ✓✓ —— 三十分钟桶与一小时桶汇总出来的
+    /// 上报分钟与应有分钟必须一模一样。主题按三十分钟画日历格，靠的就是这条不变量；
+    /// 不成立的话，同一段时间会有两个答案（这个仓一直在防的「第二个真相」）。
+    #[test]
+    fn a_finer_bucket_changes_the_grouping_but_not_the_totals() {
+        let hour = 3_600i64;
+        let from = 1_700_000_000 / hour * hour + 20 * 60; // 某小时的 :20 起
+        let to = from + 2 * hour + 20 * 60; // 到第三个整点后的 :40
+                                            // 每分钟一条，中间挖掉 :25–:50 那一段（跨桶、且正好在边界附近）
+        let mut minutes = Vec::new();
+        let mut t = from;
+        while t < to {
+            if !(25..=50).contains(&((t / 60) % 60)) {
+                minutes.push(t);
+            }
+            t += 60;
+        }
+        let total = |v: &Value, k: &str| -> i64 {
+            v["buckets"].as_array().unwrap().iter().map(|b| b[k].as_i64().unwrap()).sum()
+        };
+        let coarse = availability(&minutes, from, to, hour);
+        let fine = availability(&minutes, from, to, hour / 2);
+        assert_eq!(total(&coarse, "n"), total(&fine, "n"), "上报分钟总数必须一致");
+        assert_eq!(total(&coarse, "m"), total(&fine, "m"), "应有分钟总数必须一致");
+        let (cb, fb) =
+            (coarse["buckets"].as_array().unwrap().len(), fine["buckets"].as_array().unwrap().len());
+        assert_eq!(fb, cb * 2, "半小时桶应当正好是它的两倍（{fb} vs {cb}）");
+        // 故障清单按分钟算 ⇒ 与桶宽**无关**，两边必须逐条相同。
+        assert_eq!(coarse["incidents"], fine["incidents"], "故障清单不受桶宽影响");
+    }
+
     /// The bar and the outage list come from the same minute list, and the
     /// partial hours at either end must not be drawn as downtime.
     #[test]
@@ -4253,7 +4298,7 @@ mod tests {
             (0..60).filter(|i| !(10..12).contains(i)).map(|i| from + i * 60).collect();
         minutes.extend((0..30).map(|i| from + 3_600 + i * 60));
 
-        let a = availability(&minutes, from, to);
+        let a = availability(&minutes, from, to, 3_600);
         assert_eq!(a["from"], from);
         assert_eq!(a["to"], to);
         let buckets = a["buckets"].as_array().unwrap();
@@ -4274,7 +4319,7 @@ mod tests {
         let from = 1_800_000_000 + 25 * 60;
         let to = from + 3_600;
         let minutes: Vec<i64> = (0..60).map(|i| from + i * 60).collect();
-        let a = availability(&minutes, from, to);
+        let a = availability(&minutes, from, to, 3_600);
         let buckets = a["buckets"].as_array().unwrap();
         assert_eq!(buckets.len(), 2);
         for bucket in buckets {
@@ -4285,7 +4330,7 @@ mod tests {
 
         // A node that never reported has one outage covering the window, not an
         // empty list, which would read as a node with a clean record.
-        let a = availability(&[], from, to);
+        let a = availability(&[], from, to, 3_600);
         let incidents = a["incidents"].as_array().unwrap();
         assert_eq!(incidents.len(), 1);
         assert_eq!(incidents[0]["start"], from);
@@ -4485,7 +4530,7 @@ mod tests {
                 State(app.clone()),
                 HeaderMap::new(),
                 Path(id),
-                Query(Window { hours: 1, points: None, series: None }),
+                Query(Window { hours: 1, points: None, series: None, slot: None }),
             )
         };
 
