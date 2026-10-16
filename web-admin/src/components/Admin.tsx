@@ -1897,23 +1897,6 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
 
 /// A probe's recent latency as a bare polyline. No axes, no library: the column
 /// beside it already carries the number, and this only has to show the shape.
-function Sparkline({ values, className = "" }: { values: number[]; className?: string }) {
-  if (values.length < 2) return <span className="text-xs text-muted-foreground">—</span>
-  const w = 64
-  const h = 16
-  const lo = Math.min(...values)
-  const hi = Math.max(...values)
-  const span = hi - lo || 1
-  const points = values
-    .map((v, i) => `${(i / (values.length - 1)) * w},${h - ((v - lo) / span) * (h - 2) - 1}`)
-    .join(" ")
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className={className} aria-hidden focusable="false">
-      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-    </svg>
-  )
-}
-
 /// 延迟分布矩阵的**行**：每一带输出一对「标签 + 格子」，交给外层网格约束列宽。
 ///
 /// **为什么不自己包容器** ✗：矩阵、色条、上面那张图必须在**同一个网格**里才有共同的列 ✓。
@@ -2248,6 +2231,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // several nodes are averaged per timestamp: each reports on its own clock, and a
   // task's latency is one line however many machines measure it.
   useEffect(() => {
+    // ⭐ **只在这条被展开时才拉序列** ✓✓：列表页那两列（延迟/丢包）已经去掉，于是整页
+    // 加载不再需要「节点 × 桶 × 任务」那一大坨（24 台 × 360 桶 × 5 个目标 ≈ 4.3 万行）；
+    // 展开某一条时才拉它自己的。热力图那条 effect 就是这个写法，照它。
+    if (openNodes === null) return
     const ids = [...new Set(tasks.flatMap((t) => t.nodes))]
     // No probes: nothing to clear. Stale entries are unreachable, since only the rows
     // in `tasks` read them, and setting state synchronously here would cost a render.
@@ -2391,7 +2378,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
     return () => {
       alive = false
     }
-  }, [tasks, winHours])
+  }, [tasks, winHours, openNodes])
   useEffect(() => { load() }, [])
 
   async function save() {
@@ -2494,8 +2481,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
               <TableHead className="w-[24%]">目标</TableHead>
               <TableHead className="w-[9%]">间隔</TableHead>
               <TableHead className="w-[8%]">节点</TableHead>
-              <TableHead className="w-[22%]">延迟</TableHead>
-              <TableHead className="w-[8%]">丢包</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -2585,29 +2570,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 </TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
-                <TableCell>
-                  {/* Empty until the first fetches land, and never a zero: a task
-                      nobody has reported on yet is unknown, not instant. */}
-                  {stats[t.id]?.last == null ? (
-                    <span className="text-sm text-muted-foreground">—</span>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="tnum text-sm">{stats[t.id].last} ms</span>
-                      <Sparkline values={stats[t.id].series} className="text-primary" />
-                    </div>
-                  )}
-                </TableCell>
-                <TableCell className="text-sm">
-                  {stats[t.id]?.last == null ? (
-                      <span className="text-sm text-muted-foreground">—</span>
-                    ) : (stats[t.id]?.loss ?? 0) > 0 ? (
-                    <span className={(stats[t.id]?.loss ?? 0) >= 5 ? "text-danger-fg" : "text-warn-fg"}>
-                      {stats[t.id]?.loss}%
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">0%</span>
-                  )}
-                </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
                   {/* 只有一台节点时，明细与上面那一行是同一个数字，所以不显示这个开关。 */}
                   {t.nodes.length >= 2 && (
