@@ -224,6 +224,15 @@ CREATE TABLE IF NOT EXISTS traffic (
     at      INTEGER NOT NULL,
     PRIMARY KEY (node_id, service, at)
   );
+-- ⚠️ **这个索引必须在这里**，不能只写在 `if from < 23` 的迁移块里 ✗✗ ——
+-- 全新安装走的是"先 execute_batch(SCHEMA)、再 migrate(fresh ? SCHEMA_VERSION : version)"，
+-- 于是 `from == 23` 及以下的所有块**全被跳过**：只有升级上来的库才有它，
+-- 而全新库的点阵查询（`ORDER BY at`）退化成"扫该节点全部服务行 + 临时排序"。
+-- ⚠️ 而且现有的"升级库 == 全新建库"总闸看不见这个差异 —— 它比的是 `PRAGMA table_info`
+-- 的**列**，索引不在其中。这是同一个事实有两个来源的典型：迁移块与 SCHEMA 各写一遍，
+-- 就会被忘掉一遍。索引的列在 SCHEMA 里已经存在，所以放进 SCHEMA 不违反下面那条规矩
+-- （那条针对的是"迁移之后才出现的列"）。
+CREATE INDEX IF NOT EXISTS probe_history_at ON probe_history(node_id, at);
 
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
@@ -1704,6 +1713,10 @@ impl Db {
         // deleted node's id to the next node created, which would otherwise
         // inherit the removed machine's latency chart.
         conn.execute("DELETE FROM ping_record WHERE node_id = ?1", [id])?;
+        // ⚠️ `probe_history` 同样**没有外键**（`node_id` 还是 TEXT），所以上面那条理由对它
+        // 一字不差地成立 ✗ —— 此前只清了 `ping_record`，于是删掉 id=5 再新建一台拿到 id=5
+        // 的机器，会继承上一台的探测点阵。TEXT 与 INTEGER 的字面量在 SQLite 里比较是安全的。
+        conn.execute("DELETE FROM probe_history WHERE node_id = ?1", [id])?;
         Ok(conn.execute("DELETE FROM node WHERE id = ?1", [id])? > 0)
     }
 
@@ -2042,6 +2055,11 @@ impl Db {
         }
         drop(rows);
         drop(stmt);
+        // ⚠️ **排序前必须放手** ✗：`Db` 只有一把写连接，而下面这段是在内存里排序几十万行
+        // （7 天窗口一个任务实测 20 万行）。兄弟函数 `ping_series_by_task`、
+        // `ping_window` 都显式 `drop(conn)` —— 这里漏了，于是排序期间**所有 agent 的上报
+        // 都在等这把锁**，正是注释里"某台机器看起来掉线 12 秒"那类事故的形状。
+        drop(conn);
         // 边界只由**有效样本**算（丢包没有延迟，写进来会把分布拉低）。
         let mut ok: Vec<i64> = samples.iter().map(|(_, l)| *l).filter(|l| *l >= 0).collect();
         ok.sort_unstable();

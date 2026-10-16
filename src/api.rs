@@ -1836,7 +1836,15 @@ pub struct PingSeriesQuery {
     group: Option<String>,
 }
 
-pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQuery>) -> Response {
+pub async fn ping_series(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<PingSeriesQuery>,
+) -> Response {
+    // ⚠️ 这条以前**完全不做身份判断** ✗：匿名调用者能拿到全部节点的按任务延迟/丢包，
+    // 包括 `public = false`（未发布）的机器 —— 而同族的 `probe_history` / `metrics`
+    // 都走 `authed` + `readable`。这里补上：非管理员只看得到公开节点。
+    let full = authed(&app, &headers);
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
             .into_response();
@@ -1867,6 +1875,20 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
         chosen.map(|ids| format!("[{}]", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")));
     // 闭包要走所有权 ⇒ 复制一份给查询，响应那一份留给调用者看"这次要了哪些"。
     let tasks_for_query = tasks.clone();
+    // ⚠️ 必须在 `spawn_blocking(move || …)` **之前**算 ✗：`app` 会被移进那个闭包。
+    // 非管理员只该看到公开节点 —— 与 `visible_nodes`（公开页与 `readable` 共用）同一套规则。
+    let visible: Option<std::collections::HashSet<String>> = if full {
+        None
+    } else {
+        Some(
+            visible_nodes(&app, false)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v["id"].as_i64())
+                .map(|id| id.to_string())
+                .collect(),
+        )
+    };
     let _ = &task;
     let built = tokio::task::spawn_blocking(move || {
         app.db.ping_series_by_task(tasks_for_query.as_deref(), since, step, group.as_deref())
@@ -1878,6 +1900,12 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
                 .into_iter()
                 .map(|(id, (ping, loss))| (id.to_string(), json!({"ping": ping, "loss": loss})))
                 .collect();
+            // ⚠️ **按可见性过滤** ✓：`visible_nodes` 是公开页与 `readable` 用的同一套规则
+            // （`full || node.public`），所以这里与其它读路径口径一致，不再有第二个真相。
+            let mut nodes = nodes;
+            if let Some(visible) = &visible {
+                nodes.retain(|id, _| visible.contains(id));
+            }
             Json(json!({ "hours": hours, "task": task, "tasks": tasks, "nodes": nodes })).into_response()
         }
         Err(e) => fail(e),
@@ -1893,7 +1921,17 @@ pub async fn ping_series(State(app): State<Shared>, Query(q): Query<PingSeriesQu
 /// 与 `ping_series` 同一套门禁与同一套窗口推导 ✓（`HISTORY_GATE`、`sample_step`、
 /// `retention_days` 的上限）—— 两条路径对"同一个 hours"必须给出同一个 step，
 /// 否则热力图的格子与折线图的点**对不上**，而那种错在图上很难看出来 ✗。
-pub async fn ping_heatmap(State(app): State<Shared>, Query(q): Query<PingSeriesQuery>) -> Response {
+pub async fn ping_heatmap(
+    State(app): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<PingSeriesQuery>,
+) -> Response {
+    // ⚠️ 与 `ping_series` 同一族的漏检 ✗。但热力图是**聚合**（时间桶 × 延迟区间的分布矩阵，
+    // 不含任何节点标识）⇒ 泄露面比逐节点那条弱得多，所以这里只按"公开页开不开"守门：
+    // 公开页关着时，匿名调用者一无所获；开着时它与公开页本身提供的信息同量级。
+    if !authed(&app, &headers) && app.db.get("public_page").as_deref() != Some("1") {
+        return (StatusCode::UNAUTHORIZED, "sign-in required").into_response();
+    }
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
             .into_response();
