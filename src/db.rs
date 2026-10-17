@@ -32,6 +32,21 @@ pub struct Db {
 
 /// How long a reason stays worth showing. A probe that failed once and has been quiet
 /// since is not news; one that is failing every round keeps its reason fresh.
+/// "最近一次拿到结果"多久落一次盘。一分钟足够跨重启用，又不至于让每次探测都写一笔。
+const PING_LAST_FLUSH_SECS: i64 = 60;
+
+/// 从库里读回每个任务的"最后拿到结果"时间。空表 ⇒ 空表（"没记录"不是"1970 年"）。
+fn seed_ping_last(conn: &Connection) -> Result<std::collections::HashMap<i64, i64>> {
+    let mut stmt = conn.prepare("SELECT task_id, at FROM ping_last")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (task, at) = row?;
+        out.insert(task, at);
+    }
+    Ok(out)
+}
+
 const PING_ERROR_TTL: i64 = 600;
 
 const SCHEMA: &str = r#"
@@ -329,6 +344,13 @@ CREATE TABLE IF NOT EXISTS ping_hour (
   PRIMARY KEY (node_id, ts, task_id)
 ) WITHOUT ROWID;
 
+-- 每个探测任务**最后一次拿到结果**的时间。内存里另有一份用于判活跃；这一份是为了 hub
+-- 重启后那列不必等到下一次探测才有数（探针按任务排队，可能几小时才有下一次）。
+CREATE TABLE IF NOT EXISTS ping_last (
+  task_id INTEGER PRIMARY KEY REFERENCES ping_task(id) ON DELETE CASCADE,
+  at      INTEGER NOT NULL
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
   expires_at INTEGER NOT NULL,
@@ -353,7 +375,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 /// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
 /// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
@@ -557,6 +579,20 @@ CREATE TABLE IF NOT EXISTS ping_hour (
   answered INTEGER NOT NULL, lost INTEGER NOT NULL,
   latency INTEGER, lo INTEGER, hi INTEGER,
   PRIMARY KEY (node_id, ts, task_id)
+) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
+/// "最近一次拿到结果"跨重启存活。
+///
+/// 新建的表，老库补上；`IF NOT EXISTS` 与 `migrate_to_12` 同一条规矩（迁移测试会拿当前
+/// schema 建库再"减回去"，所以每一步都不能假设表一定不在）。
+fn migrate_to_26(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ping_last (
+  task_id INTEGER PRIMARY KEY REFERENCES ping_task(id) ON DELETE CASCADE,
+  at      INTEGER NOT NULL
 ) WITHOUT ROWID;",
     )?;
     Ok(())
@@ -769,6 +805,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         add_column(&tx, "setting", "updated_by TEXT NOT NULL DEFAULT ''")?;
     }
 
+    if from < 26 {
+        migrate_to_26(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -1505,7 +1544,9 @@ impl Db {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         migrate(&conn, if fresh { SCHEMA_VERSION } else { version })?;
-        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default(), ping_last: Default::default() })
+        // 先读回再交出连接：结构体字面量按字段顺序求值，`conn` 会先被移进 `Mutex`。
+        let seeded = seed_ping_last(&conn)?;
+        Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default(), ping_last: Mutex::new(seeded) })
     }
 
     /// `/healthz` 背后的检查：连接答得出来，且 schema 正是本二进制期望的那一版。
@@ -1542,7 +1583,24 @@ impl Db {
     /// 记一笔"这个任务刚拿到结果" ✓。调用点是探测成功那一条路（`agent_ws` 里紧接着
     /// `note_ping_error(…, None)` 之后），所以它只记成功，不记失败与超时。
     pub fn note_ping_seen(&self, task_id: i64) {
-        self.ping_last.lock().unwrap_or_else(|e| e.into_inner()).insert(task_id, Utc::now().timestamp());
+        let now = Utc::now().timestamp();
+        // ⚠️ **先放掉 ping_last 的锁，再拿连接** ✗：两把锁反向持有时会死锁。
+        let previous = {
+            let mut seen = self.ping_last.lock().unwrap_or_else(|e| e.into_inner());
+            seen.insert(task_id, now)
+        };
+        // 落库只在"上一次落盘超过一分钟"时做：这一份是给重启后用的，不需要秒级精度，
+        // 而每个成功探测都写一次会把写路径浪费在它身上。
+        if previous.is_some_and(|at| now - at < PING_LAST_FLUSH_SECS) {
+            return;
+        }
+        let conn = self.conn();
+        // 写失败**不是**错误：内存里那份已经更新了，最坏情况是重启后那列少一次。
+        let _ = conn.execute(
+            "INSERT INTO ping_last (task_id, at) VALUES (?1, ?2)
+             ON CONFLICT(task_id) DO UPDATE SET at = excluded.at",
+            params![task_id, now],
+        );
     }
 
     /// 每个任务最近一次拿到结果的时间 ✓。**没有记录的任务不出现在表里** ✗ ——
@@ -7257,6 +7315,45 @@ mod tests {
         // 再报一次是覆盖，不是追加 ✓（只保留最近一次 ✓）
         db.note_ping_seen(7);
         assert_eq!(db.ping_last().len(), 1, "一个任务只留一条 ✓");
+    }
+
+    /// **跨重启**：内存里那份一关库就没了，而探针按任务排队，下一次可能要隔几小时 ——
+    /// 那列不能等到那时候才有数。
+    #[test]
+    fn the_last_successful_probe_survives_a_restart() {
+        let scratch = Scratch::new();
+        let task = {
+            let db = Db::open(&scratch.0).unwrap();
+            let id = node(&db, 1);
+            let task = db
+                .save_ping_task(&PingTask {
+                    kind: None,
+                    id: 0,
+                    name: "p".into(),
+                    target: "1.1.1.1:443".into(),
+                    interval: 60,
+                    nodes: vec![id],
+                })
+                .unwrap();
+            db.note_ping_seen(task);
+            task
+        };
+        let db = Db::open(&scratch.0).unwrap();
+        let seen = db.ping_last();
+        assert!(seen.contains_key(&task), "重启后这个任务该还有记录，而不是一片空白");
+        assert!(!seen.contains_key(&(task + 1)), "没上报过的任务仍然不出现");
+    }
+
+    /// 从 25 升上来：新建的表要真的被建出来 —— 否则老库升级后那列仍然永远空白。
+    #[test]
+    fn a_database_from_before_the_table_gains_it() {
+        let scratch = Scratch::new();
+        {
+            let db = Db::open(&scratch.0).unwrap();
+            db.conn().execute_batch("DROP TABLE ping_last; PRAGMA user_version = 25;").unwrap();
+        }
+        let db = Db::open(&scratch.0).unwrap();
+        assert!(schema_mentions(&db.conn(), "ping_last", "at").unwrap(), "迁移 26 应当把 ping_last 建回来");
     }
 
     #[test]
