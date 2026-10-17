@@ -1037,42 +1037,54 @@ export function useVersions() {
   // （升级、或崩了重启 ✓）✓，更新页那一行就一直显示"查不到版本" ✓，
   // ⭐ 而且**要手动刷新才恢复** ✓✓（用户遇到的正是这个 ✓）。
   // ⇒ 退避一秒半再试一次 ✓ —— 重启窗口通常就那几秒 ✓；再失败才放弃 ✓（它毕竟只是个后台轮询 ✓）。
-  const load = useCallback(() => {
-    const once = () => api<Versions>("/version").then(setVersions)
-    once().catch(() => {
-      window.setTimeout(() => {
-        once().catch(() => {})
-      }, 1500)
-    })
+  // ⚠️ **只有一条请求链** ✗✗ —— 此前这里叠着两套：`load`（给导航上那个"有新版"圆点用）
+  // 自带一条 1.5 秒重试，挂载时的 effect 又有一条 1.5 秒 / 4 秒的退避链。两条都打
+  // `/version`：查不到版本时，一次进面板最多打四次；而且 `load` 那条的重试**没有卸载守卫**，
+  // 组件卸载后仍会 `setState`。
+  //
+  // 现在两种触发（挂载、手动刷新）走同一个 `attempt`，`alive` 用 ref 贯穿，超时句柄集中清理。
+  const alive = useRef(true)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const schedule = useRef<(tries: number) => void>(() => {})
+
+  const attempt = useCallback((tries: number) => {
+    if (!alive.current) return
+    api<Versions>("/version")
+      .then((v) => {
+        if (!alive.current) return
+        setVersions(v)
+        // Empty latest is worth one more look when the hub's own check had not
+        // landed yet -- a hub that has just started asks again on this call,
+        // so the next attempt can find the answer. A hub that cannot reach
+        // GitHub at all answers the same way every time: it caches the empty
+        // result (ten minutes for the hub release, six hours for the agent),
+        // so those retries are spent, not wasted -- two requests, bounded.
+        if (!v.hub_latest && !v.agent_latest) schedule.current(tries)
+      })
+      .catch(() => {
+        if (alive.current) schedule.current(tries)
+      })
   }, [])
+
   useEffect(() => {
-    let stop = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const retry = (tries: number) => {
-      if (stop || tries >= VERSION_RETRY_MS.length) return
-      timer = setTimeout(() => attempt(tries + 1), VERSION_RETRY_MS[tries])
+    // ⚠️ ref 在**effect 里**赋值，不在渲染期 —— 渲染期访问 ref 是错的（`react(refs)` 会报）。
+    // 这里的赋值必须排在 `attempt(0)` 之前：第一次失败时它要用到。
+    schedule.current = (tries: number) => {
+      if (!alive.current || tries >= VERSION_RETRY_MS.length) return
+      // 先清掉可能还在排的那一个：手动刷新与退避链不该同时在飞。
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => attempt(tries + 1), VERSION_RETRY_MS[tries])
     }
-    const attempt = (tries: number) => {
-      api<Versions>("/version")
-        .then((v) => {
-          if (!stop) setVersions(v)
-          // Empty latest is worth one more look when the hub's own check had not
-          // landed yet -- a hub that has just started asks again on this call,
-          // so the next attempt can find the answer. A hub that cannot reach
-          // GitHub at all answers the same way every time: it caches the empty
-          // result (ten minutes for the hub release, six hours for the agent),
-          // so those retries are spent, not wasted -- two requests, bounded.
-          if (!v.hub_latest && !v.agent_latest) retry(tries)
-        })
-        .catch(() => retry(tries))
-    }
+    alive.current = true
     attempt(0)
     return () => {
-      stop = true
-      clearTimeout(timer)
+      alive.current = false
+      clearTimeout(timer.current)
     }
-  }, [])
-  return { versions, reload: load }
+  }, [attempt])
+
+  const reload = useCallback(() => attempt(0), [attempt])
+  return { versions, reload }
 }
 
 /** Whether anything is published that this hub or its agents are not running. */
