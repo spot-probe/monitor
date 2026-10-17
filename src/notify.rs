@@ -670,7 +670,19 @@ fn sweep(app: &App, watch: &mut Watch, now: i64) -> Result<Vec<Note>> {
 
     let percent = number(app, "notify_traffic");
     let mut metered = Vec::new();
-    let traffic = if percent > 0 && armed { app.db.all_traffic() } else { HashMap::new() };
+    let traffic = if percent > 0 && armed {
+        match app.db.all_traffic() {
+            Ok(t) => t,
+            // ⚠️ 读不到流量 ⇒ **这一轮不发流量告警**，但留一条日志。以前它静默变成空表，
+            // 于是"读不出来"和"没有一台超限"在日志里长得一样。
+            Err(e) => {
+                warn!("traffic unreadable; skipping traffic alerts this round: {e:#}");
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
     for node in nodes.iter().filter(|n| n.traffic_limit > 0) {
         let Some(t) = traffic.get(&node.id) else { continue };
         let used = match node.traffic_mode.as_str() {

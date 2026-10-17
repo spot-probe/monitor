@@ -136,8 +136,8 @@ fn tick(app: &App) -> anyhow::Result<()> {
             continue; // 这个周期今天已经发过 ✓（重启也不会重发 ✓）
         }
         let (from, to, prev_from, prev_to) = p.last_full(today);
-        let rows = report_rows(app, &from, &to);
-        let prev = report_rows(app, &prev_from, &prev_to)
+        let rows = report_rows(app, &from, &to)?;
+        let prev = report_rows(app, &prev_from, &prev_to)?
             .into_iter()
             .map(|r| (r.name, r.rx, r.tx))
             .collect::<Vec<_>>();
@@ -159,13 +159,16 @@ fn tick(app: &App) -> anyhow::Result<()> {
 
 /// 取一个区间的逐节点用量 ✓，并补齐报告需要的两样：**月度额度** ✓ 与**本月已用** ✓
 ///（超限提醒按月算 ✓ —— 见 `report::body` 的说明 ✓）。
-fn report_rows(app: &App, from: &str, to: &str) -> Vec<crate::report::Row> {
+fn report_rows(app: &App, from: &str, to: &str) -> anyhow::Result<Vec<crate::report::Row>> {
     // 额度由 `Db::traffic_limits` 提供 ✓ —— 走 `Db` 的用途明确的方法 ✓，
     // 而不是在这里直接拿连接 ✗（`conn` 是私有的 ✓，而且那样会把"表长什么样"漏到报告这一层 ✓）。
     let limits: std::collections::HashMap<i64, i64> = app.db.traffic_limits();
+    // ⚠️ 读不到就**不发这份报告**：一份把"本月已用"写成 0 的账单比不发更糟 —— 收件人会据此
+    // 以为额度没用，而实际上可能是数据读不出来。
     let month_used: std::collections::HashMap<i64, i64> =
-        app.db.all_traffic().into_iter().map(|(id, t)| (id, t.month_rx + t.month_tx)).collect();
-    app.db
+        app.db.all_traffic()?.into_iter().map(|(id, t)| (id, t.month_rx + t.month_tx)).collect();
+    Ok(app
+        .db
         .traffic_sums(from, to)
         .into_iter()
         .map(|(id, name, rx, tx)| crate::report::Row {
@@ -175,7 +178,7 @@ fn report_rows(app: &App, from: &str, to: &str) -> Vec<crate::report::Row> {
             limit: limits.get(&id).copied().unwrap_or(0),
             month_used: month_used.get(&id).copied().unwrap_or(0),
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

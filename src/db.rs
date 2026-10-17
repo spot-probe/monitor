@@ -2639,20 +2639,13 @@ impl Db {
         .unwrap_or_default()
     }
 
-    pub fn all_traffic(&self) -> HashMap<i64, Traffic> {
+    pub fn all_traffic(&self) -> Result<HashMap<i64, Traffic>> {
         let conn = self.conn();
-        let Ok(mut stmt) = conn.prepare_cached(
+        let mut stmt = conn.prepare_cached(
             "SELECT t.node_id, t.total_rx, t.total_tx, t.month_rx, t.month_tx, t.month_start,
                     t.day_rx, t.day_tx, t.day_start, n.traffic_reset_day
                  FROM traffic t JOIN node n ON n.id = t.node_id",
-        ) else {
-            // ⚠️ 至少留一条日志：以前这里静默返回空表，于是"流量读不出来"与"这一轮没有流量"
-            // 在下游完全一样（所有节点的流量显示 0）。彻底的做法是返回 `Result`，让三处生产
-            // 调用各自决定（告警跳过、报表留空、面板显示"未知"），但那会波及十来个测试断言，
-            // 留作单独一件 —— 记在清单里，不假装它已经解决。
-            tracing::warn!("traffic query failed; every node will read as zero this round");
-            return HashMap::new();
-        };
+        )?;
         let today = Local::now().date_naive();
         let day = today.to_string();
         let rows = stmt.query_map([], |r| {
@@ -2681,7 +2674,10 @@ impl Db {
                 },
             ))
         });
-        rows.map(|r| r.flatten().collect()).unwrap_or_default()
+        // ⚠️ 行级错误也传播：原来 `.flatten()` 把它们静默丢掉，于是"读坏了"与"没有流量"
+        // 在下游完全一样 —— 所有节点的流量显示 0。
+        let rows = rows?;
+        Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
     }
 
     /// Folds one report's raw kernel counters into the node's running totals.
@@ -4703,7 +4699,7 @@ mod tests {
             db.accumulate(id, "boot-b", Some((b + round, b + round))).unwrap();
             db.accumulate(id, "boot-a", Some((a + 1_000 + round, a + 1_000 + round))).unwrap();
         }
-        let t = db.all_traffic()[&id].clone();
+        let t = db.all_traffic().unwrap()[&id].clone();
         assert!(t.total_rx < 10_000, "six swaps booked {} bytes, not a lifetime counter", t.total_rx);
     }
 
@@ -4801,7 +4797,7 @@ mod tests {
         let id = node(&db, 1);
         db.accumulate(id, "boot-a", Some((0, 0))).unwrap();
         db.accumulate(id, "boot-a", Some((8_000, 4_000))).unwrap();
-        assert_eq!(db.all_traffic()[&id].day_rx, 8_000, "still today, so it still counts");
+        assert_eq!(db.all_traffic().unwrap()[&id].day_rx, 8_000, "still today, so it still counts");
 
         // Offline across both boundaries, with no report to restart either.
         db.conn()
@@ -4810,7 +4806,7 @@ mod tests {
                 [id],
             )
             .unwrap();
-        let t = db.all_traffic()[&id].clone();
+        let t = db.all_traffic().unwrap()[&id].clone();
         assert_eq!((t.day_rx, t.day_tx), (0, 0), "yesterday's bytes are not today's");
         assert_eq!((t.month_rx, t.month_tx), (0, 0), "last period's bytes are not this period's");
         assert_eq!(t.month_start, period_start(Local::now().date_naive(), 1).to_string());
@@ -4852,7 +4848,7 @@ mod tests {
         db.delete_node(id).unwrap();
         assert!(db.node(id).unwrap().is_none());
         assert_eq!(db.metrics(id, 0, 60).unwrap().len(), 0);
-        assert!(!db.all_traffic().contains_key(&id));
+        assert!(!db.all_traffic().unwrap().contains_key(&id));
 
         // `ping_record` has no foreign key to cascade through, and SQLite reassigns
         // the deleted id to the next node created: without the sweep in
@@ -4966,7 +4962,7 @@ mod tests {
             },
         )
         .unwrap();
-        let t = db.all_traffic().remove(&id).unwrap();
+        let t = db.all_traffic().unwrap().remove(&id).unwrap();
         assert_eq!((t.month_rx, t.month_tx), (300, 100), "the correction reads back as this period's");
 
         let t = db.accumulate(id, "boot-a", Some((500, 50))).unwrap();
@@ -4997,12 +4993,12 @@ mod tests {
         db.accumulate(id, "boot", Some((0, 0))).unwrap();
         db.accumulate(id, "boot", Some((120_000, 10_000))).unwrap();
         db.set_traffic(id, &TrafficPatch { month_tx: Some(3_000), ..Default::default() }).unwrap();
-        let t = db.all_traffic().remove(&id).unwrap();
+        let t = db.all_traffic().unwrap().remove(&id).unwrap();
         assert_eq!((t.total_rx, t.total_tx, t.month_rx, t.month_tx), (120_000, 10_000, 120_000, 3_000));
 
         db.update_node(id, &patch(serde_json::json!({"traffic_reset_day":2}))).unwrap();
         db.set_traffic(id, &TrafficPatch { month_rx: Some(7_000), ..Default::default() }).unwrap();
-        let t = db.all_traffic().remove(&id).unwrap();
+        let t = db.all_traffic().unwrap().remove(&id).unwrap();
         assert_eq!((t.month_rx, t.month_tx), (7_000, 0));
         // Correcting only a lifetime total cannot revive the previous month's
         // bytes.
@@ -5010,7 +5006,7 @@ mod tests {
             .execute("UPDATE traffic SET month_start='1999-01-01',month_tx=999 WHERE node_id=?1", [id])
             .unwrap();
         db.set_traffic(id, &TrafficPatch { total_rx: Some(130_000), ..Default::default() }).unwrap();
-        assert_eq!(db.all_traffic()[&id].month_tx, 0);
+        assert_eq!(db.all_traffic().unwrap()[&id].month_tx, 0);
     }
 
     #[test]
@@ -5103,7 +5099,7 @@ mod tests {
         db.roll_up(now, 1).unwrap();
         db.prune(1).unwrap();
         assert_eq!(db.metrics(id, 0, 60).unwrap().len(), 1);
-        assert_eq!(db.all_traffic()[&id].total_rx, 800);
+        assert_eq!(db.all_traffic().unwrap()[&id].total_rx, 800);
     }
 
     /// Swap reaches the chart through the same bucket as memory, so it has to be

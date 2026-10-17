@@ -963,7 +963,7 @@ mod tests {
             assert_eq!(app.agents.read().unwrap()[&id].metrics, good);
         }
         dispatch(&app, id, "ip", &report_json("boot", 2_000, 600)).unwrap();
-        assert_eq!(app.db.all_traffic()[&id].total_rx, 1_000);
+        assert_eq!(app.db.all_traffic().unwrap()[&id].total_rx, 1_000);
     }
 
     /// The lifetime total must never decrease, and must never book bytes nobody
@@ -974,7 +974,7 @@ mod tests {
     fn a_hostile_counter_can_neither_inflate_the_total_nor_wrap_it() {
         let app = app();
         let (id, _held) = connect(&app);
-        let total = || app.db.all_traffic()[&id].total_rx;
+        let total = || app.db.all_traffic().unwrap()[&id].total_rx;
 
         // Both counters, always: `report` pairs them, so omitting one makes the
         // pair unreadable and every assertion below pass for that reason rather

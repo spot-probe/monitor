@@ -445,7 +445,7 @@ fn visible_nodes(app: &App, full: bool) -> Result<Vec<Value>, anyhow::Error> {
     // on each node's `created_at`, so the map is built from the node list just
     // read rather than from the aggregate alone.
     let nodes = app.db.nodes()?;
-    let traffic = app.db.all_traffic();
+    let traffic = app.db.all_traffic()?;
     let uptime = uptime_map(app, Utc::now().timestamp(), &nodes);
     let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
     let none = Traffic::default();
