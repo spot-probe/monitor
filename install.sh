@@ -509,6 +509,12 @@ RestartSec=5
 # start one with DynamicUser= and exits 226/NAMESPACE. DynamicUser= also implied
 # RestrictSUIDSGID=, which is therefore stated below.
 User=monitor-agent
+# ⚠️ **ICMP 需要 CAP_NET_RAW** ✗✗ —— 此前只靠内核的 `net.ipv4.ping_group_range`，
+# 而那个值在不少机器上是 `1 0`（只允许 gid 0 的组），**不覆盖服务用户**；本脚本那时
+# 只能打一条 warning。后果是每条 ICMP 任务都报 permission ⇒ 面板上一排错误而不是延迟。
+# 能力集同样收窄到这一项，不给别的。
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
 ProtectSystem=strict
