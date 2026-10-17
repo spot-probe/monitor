@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode, useCallback } from "react"
+import { useEffect, useState, type ReactNode, useCallback, useRef } from "react"
 import { ArrowUpCircle, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Search } from "lucide-react"
 
 import { api, behind, changes, probeHistory } from "@/lib/api"
@@ -658,12 +658,22 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const [probeNode, setProbeNode] = useState<Node | null>(null)
   const [probeRows, setProbeRows] = useState<ProbeHistoryRow[] | null>(null)
   const [probeErr, setProbeErr] = useState(false)
+  // ⚠️ **请求定序** ✗：快速连点两台时，第一台的应答可能晚于第二台到达，于是把**另一台**的
+  // 探测历史盖到当前弹窗上 —— 而标题来自 `probeNode`、内容来自 `probeRows`，两者会指向
+  // 不同节点，界面上看起来却完全正常（只是数据错了）。同文件其它请求都有 alive/stop 保护，
+  // 这一处漏了。
+  const probeAsk = useRef(0)
   const loadProbe = useCallback((node: Node) => {
+    const ask = ++probeAsk.current
     setProbeRows(null)
     setProbeErr(false)
     probeHistory(node.id, 30)
-      .then((r) => setProbeRows(r.rows))
-      .catch(() => setProbeErr(true))
+      .then((r) => {
+        if (ask === probeAsk.current) setProbeRows(r.rows)
+      })
+      .catch(() => {
+        if (ask === probeAsk.current) setProbeErr(true)
+      })
   }, [])
 
   const [onlyData, setOnlyData] = useState(false)
@@ -2003,6 +2013,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             if (!v) {
               setProbeNode(null)
               setProbeRows(null)
+              // 关掉之后迟到的应答不该把内容填回来 ✓（同一个序号机制）
+              probeAsk.current++
               setProbeErr(false)
             }
           }}
