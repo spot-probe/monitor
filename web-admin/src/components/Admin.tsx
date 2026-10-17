@@ -2218,7 +2218,9 @@ function Ping({ nodes }: { nodes: Node[] }) {
     const id = openNodes
     let alive = true
     api<{ edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] }>(
-      `/nodes/ping-heatmap?task=${id}&hours=${winHours}`,
+      // ⚠️ **带上 `points`** ✗：不带时服务端按默认 1440 个桶算 —— 7 天窗口就是一万格左右，
+      // 而屏幕上一格只有几个像素宽。折线图那条一直是 `points=360`，热力图漏了。
+      `/nodes/ping-heatmap?task=${id}&hours=${winHours}&points=360`,
     )
       .then((d) => { if (alive) setHeat({ task: id, edges: d.edges ?? [], buckets: d.buckets ?? [] }) })
       .catch(() => { /* 取不到就不画矩阵 ✓ —— 折线图与色条不受影响 ✓ */ })
