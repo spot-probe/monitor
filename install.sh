@@ -293,6 +293,27 @@ done
 [ "$(head -c 4 "$TMP")" = "$(printf '\177ELF')" ] ||
 	{ echo "the download is not a Linux executable: $(head -n 1 "$TMP" | tr -cd '[:print:]' | cut -c1-200)" >&2; exit 1; }
 
+# ⚠️ **能验就验** ✗✓ —— 首次安装时这台机器上还没有任何可信校验器（引导问题：验签器本身也得
+# 可信地装进来），所以那条路仍只有 TLS。但**已经装了 agent 的机器**（--upgrade 或重跑安装）
+# 可以用**旧 agent** 验新包：脚本自己不懂 Ed25519，而旧 agent 里编着公钥，这是"替换 root 的
+# 二进制"那一步唯一现成的可信判据。
+if [ -x "$BIN" ]; then
+	SIG="$(mktemp)"
+	if curl -sSfL --max-time 60 "${SERVER%/}/agent/$ARCH/signature" -o "$SIG" 2>/dev/null; then
+		if ! "$BIN" --verify "$TMP" "$SIG" >/dev/null; then
+			echo "the download does not match its signature — refusing to install it" >&2
+			rm -f "$SIG"
+			exit 1
+		fi
+		echo "signature verified with the installed agent"
+	else
+		echo "warning: could not fetch the release signature; this download is unverified" >&2
+	fi
+	rm -f "$SIG"
+else
+	echo "warning: first install — no trusted verifier here yet, so the download is unverified" >&2
+fi
+
 # Downloaded before the registration below, because that step spends a node: the
 # key returns a token and the panel gains a row, while the env file recording it
 # is only written once the binary is in place. A download that fails after
@@ -496,6 +517,13 @@ cat >"$UNIT_FILE" <<UNIT
 Description=monitor agent
 After=network-online.target
 Wants=network-online.target
+# ⚠️ **重启上限** ✗✗ —— `RestartSec=5` 在任意 10 秒窗口只有 2–3 次，够不到 systemd 默认的
+# 5 次/10 秒 ⇒ 一个"启动即崩"的新版本会**永远**重启下去。而 `.prev` 只在进程能活到 180 秒
+# 自检时才用得上（那是 agent 自己回滚"连不上 hub"那一半），瞬间崩溃它根本跑不到。
+# 这里给一个明确的窗口：5 分钟内崩 5 次就停。代价是这台机器会**停着**等人工介入（而不是
+# 无限重启），好处是 `systemctl status` 里看得见 failed、也不会把 CPU 与 journal 打满。
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -359,6 +359,26 @@ impl<S: futures_core::Stream + Unpin> futures_core::Stream for Metered<S> {
 /// is free). Not a fetched checksum: whoever can replace the binary can replace
 /// that too. Deliberately deferred, as it couples agent releases to hub
 /// releases.
+/// `/agent/{arch}/signature` —— 发布资产的 `.minisig`（几百字节，由 hub 转一下）。
+///
+/// 存在的理由：安装脚本在**替换已有 agent** 时可以用旧 agent 验新包（`--verify`），
+/// 而验签需要签名文件。首次安装没有可信校验器（引导问题），那条路仍只有 TLS。
+async fn agent_signature(State(app): State<Shared>, Path(arch): Path<String>) -> Response {
+    if !matches!(arch.as_str(), "x86_64" | "aarch64") {
+        return (StatusCode::NOT_FOUND, "unknown architecture").into_response();
+    }
+    let url = release_signature_url(&app, &arch);
+    let fetched = app.http.get(&url).timeout(std::time::Duration::from_secs(30)).send().await;
+    match fetched {
+        Ok(res) if res.status().is_success() => match res.text().await {
+            Ok(text) => ([(header::CONTENT_TYPE, "text/plain")], text).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, format!("signature unreadable: {e}")).into_response(),
+        },
+        Ok(res) => (StatusCode::BAD_GATEWAY, format!("signature upstream {}", res.status())).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("signature fetch failed: {e}")).into_response(),
+    }
+}
+
 async fn agent_binary(State(app): State<Shared>, Path(arch): Path<String>) -> Response {
     if !matches!(arch.as_str(), "x86_64" | "aarch64") {
         return (StatusCode::NOT_FOUND, "unknown architecture").into_response();
@@ -606,6 +626,9 @@ async fn main() -> Result<()> {
         .route("/api/agent/register", post(api::agent_register))
         .route("/install.sh", get(install_script))
         .route("/agent/{arch}", get(agent_binary))
+        // ⚠️ **签名文件也要转** ✗✓ —— 安装脚本在"替换已有 agent"时会用旧 agent 的
+        // `--verify` 验新包，而验签需要签名文件本身；节点常常连不上 GitHub。
+        .route("/agent/{arch}/signature", get(agent_signature))
         // Read paths; the public page reaches these unauthenticated.
         // 不在 `/api/` 下，所以不会被 `is_api_path` 判成 404，也不会落进 SPA 兜底。
         .route("/healthz", get(api::healthz))
