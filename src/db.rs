@@ -1203,7 +1203,15 @@ const FOLD_NODES: usize = 10;
 /// pass. Measured: a pass that held it throughout showed up as a node going
 /// offline for 12 s.
 fn let_waiters_in() {
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    // ⚠️ **让出 CPU，不睡 1 毫秒** ✗✗ —— 原来这里是 `sleep(1ms)`：
+    // 升级后首次 catch-up 要折 2159 个小时、每小时每 10 个节点一块
+    // ⇒ 2159 × 10 × 1 ms ≈ **21.6 秒纯睡眠**；prune 首次要按节点、按表、按天分片删 90 天
+    // ⇒ 100 × 4 × 90 = 36 000 次 ⇒ 又是约 **36 秒**。两者都不产生任何进展。
+    //
+    // 而它的**目的**（让等锁的 agent 写入插进来）并不需要睡：三个调用点都已经 `drop(conn)`，
+    // 解锁本身就会唤醒等在这把 futex 上的线程；这里只要不立刻把锁抢回去。
+    // `yield_now` 正好表达"让一下"，代价是微秒级。
+    std::thread::yield_now();
 }
 
 /// The first hour not yet folded into the summary tables, `None` before the
