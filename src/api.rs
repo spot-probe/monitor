@@ -1697,15 +1697,15 @@ const RELEASES_RETRY: i64 = 600;
 ///
 /// 分组用的是 **UTC 日**（SQL 里就是），所以返回时间戳、由面板按本地时区显示：
 /// 跨日边界会有小时级偏移，这是这类接口的常规取舍，面板注释里也写着。
-pub async fn overview_series(
-    _: Admin,
-    State(app): State<Shared>,
-    Query(q): Query<SeriesQuery>,
-) -> Json<Value> {
+pub async fn overview_series(_: Admin, State(app): State<Shared>, Query(q): Query<SeriesQuery>) -> Response {
     let days = q.days.unwrap_or(30).clamp(1, 90);
     // 空串归一成 None：前端用空值表示"全部节点"，不该被当成"名字为空的分组"。
     let group = q.group.as_deref().filter(|g| !g.is_empty());
-    let rows = app.db.overview_daily(days, group);
+    let rows = match app.db.overview_daily(days, group) {
+        Ok(rows) => rows,
+        // 与其它 handler 同一套：读失败映射成错误响应，而不是 panic（release 是 abort）。
+        Err(e) => return fail(e).into_response(),
+    };
     Json(json!({
         "days": rows
             .iter()
@@ -1731,6 +1731,7 @@ pub async fn overview_series(
             })
             .collect::<Vec<_>>()
     }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

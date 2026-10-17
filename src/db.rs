@@ -1878,7 +1878,10 @@ impl Db {
     /// **最后一个值是「有数据覆盖的秒数」**：平均速率要除以它，不能除以 86400，否则没有样本的小时
     /// 会以 0 参与平均，把均值压低 —— 那是错的。
     /// 分组用的是 **UTC 日**；面板负责按本地时区显示日期（跨日边界会有小时级的偏移，这一点在那边的注释里写）。
-    pub fn overview_daily(&self, days: i64, group: Option<&str>) -> Vec<[f64; 12]> {
+    /// ⚠️ **返回 `Result`** ✓：此前这条在内部 `.unwrap()`，而 release 是 `panic = "abort"`
+    /// ⇒ 一次 SQL 错误不是让这个请求失败，是让**整个 hub 退出**。相邻的 `db_stats` 早就
+    /// 规规矩矩返回 Result 并交给 `spawn_blocking`，这条是漏网的。
+    pub fn overview_daily(&self, days: i64, group: Option<&str>) -> Result<Vec<[f64; 12]>> {
         let since = Utc::now().timestamp() - days * 86_400;
         let conn = self.conn();
         let mut stmt = conn
@@ -1934,27 +1937,26 @@ impl Db {
                         MAX(CASE WHEN rn_disk >= n * 0.95 THEN disk END)
                    FROM ranked
                   GROUP BY day ORDER BY day",
-            )
-            .unwrap();
-        let rows = stmt
-            .query_map(rusqlite::params![since, group], |r| {
-                Ok([
-                    r.get::<_, i64>(0)? as f64,
-                    r.get::<_, i64>(1)? as f64,
-                    r.get::<_, i64>(2)? as f64,
-                    r.get::<_, i64>(3)? as f64,
-                    r.get::<_, i64>(4)? as f64,
-                    r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
-                    r.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
-                ])
-            })
-            .unwrap();
-        rows.filter_map(|r| r.ok()).collect()
+            )?;
+        let rows = stmt.query_map(rusqlite::params![since, group], |r| {
+            Ok([
+                r.get::<_, i64>(0)? as f64,
+                r.get::<_, i64>(1)? as f64,
+                r.get::<_, i64>(2)? as f64,
+                r.get::<_, i64>(3)? as f64,
+                r.get::<_, i64>(4)? as f64,
+                r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+                r.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
+            ])
+        })?;
+        // ⚠️ 不再 `filter_map(|r| r.ok())`：那会把**行转换失败**也静默吞掉，于是"读坏了"
+        // 长得和"这天没有数据"一模一样。与这个仓其它读路径一样，让它变成错误。
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// 「需要处理的节点」三条榜。**一次算完**，卡片切榜时不必再发请求。
@@ -7006,7 +7008,7 @@ mod tests {
                 .unwrap();
             ids.push(n);
         }
-        let rows = db.overview_daily(1, None);
+        let rows = db.overview_daily(1, None).unwrap();
         assert_eq!(rows.len(), 1, "只插了一个小时，应当只有一天");
         let r = rows[0];
         // 带宽：求和（100+200+300），再乘 60 分钟 × 60 秒
@@ -7299,9 +7301,9 @@ mod tests {
                 )
                 .unwrap();
         }
-        let all = db.overview_daily(1, None);
-        let east = db.overview_daily(1, Some("east"));
-        let west = db.overview_daily(1, Some("west"));
+        let all = db.overview_daily(1, None).unwrap();
+        let east = db.overview_daily(1, Some("east")).unwrap();
+        let west = db.overview_daily(1, Some("west")).unwrap();
         assert!((all[0][5] - 23.333).abs() < 0.01, "全部的平均 {}", all[0][5]);
         assert!((east[0][5] - 15.0).abs() < 0.01, "east 的平均 {}", east[0][5]);
         assert!((west[0][5] - 40.0).abs() < 0.01, "west 的平均 {}", west[0][5]);
@@ -7309,7 +7311,10 @@ mod tests {
         assert_eq!(east[0][1], 200.0 * 3600.0);
         assert_eq!(west[0][1], 100.0 * 3600.0);
         assert_eq!(east[0][1] + west[0][1], all[0][1], "各组合计必须等于全部");
-        assert!(db.overview_daily(1, Some("nowhere")).is_empty(), "不存在的分组应是空结果而不是报错");
+        assert!(
+            db.overview_daily(1, Some("nowhere")).unwrap().is_empty(),
+            "不存在的分组应是空结果而不是报错"
+        );
     }
 
     /// **证明它是 P95 而不是 MAX**：20 台节点，其中一台 cpu 99（离群），其余 19 台都是 10。
@@ -7338,7 +7343,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let rows = db.overview_daily(1, None);
+        let rows = db.overview_daily(1, None).unwrap();
         let r = rows[0];
         // 20 行里排名前 5% 是第 19、20 名（rn >= 19）→ 包含离群的 99。
         assert_eq!(r[9], 99.0, "rn>=19 时应当包含第 19 名，这里就是那台离群的");
