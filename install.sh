@@ -517,11 +517,11 @@ cat >"$UNIT_FILE" <<UNIT
 Description=monitor agent
 After=network-online.target
 Wants=network-online.target
-# ⚠️ **重启上限** ✗✗ —— `RestartSec=5` 在任意 10 秒窗口只有 2–3 次，够不到 systemd 默认的
-# 5 次/10 秒 ⇒ 一个"启动即崩"的新版本会**永远**重启下去。而 `.prev` 只在进程能活到 180 秒
+# ⚠️ **重启上限** ✗✗ —— 「RestartSec=5」在任意 10 秒窗口只有 2–3 次，够不到 systemd 默认的
+# 5 次/10 秒 ⇒ 一个"启动即崩"的新版本会**永远**重启下去。而「.prev」只在进程能活到 180 秒
 # 自检时才用得上（那是 agent 自己回滚"连不上 hub"那一半），瞬间崩溃它根本跑不到。
 # 这里给一个明确的窗口：5 分钟内崩 5 次就停。代价是这台机器会**停着**等人工介入（而不是
-# 无限重启），好处是 `systemctl status` 里看得见 failed、也不会把 CPU 与 journal 打满。
+# 无限重启），好处是 systemctl status 里看得见 failed、也不会把 CPU 与 journal 打满。
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -537,8 +537,8 @@ RestartSec=5
 # start one with DynamicUser= and exits 226/NAMESPACE. DynamicUser= also implied
 # RestrictSUIDSGID=, which is therefore stated below.
 User=monitor-agent
-# ⚠️ **ICMP 需要 CAP_NET_RAW** ✗✗ —— 此前只靠内核的 `net.ipv4.ping_group_range`，
-# 而那个值在不少机器上是 `1 0`（只允许 gid 0 的组），**不覆盖服务用户**；本脚本那时
+# ⚠️ **ICMP 需要 CAP_NET_RAW** ✗✗ —— 此前只靠内核的 net.ipv4.ping_group_range，
+# 而那个值在不少机器上是「1 0」（只允许 gid 0 的组），**不覆盖服务用户**；本脚本那时
 # 只能打一条 warning。后果是每条 ICMP 任务都报 permission ⇒ 面板上一排错误而不是延迟。
 # 能力集同样收窄到这一项，不给别的。
 AmbientCapabilities=CAP_NET_RAW

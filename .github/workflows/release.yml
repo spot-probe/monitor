@@ -40,6 +40,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # ⚠️ 没有缓存时 237 个 crate 每次从零编。
       - uses: Swatinem/rust-cache@v2
+      # ⚠️ **shellcheck 也要在这里跑** ✗✗ —— 它此前只在 ci.yml 里。于是 1.12.10 的
+      # install.sh 因为在 unit 的 heredoc 注释里用了反引号（那个 heredoc 的分隔符没有引号
+      # ⇒ 反引号是**命令替换**）而让 ci 红了，但 release 自己的 check 只跑 fmt/clippy/test
+      # ⇒ 版本照发，带着一个在安装时执行注释的脚本。
+      - run: shellcheck install.sh install-hub.sh scripts/theme.sh scripts/e2e.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       # `--locked`：与 build 阶段一致。不带它时，lock 漂移会在 CI 里被静默补好、只在
