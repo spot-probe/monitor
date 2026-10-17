@@ -1713,7 +1713,9 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 out of the others rather than added on top: the table already
                 fills the page, and a version is five characters wide. */}
             <TableRow>
-              <TableHead className="w-[17%]">名称</TableHead>
+              {/* ⚠️ 首列**固定在左边** ✗✓：窄屏上表格要横向滚动，滚到右边时若名称也滚走，
+                  就不知道这一行是谁。表头同步固定，滚动时才不会错位。 */}
+              <TableHead className="sticky left-0 z-20 w-[17%] bg-card">名称</TableHead>
               <TableHead className="w-[18%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
               <TableHead className="w-[9%]">版本</TableHead>
@@ -1731,9 +1733,18 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
             {visible.length === 0 ? (
             	<TableRow>
             		<TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
-            			{nodes.length === 0
-            				? "还没有节点。用右上角的「添加节点」或「批量添加」，让机器自己登记。"
-            				: "没有匹配的节点，换个搜索词或分组试试。"}
+            			{nodes.length === 0 ? (
+            				// ⚠️ 空态要给**可点的下一步**，而不是让读者去别处找按钮 ✗✓：
+            				// 这是新装 hub 的第一屏，只有一句话会让人以为该去"设置"里找。
+            				<div className="flex flex-col items-center gap-3">
+            					<p>还没有节点。让机器跑一次安装命令，它会自己登记到这里。</p>
+            					<Button onClick={() => setCreating(true)}>
+            						<Plus /> 添加节点
+            					</Button>
+            				</div>
+            			) : (
+            				"没有匹配的节点，换个搜索词或分组试试。"
+            			)}
             		</TableCell>
             	</TableRow>
             ) : visible.map((n, index) => (
@@ -1741,7 +1752,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 key={n.id}
                 style={{ viewTransitionName: `node-${n.id}` }}
                 data-dragging={drag.dragging === n.id || undefined}
-                className="transition-opacity data-[dragging]:opacity-40"
+                className="group transition-opacity data-[dragging]:opacity-40"
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move" }}
                 onDragEnter={() =>
                   drag.dragging !== null &&
@@ -1749,7 +1760,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 }
                 onDrop={(e) => { e.preventDefault(); drag.save(drag.order) }}
               >
-                <TableCell>
+                <TableCell className="sticky left-0 z-10 bg-card transition-colors group-hover:bg-muted/50">
                   <div className="flex items-center gap-2">
                     <DragHandle
                       // A drop sends the order of every node, and a filtered list
@@ -1850,7 +1861,9 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                   <UpgradeStage node={n} />
                   {n.agent_old && (
                     <span
-                      className="ml-1.5 inline-block size-1.5 shrink-0 rounded-full bg-warn align-middle"
+                      // ⚠️ 换成**向上的三角** ✗✓：原来是一个与"在线"同尺寸同形状的圆点，
+                      // 两个语义不同层级的东西长得一样。三角读作"该往上走了"。
+                      className="ml-1.5 inline-block size-0 shrink-0 border-x-[4px] border-b-[6px] border-x-transparent border-b-warn align-middle"
                       title={`有新版 agent${agentLatest ? ` ${agentLatest}` : ""}：在该节点上重跑一次安装命令即可升级`}
                       aria-label={`agent 有新版本${agentLatest ? ` ${agentLatest}` : ""}`}
                       role="img"
@@ -1861,10 +1874,13 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     那是在说"这台此刻闲着"，与"不知道"是两件事（与 `uptime` 那条同一原则）。 */}
                 <TableCell className="tnum text-right text-sm">
                   {n.metrics ? (
+                    // ⚠️ 两个数要**带标签** ✗✓：`2% / 59%` 得让读者猜哪个是内存。列宽放得下
+                    // 「CPU … · 内存 …」，标签用弱色、数字用正文色，扫读时看的仍然是数字。
                     <span title="CPU 与内存占用，来自 agent 每 2 秒的推送">
+                      <span className="text-muted-foreground">CPU </span>
                       {Math.round(n.metrics.cpu)}%
+                      <span className="text-muted-foreground">{" · 内存 "}</span>
                       <span className="text-muted-foreground">
-                        {" / "}
                         {n.metrics.mem_total > 0
                           ? `${Math.round((n.metrics.mem_used / n.metrics.mem_total) * 100)}%`
                           : "—"}

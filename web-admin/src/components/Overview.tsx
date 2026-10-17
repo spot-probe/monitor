@@ -7,6 +7,7 @@ import type { Node, ProbeHistoryRow } from "@/lib/api"
 import { bytes, monthUsage, renewedExpiry } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
@@ -245,14 +246,13 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
   )
 }
 
-/// 流量：堆叠柱（入在下、出在上）+ **右轴**累积折线，**两侧各有刻度**。
+/// 流量：**堆叠柱**（入在下、出在上），一根轴。
 ///
-/// 两根轴量纲差一个数量级（当天 vs 累计）。只标一个最大值时，那条折线看着像浮在空中，读者没法
-/// 核对它落在哪一档 —— 所以左右各画三条刻度线并标数值。
+/// ⚠️ 累积折线**从这里搬走了** ✗✗：它与柱量纲差一个数量级（当天 vs 区间累计），叠在同一张图上
+/// 必须开第二根 y 轴 —— 而双轴图读起来永远是"这条线对哪根轴"。它现在是下面那条独立窄带
+/// （[`Cumulative`]），柱只需要一根轴；逐日累计值仍在 tooltip 里。
 function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const top = chartTop("traffic", rows)
-  const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
-  const cumTop = Math.max(1, ...cum)
   const bw = CHART_W / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
@@ -262,7 +262,7 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
-      <ChartTicks left={top} right={cumTop} format={bytes} />
+      <ChartTicks left={top} format={bytes} />
       {rows.map((r, i) => {
         const x = i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
@@ -276,10 +276,6 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
           </g>
         )
       })}
-      {!hidden?.has("累计") && (
-        <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
-          points={cum.map((v, i) => `${i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")} />
-      )}
       {/* 高峰标记：当天总量最大的那根柱子上方标出来 —— 运维第一眼想看的就是它。 */}
       {(() => {
         let peak = 0
@@ -302,6 +298,27 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
           </text>
         ) : null,
       )}
+    </svg>
+  )
+}
+
+/// 累计：与柱**共用 x 位置**的一条窄带，单独一图、不共用 y 轴。
+///
+/// `cum` 与 tooltip 里那串数是同一套算法（逐日累加），所以图上看到的形状与悬停读到的数字一致。
+function Cumulative({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+  if (hidden?.has("累计") || rows.length === 0) return null
+  const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
+  const top = Math.max(1, ...cum)
+  const bw = CHART_W / Math.max(1, rows.length)
+  const h = 42
+  const y = (v: number) => h - 4 - (v / top) * (h - 14)
+  return (
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="mt-1 w-full" role="img"
+      aria-label="累计流量：区间内逐日累加">
+      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
+        points={cum.map((v, i) => `${i * bw + bw / 2},${y(v)}`).join(" ")} />
+      <text x={0} y={9} fontSize="9" className="fill-muted-foreground">累计</text>
+      <text x={CHART_W} y={9} fontSize="9" textAnchor="end" className="fill-warn-fg">{bytes(top)}</text>
     </svg>
   )
 }
@@ -570,14 +587,21 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             )
           })}
         </div>
-        {!rows || rows.length === 0 ? (
+        {!rows ? (
+          // ⚠️ 加载中用**骨架**而不是"正在读取…" ✗✓：文字占位在 100 台节点时会闪一下再
+          // 跳成图表，读者看到的是"页面抖了一下"；骨架保持同样的高度，数据到了原地替换。
+          <Skeleton className="h-44 w-full" />
+        ) : rows.length === 0 ? (
           <p className="py-10 text-center text-xs text-muted-foreground">
-            {rows ? "这段时间还没有指标数据。" : "正在读取…"}
+            这段时间还没有指标数据。
           </p>
         ) : (
           <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
             {tab === "traffic" ? (
-              <TrafficChart rows={rows} hidden={hidden} />
+              <>
+                <TrafficChart rows={rows} hidden={hidden} />
+                <Cumulative rows={rows} hidden={hidden} />
+              </>
             ) : tab === "bandwidth" ? (
               <BandwidthChart rows={rows} hidden={hidden} />
             ) : (
@@ -2062,7 +2086,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 </Button>
               </div>
             ) : probeRows === null ? (
-              <p className="text-xs text-muted-foreground">读取中…</p>
+              <div className="space-y-1.5">
+                <Skeleton className="h-4 w-2/3" />
+                <Skeleton className="h-4 w-1/2" />
+              </div>
             ) : probeRows.length === 0 ? (
               <p className="text-xs text-muted-foreground">
                 还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
