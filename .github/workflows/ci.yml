@@ -31,7 +31,7 @@ jobs:
       # The shell is how a machine is first reached, and it runs where a mistake
       # costs a node rather than a red test: the two installers and the theme
       # fetcher. shellcheck ships on the runner; all three are POSIX sh.
-      - run: shellcheck install.sh install-hub.sh scripts/theme.sh
+      - run: shellcheck install.sh install-hub.sh scripts/theme.sh scripts/e2e.sh
 
       # The version lives in the manifest and in the lock, and one of them was
       # forgotten once: v1.5.4 tagged a tree whose Cargo.lock still said 1.5.3, so
@@ -71,6 +71,19 @@ jobs:
       # Cargo.toml 加依赖却忘了 Cargo.lock 时，CI 会在 runner 上**静默把 lock 补好**并通过，
       # 而发版时才失败（v1.5.4 就是这么来的）。
       - run: cargo test --locked
+
+      # ⚠️ **跨仓契约的另一半** ✗✗ —— `scripts/e2e.sh` 把「这个 hub」与「最新发布的 agent」
+      # 配起来跑：建一台节点、让 agent 报进来、两边各看一遍。此前只有 agent 的 CI 跑它，
+      # 而且对的是**已发布**的 hub ⇒ 「新 hub × 新 agent」这个组合**没有任何人跑**。改了
+      # agent 上报契约（字段白名单、`save_facts`）时，唯一能发现破坏的地方原本不在这个仓。
+      - run: cargo build --locked
+      - name: pair this hub with the latest released agent
+        run: |
+          curl -fsSL -o monitor-agent \
+            https://github.com/spot-probe/agent/releases/latest/download/monitor-agent-x86_64-unknown-linux-musl
+          chmod +x monitor-agent
+          ./scripts/e2e.sh "$PWD/target/debug/monitor-hub" "$PWD/monitor-agent"
+
 
       # Behaviour and **real layout**, on the running hub. jsdom cannot see either one:
       # it has no layout engine (every box is 0x0), and "the dialog closed" is a fact
