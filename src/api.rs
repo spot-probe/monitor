@@ -1700,8 +1700,13 @@ const RELEASES_RETRY: i64 = 600;
 pub async fn overview_series(_: Admin, State(app): State<Shared>, Query(q): Query<SeriesQuery>) -> Response {
     let days = q.days.unwrap_or(30).clamp(1, 90);
     // 空串归一成 None：前端用空值表示"全部节点"，不该被当成"名字为空的分组"。
-    let group = q.group.as_deref().filter(|g| !g.is_empty());
-    let rows = match app.db.overview_daily(days, group) {
+    // ⚠️ **拥有所有权**：`spawn_blocking` 的闭包要求 `'static`，借来的 `&str` 进不去。
+    let group = q.group.filter(|g| !g.is_empty());
+    // ⚠️ 这条查询在 `metric_hour`（注释自述两百多万行）上做全表聚合 + 三个窗口排序，
+    // 90 天实测 684ms。它此前**同步跑在 tokio worker 上**，而同文件里同样昂贵的
+    // `db_stats` 早就交给 `spawn_blocking` 了 —— 堵住一个 worker 会连带拖住同线程的其它请求。
+    let built = tokio::task::spawn_blocking(move || app.db.overview_daily(days, group.as_deref())).await;
+    let rows = match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
         Ok(rows) => rows,
         // 与其它 handler 同一套：读失败映射成错误响应，而不是 panic（release 是 abort）。
         Err(e) => return fail(e).into_response(),
@@ -1793,8 +1798,11 @@ pub async fn probe_history(
 pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Response {
     let days = q.days.unwrap_or(7).clamp(1, 90);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let group = q.group.as_deref().filter(|g| !g.is_empty());
-    let (latency, loss, down) = match app.db.at_risk(days, limit, group) {
+    // 同上：拥有所有权才进得了 `spawn_blocking` 的闭包。
+    let group = q.group.filter(|g| !g.is_empty());
+    // 三条榜都是 `ping_hour` 上的聚合并各自带窗口排序，同样不该占着 tokio worker。
+    let built = tokio::task::spawn_blocking(move || app.db.at_risk(days, limit, group.as_deref())).await;
+    let (latency, loss, down) = match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
         Ok(v) => v,
         Err(e) => return fail(e).into_response(),
     };
