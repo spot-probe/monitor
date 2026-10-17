@@ -891,14 +891,28 @@ pub fn push_ping_tasks(app: &App) {
         .iter()
         .map(|(id, agent)| (*id, agent.tx.clone()))
         .collect();
+    if connected.is_empty() {
+        return;
+    }
+    // ⚠️ **读一次，再给每台过滤** ✗✗ —— 此前每台 agent 各调一次 `ping_tasks_for`，
+    // 每次都重读整张任务表 + 每个任务一次分配查询：一次面板改动 = 在线数 ×(1+任务数) 次查询，
+    // 全部同步、都要抢那把全局连接锁。列表对所有 agent 都一样，所以读一次就够。
+    let tasks = match app.db.ping_tasks() {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            // 读失败这一轮**不发**（与 `ping_tasks_message` 同一个理由：空表会被 agent
+            // 理解成"探测被删光了"）。
+            warn!("probe list failed; no agent gets an update this round: {e:#}");
+            return;
+        }
+    };
     for (node_id, sender) in connected {
         // The queue carries only these messages, so a full one indicates an agent
         // that has stopped reading its socket. It is dropped within SILENCE and
         // reconnects onto the current list; what must not happen is the panel
         // reporting a push that never occurred.
-        let Some(message) = ping_tasks_message(app, node_id) else {
-            continue;
-        };
+        let params = crate::db::Db::ping_tasks_for_in(&tasks, node_id);
+        let message = json!({"jsonrpc": "2.0", "method": "ping.tasks", "params": params}).to_string();
         if sender.try_send(Message::Text(message.into())).is_err() {
             warn!("node {node_id} is not draining its queue; it gets the new probe list when it reconnects");
         }

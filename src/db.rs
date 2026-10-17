@@ -3428,9 +3428,21 @@ impl Db {
         // The order is the panel's `sort, id` rather than this function's old `id`. The
         // agent matches tasks by id and does not draw them, so the order is not its
         // concern; keeping one order is the point.
-        Ok(self
-            .ping_tasks()?
-            .into_iter()
+        Ok(Self::ping_tasks_for_in(&self.ping_tasks()?, node_id))
+    }
+
+    /// [`Self::ping_tasks_for`] against a list that is **already read**.
+    ///
+    /// The broadcast to connected agents used to call `ping_tasks_for` once per agent,
+    /// and each call re-read the whole task list plus one `ping_node` query per task:
+    /// one panel edit cost `connected × (1 + tasks)` queries. The list is the same for
+    /// every agent, so it is read once and filtered here.
+    ///
+    /// ⚠️ Not gated on `&self` on purpose: this is pure mapping, and keeping it out of
+    /// the connection lock is what makes "read once, filter many" possible.
+    pub fn ping_tasks_for_in(tasks: &[PingTask], node_id: i64) -> Vec<serde_json::Value> {
+        tasks
+            .iter()
             .filter(|t| t.nodes.contains(&node_id))
             .map(|t| {
                 serde_json::json!({
@@ -3440,7 +3452,7 @@ impl Db {
                     "kind": t.probe_kind(),
                 })
             })
-            .collect())
+            .collect()
     }
 
     /// Probe names keyed by id, for labelling one node's latency chart. Names
@@ -7026,6 +7038,40 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// 广播走的那条（吃已读列表）必须与按节点读的那条给出**完全相同**的输出。
+    ///
+    /// 两条路一旦分叉，症状是"面板改了探测、agent 收到的列表却不一样" —— 而它可以只
+    /// 在一半节点上出现。
+    #[test]
+    fn the_broadcast_list_matches_the_per_node_read() {
+        let db = Db::open(":memory:").unwrap();
+        let a = db.create_node(&Node { name: "a".into(), ..Default::default() }, "ta").unwrap();
+        let b = db.create_node(&Node { name: "b".into(), ..Default::default() }, "tb").unwrap();
+        for (name, target, nodes, kind) in [
+            ("p1", "1.1.1.1", vec![a, b], Some("icmp")),
+            ("p2", "2.2.2.2:443", vec![a], None),
+            ("p3", "3.3.3.3", vec![b], Some("icmp")),
+        ] {
+            db.save_ping_task(&PingTask {
+                kind: kind.map(str::to_owned),
+                id: 0,
+                name: name.into(),
+                target: target.into(),
+                interval: 60,
+                nodes,
+            })
+            .unwrap();
+        }
+        let all = db.ping_tasks().unwrap();
+        for id in [a, b] {
+            assert_eq!(
+                Db::ping_tasks_for_in(&all, id),
+                db.ping_tasks_for(id).unwrap(),
+                "节点 {id} 的两条路必须一致"
+            );
+        }
     }
 
     /// 设置改动要记下"谁、什么时候"，而且**内部写入不能把作者抹掉**。
