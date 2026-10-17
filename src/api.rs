@@ -4599,7 +4599,15 @@ mod tests {
         let buckets = with["availability"]["buckets"].as_array().unwrap();
         assert!(buckets.len() >= 167, "a week of hours, got {}", buckets.len());
         assert!(with["availability"]["incidents"].as_array().unwrap().is_empty());
-        assert!(with["availability"]["from"].as_i64().unwrap() <= now - 7 * 86_400 + 60);
+        // ⚠️ 这里只能按**桶宽**给余量：处理函数内部另取了一次 `now`，窗口起点还对齐到整小时，
+        // 而 `now` 是这个测试开头取的。全量套件跑得慢时两者会跨过边界 —— 这条曾经因此在
+        // 全量跑里偶发变红（单跑 3/3 全过）。断言的本意是"窗口从一周前开始"，不是"精确到秒"。
+        let from = with["availability"]["from"].as_i64().unwrap();
+        assert!(from <= now + 60, "窗口起点不该在未来：from={from} now={now}");
+        assert!(
+            from >= now - 7 * 86_400 - 3_660,
+            "窗口起点应在一周前（允许一小时的桶对齐）：from={from} now={now}"
+        );
         assert!(!with["metrics"].as_array().unwrap().is_empty(), "and the chart came too");
 
         assert!(body("metrics").await["availability"].is_null(), "not named, not sent");
