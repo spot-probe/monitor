@@ -1790,11 +1790,14 @@ pub async fn probe_history(
     Json(json!({ "days": days, "since": since, "rows": rows })).into_response()
 }
 
-pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Json<Value> {
+pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Response {
     let days = q.days.unwrap_or(7).clamp(1, 90);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
     let group = q.group.as_deref().filter(|g| !g.is_empty());
-    let (latency, loss, down) = app.db.at_risk(days, limit, group);
+    let (latency, loss, down) = match app.db.at_risk(days, limit, group) {
+        Ok(v) => v,
+        Err(e) => return fail(e).into_response(),
+    };
     let rows = |v: Vec<(String, String, f64, i64)>| {
         v.into_iter()
             .map(|(task, node, value, samples)| json!({ "task": task, "node": node, "value": value, "samples": samples }))
@@ -1805,7 +1808,7 @@ pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRisk
         "latency": rows(latency),
         "loss": rows(loss),
         "down": down.into_iter().map(|(node, last_seen)| json!({ "node": node, "last_seen": last_seen })).collect::<Vec<_>>(),
-    }))
+    })).into_response()
 }
 
 /// 一次拿到**一个探测任务**在窗口内的全部节点序列。

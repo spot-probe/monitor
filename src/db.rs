@@ -1966,13 +1966,15 @@ impl Db {
     /// - 丢包：`Σlost / Σ(answered+lost)`，就是这段时间的丢包率。
     /// - 离线：只按 `last_seen` 从旧到新取（且 `last_seen > 0`，排除"从未上报"）。
     ///   **在线与否的判定不在这里重写** —— 面板已经有 `online` 标志，阈值只该有一处。
-    pub fn at_risk(&self, days: i64, limit: i64, group: Option<&str>) -> AtRisk {
+    ///
+    /// ⚠️ **返回 `Result`**，与 `overview_daily` 同一条理由：release 是 `panic = "abort"`，
+    /// 内部 `.unwrap()` 一次 SQL 错误就是**整个进程退出**。三条榜都跑在总览页那条路径上。
+    pub fn at_risk(&self, days: i64, limit: i64, group: Option<&str>) -> Result<AtRisk> {
         let conn = self.conn();
         let since = Utc::now().timestamp() - days * 86_400;
         let latency = {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT t.name, n.name,
+            let mut stmt = conn.prepare_cached(
+                "SELECT t.name, n.name,
                             SUM(h.latency * h.answered) * 1.0 / NULLIF(SUM(h.answered), 0),
                             SUM(h.answered)
                        FROM ping_hour h
@@ -1982,19 +1984,16 @@ impl Db {
                       GROUP BY h.task_id, h.node_id
                       ORDER BY 3 DESC
                       LIMIT ?2",
-                )
-                .unwrap();
-            stmt.query_map(params![since, limit, group], |r| {
+            )?;
+            let rows = stmt.query_map(params![since, limit, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect::<Vec<AtRiskRow>>()
+            })?;
+            // ⚠️ 不再 filter_map 吞行错误；先收成有所有权的 Vec，借用因此不跨作用域。
+            rows.collect::<Result<Vec<AtRiskRow>, _>>()?
         };
         let loss = {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT t.name, n.name,
+            let mut stmt = conn.prepare_cached(
+                "SELECT t.name, n.name,
                             SUM(h.lost) * 1.0 / NULLIF(SUM(h.answered + h.lost), 0),
                             SUM(h.answered + h.lost)
                        FROM ping_hour h
@@ -2005,30 +2004,25 @@ impl Db {
                       HAVING SUM(h.lost) > 0
                       ORDER BY 3 DESC
                       LIMIT ?2",
-                )
-                .unwrap();
-            stmt.query_map(params![since, limit, group], |r| {
+            )?;
+            let rows = stmt.query_map(params![since, limit, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect::<Vec<AtRiskRow>>()
+            })?;
+            // ⚠️ 不再 filter_map 吞行错误；先收成有所有权的 Vec，借用因此不跨作用域。
+            rows.collect::<Result<Vec<AtRiskRow>, _>>()?
         };
         let down = {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT name, last_seen FROM node
+            let mut stmt = conn.prepare_cached(
+                "SELECT name, last_seen FROM node
                       WHERE last_seen > 0 AND (?2 IS NULL OR [group] = ?2)
                       ORDER BY last_seen ASC
                       LIMIT ?1",
-                )
-                .unwrap();
-            stmt.query_map(params![limit, group], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>()
+            )?;
+            let rows =
+                stmt.query_map(params![limit, group], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
         };
-        (latency, loss, down)
+        Ok((latency, loss, down))
     }
 
     /// 一次拿到**一个探测任务**在窗口内的全部节点序列 —— 面板因此只发一个请求，
@@ -7073,7 +7067,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let (latency, loss, down) = db.at_risk(7, 5, None);
+        let (latency, loss, down) = db.at_risk(7, 5, None).unwrap();
         assert_eq!(latency.len(), 3, "延迟榜应有 3 行");
         assert_eq!(latency[0].1, "slow", "最慢的必须排第一，实际 {:?}", latency[0]);
         assert!((latency[0].2 - 300.0).abs() < 1.0, "加权均值 {}", latency[0].2);
@@ -7117,14 +7111,14 @@ mod tests {
         for (n, lat) in [(ids[0], 300.0), (ids[1], 20.0)] {
             db.conn().execute("INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi) VALUES (?1,1,?2,100,0,?3,?3,?3)", params![n, hour, lat]).unwrap();
         }
-        let all = db.at_risk(7, 5, None);
+        let all = db.at_risk(7, 5, None).unwrap();
         assert_eq!(all.0.len(), 2, "不分分组时两条都在");
-        let east = db.at_risk(7, 5, Some("east"));
+        let east = db.at_risk(7, 5, Some("east")).unwrap();
         assert_eq!(east.0.len(), 1, "只看 east 时应当只剩一条");
         assert_eq!(east.0[0].1, "slow");
         assert_eq!(east.2.len(), 1, "离线榜也要按分组过滤");
         assert_eq!(east.2[0].0, "slow");
-        assert!(db.at_risk(7, 5, Some("nowhere")).0.is_empty());
+        assert!(db.at_risk(7, 5, Some("nowhere")).unwrap().0.is_empty());
     }
 
     /// **不变量**：一次按任务取回的结果，必须与**逐节点调用线上那条 `ping_window`** 的结果
