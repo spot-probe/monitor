@@ -861,12 +861,25 @@ pub async fn live_ws(State(app): State<Shared>, headers: HeaderMap, upgrade: Web
         .on_upgrade(move |socket| stream_live(app, socket, session))
 }
 
+/// 空闲的流每隔多久发一次心跳。
+///
+/// 内容没变时不推快照是对的（快照有 1.9 秒的缓存，空闲时相邻两跳往往是同一份，而推过去
+/// 面板就会整张表重渲染一次）。但**只靠"内容变了才发"对端就无法区分"机群安静"与
+/// "连接已经半开"** —— 后者会让旧数字一直戴着"实时"的绿灯。所以每 10 秒给一条心跳帧。
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 这一跳该不该发心跳（而不是快照）。抽出来是因为它是个纯判断，值得有用例。
+fn beat_due(unchanged: bool, since_last_send: std::time::Duration) -> bool {
+    unchanged && since_last_send >= HEARTBEAT
+}
+
 async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
     // 上一帧推出去的是什么。没变就不再推：快照有 1.9 秒的缓存，
     // 空闲时相邻两跳往往是同一份，而推过去面板就会整张表重渲染一次。
     // 只比字节，不做解析——这是每秒每连接都要跑的一行。
     let mut last: Option<Utf8Bytes> = None;
+    let mut last_sent = std::time::Instant::now();
     loop {
         ticker.tick().await;
         // Closed rather than downgraded to the public frame, which would leave the
@@ -874,13 +887,25 @@ async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>
         // a client to re-query /api/me and determine its current state.
         let Some(full) = stream_audience(&app, session.as_deref()) else { break };
         let frame = live_snapshot(&app, full).0;
-        if last.as_ref().is_some_and(|previous| previous == &frame) {
+        let unchanged = last.as_ref().is_some_and(|previous| previous == &frame);
+        let beat = beat_due(unchanged, last_sent.elapsed());
+        if unchanged && !beat {
             continue;
         }
-        if socket.send(Message::Text(frame.clone())).await.is_err() {
+        let payload = if beat {
+            // 心跳**刻意不带 `nodes`**：它不是快照，客户端据它判"连接还活着"，
+            // 而不该拿它去覆盖数据。
+            Utf8Bytes::from(format!("{{\"beat\":{}}}", chrono::Utc::now().timestamp_millis()))
+        } else {
+            frame.clone()
+        };
+        if socket.send(Message::Text(payload)).await.is_err() {
             break;
         }
-        last = Some(frame);
+        if !beat {
+            last = Some(frame);
+        }
+        last_sent = std::time::Instant::now();
     }
 }
 
@@ -4082,6 +4107,15 @@ mod tests {
         invalidate_snapshot(&app);
         let (_, after) = live_snapshot(&app, false);
         assert_ne!(after, first, "内容变了 ⇒ 摘要必须变");
+    }
+
+    /// 安静的流也要收到心跳：否则对端分不清"安静"与"半开"。
+    #[test]
+    fn a_quiet_stream_still_gets_a_heartbeat() {
+        use std::time::Duration;
+        assert!(!beat_due(false, Duration::from_secs(0)), "内容变了 ⇒ 发快照");
+        assert!(!beat_due(true, Duration::from_millis(9_000)), "还没到点");
+        assert!(beat_due(true, Duration::from_secs(10)), "到点就发心跳");
     }
 
     #[test]

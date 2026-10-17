@@ -611,20 +611,29 @@ export function useNodes() {
         return
       }
       socket.onmessage = (event) => {
-        // 与上一帧一模一样就不动状态：setNodes 会给 React 一个新数组，
-        // 整张表因此重渲染一次，而屏幕上什么都没有变（空闲机群上这是常态）。
-        if (typeof event.data === "string" && event.data === lastFrame) return
-        lastFrame = typeof event.data === "string" ? event.data : null
-        const frame = JSON.parse(event.data)
-        setNodes(frame.nodes)
-        setAdmin(frame.admin)
-        setAgentLatest(frame.agent_latest ?? null)
-        setError(null)
-        // The stream has returned; the poll was only covering for it.
+        // ⚠️ **心跳帧不是快照** ✗✗ —— hub 在内容没变时每 10 秒发一条 `{"beat":…}`，
+        // 让页面能区分"机群安静"与"连接半开"。它只证明连接还活着：忽略它，而不是把
+        // `nodes` 设成 undefined（那会让整张表变空）。
+        let frame: { nodes?: unknown; admin?: unknown; agent_latest?: unknown }
+        try {
+          frame = JSON.parse(event.data as string)
+        } catch {
+          return
+        }
+        // The socket is alive either way; the poll was only covering for it.
         if (poll) {
           clearInterval(poll)
           poll = null
         }
+        if (!Array.isArray(frame.nodes)) return
+        // 与上一帧一模一样就不动状态：setNodes 会给 React 一个新数组，
+        // 整张表因此重渲染一次，而屏幕上什么都没有变（空闲机群上这是常态）。
+        if (typeof event.data === "string" && event.data === lastFrame) return
+        lastFrame = typeof event.data === "string" ? event.data : null
+        setNodes(frame.nodes as Node[])
+        setAdmin(frame.admin as boolean)
+        setAgentLatest((frame.agent_latest as string | null) ?? null)
+        setError(null)
       }
       socket.onerror = () => socket?.close()
       socket.onclose = () => {
