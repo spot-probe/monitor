@@ -1199,6 +1199,10 @@ fn is_locked(e: &anyhow::Error) -> bool {
 /// wait to one block's statements, which is tens of milliseconds.
 const FOLD_NODES: usize = 10;
 
+/// `risk_day` 保留多少天的原始响应。见 `save_risk`：读取只查 `day = 今天`，更早的行永久无用，
+/// 但留一点余量给"换了一家 provider、想回看上一版响应"。
+const RISK_DAY_KEEP_DAYS: i64 = 30;
+
 /// Releases the lock the agents write through between two statements of a long
 /// pass. Measured: a pass that held it throughout showed up as a node going
 /// offline for 12 s.
@@ -2547,6 +2551,16 @@ impl Db {
             "INSERT OR REPLACE INTO risk_day (ip, provider, day, payload) VALUES (?1, ?2, ?3, ?4)",
             params![ip, provider, day, payload],
         )?;
+        // ⚠️ **这份原始响应要清** ✗✗ —— `risk_day` 存的是第三方接口的原样 JSON（0.5–1.5 KB/行），
+        // 而读取永远只查 `day = 今天`：更早的行**永久无用**。100 台 × 2 家 ⇒ 约 200 行/天，
+        // 不清就是每年 70–110 MB。这是全库唯一一张"只写不删且过期即废"的表。
+        //
+        // 留 30 天而不是 0：重新解析（换一家 provider、补字段）时还想回头看一眼上一版的原始响应。
+        // 按 `day` 删是扫描，但这张表在保留期内只有几千行，而调用频率是"每节点每天几次"。
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") {
+            let cutoff = (d - chrono::Duration::days(RISK_DAY_KEEP_DAYS)).format("%Y-%m-%d").to_string();
+            conn.execute("DELETE FROM risk_day WHERE day < ?1", [cutoff])?;
+        }
         Ok(())
     }
 
@@ -7110,6 +7124,27 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// `risk_day` 只留最近 30 天：更早的原始响应用不上，却会一直长。
+    #[test]
+    fn risk_day_keeps_only_the_recent_window() {
+        let db = Db::open(":memory:").unwrap();
+        db.save_risk("10.0.0.1", "abuse", "2020-01-01", "old").unwrap();
+        // 与上一条只差 19 天：仍落在 30 天窗口内（差 31 天的话第一条会被正确清掉，
+        // 我第一次的日期就踩了这个边界）。
+        db.save_risk("10.0.0.1", "abuse", "2020-01-20", "also old").unwrap();
+        // ⚠️ **不能一边握着守卫一边调方法**：连接是 `Mutex<Connection>`，不可重入 ⇒ 死锁。
+        // 我第一次就是这么写的，测试直接挂住而不是失败。现取现放。
+        let count = |db: &Db| -> i64 {
+            db.conn().query_row("SELECT COUNT(*) FROM risk_day", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count(&db), 2);
+        // 写入"今天"时，超过窗口的那些被清掉，当天的留着。
+        db.save_risk("10.0.0.1", "abuse", "2020-06-01", "today").unwrap();
+        assert_eq!(count(&db), 1, "只该留下最近这一条");
+        let left: String = db.conn().query_row("SELECT day FROM risk_day", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, "2020-06-01");
     }
 
     /// 一次读全 vs 逐键读取，必须完全一致（否则设置页会显示半份数据）。
