@@ -1086,19 +1086,31 @@ export function updatesAvailable(versions: Versions | null, nodes: Node[]): bool
 function useRegisterWindow() {
   const [key, setKey] = useState("")
   const [until, setUntil] = useState(0)
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
 
   useEffect(() => {
     api<Settings>("/settings")
       .then((s) => { setKey(String(s.register_key ?? "")); setUntil(Number(s.register_until ?? 0)) })
       .catch(() => {})
-    const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000)
-    return () => clearInterval(timer)
   }, [])
+
+  // ⚠️ **只在窗口开着时滴答** ✗✗ —— 原来这里是无条件 1 Hz 更新页面级的 state，而这个 hook
+  // 由**整个节点页**调用：空闲时整张表（100 行 × 9 列）每秒重渲染一次，只为让一个倒计时动
+  // 一秒。窗口关着时 `left` 恒为 0，根本不需要滴答。
+  //
+  // 滴答只递增一个计数器，不存"现在几点" —— `left` 在渲染时按 `Date.now()` 现算，于是
+  // effect 里没有同步 `setState`（那会触发连锁渲染，`react(set-state-in-effect)` 会报），
+  // 打开窗口的那一秒也不会用到挂载时的旧时间。
+  const openWindow = until > 0
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (!openWindow) return
+    const timer = setInterval(() => setTick((t) => t + 1), 1000)
+    return () => clearInterval(timer)
+  }, [openWindow])
 
   return {
     key,
-    left: key === "" ? 0 : Math.max(0, until - now),
+    left: key === "" ? 0 : Math.max(0, until - Math.floor(Date.now() / 1000)),
     async open(minutes: number) {
       try {
         const w = await api<{ register_key: string; register_until: string }>("/register-window", {
