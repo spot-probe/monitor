@@ -4652,6 +4652,53 @@ mod tests {
         assert!(readable(&app, true, open), "and never closes it for the panel");
     }
 
+    /// ⭐ **按任务看延迟的那条路必须尊重"未发布"** ✓✓ —— 这条是那条安全修复的闸。
+    ///
+    /// 背景：`ping_series` / `ping_heatmap` 的签名只有 `(State, Query)`，既不收 `headers`
+    /// 也没有 `Admin` 提取器，而全仓**没有认证中间件**（路由的分组只是排版，权限靠每个
+    /// handler 自己查）。于是 `public = false` 的节点，它的延迟与丢包也能被匿名调用者按
+    /// 节点读走 —— 而同族的 `probe_history` / `metrics` 都走 `authed` + `readable`。
+    ///
+    /// 这里钉两件事：匿名只拿得到公开节点；"公开页关着"时，聚合的那条（热力图）直接 401。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // see `gate_tests`
+    async fn an_anonymous_probe_series_reaches_only_published_nodes() {
+        let _serial = gate_tests();
+        let app = std::sync::Arc::new(app());
+        let shown = node(&app, "shown", true);
+        let hidden = node(&app, "hidden", false);
+        let now = Utc::now().timestamp();
+        // 用公开的 `save_ping_task` 建任务（`Db::conn` 是模块私有的，测试里拿不到）。
+        let task = PingTask {
+            kind: None,
+            id: 0,
+            name: "t".into(),
+            target: "x:80".into(),
+            interval: 60,
+            nodes: vec![shown, hidden],
+        };
+        let task = app.db.save_ping_task(&task).unwrap();
+        for id in [shown, hidden] {
+            app.db.insert_ping(id, task, now - 120, 20).unwrap();
+            app.db.insert_ping(id, task, now - 60, 21).unwrap();
+        }
+        let ask = |app: &std::sync::Arc<App>| {
+            let q = serde_urlencoded::from_str::<PingSeriesQuery>("hours=1&points=60").unwrap();
+            ping_series(State(app.clone()), HeaderMap::new(), Query(q))
+        };
+        let body = axum::body::to_bytes(ask(&app).await.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_str(std::str::from_utf8(&body).unwrap()).unwrap();
+        let nodes = v["nodes"].as_object().expect("nodes 必须是一个对象");
+        assert!(nodes.contains_key(&shown.to_string()), "公开节点必须在：{nodes:?}");
+        assert!(!nodes.contains_key(&hidden.to_string()), "**未发布节点绝不能被匿名读到**：{nodes:?}");
+
+        // 公开页关着 ⇒ 聚合的那条（热力图）对匿名调用者必须是 401。
+        app.db.set("public_page", "0").unwrap();
+        let q = serde_urlencoded::from_str::<PingSeriesQuery>(&format!("task={task}&hours=1")).unwrap();
+        let resp = ping_heatmap(State(app.clone()), HeaderMap::new(), Query(q)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "公开页关着时热力图不该给匿名者任何东西");
+    }
+
     /// The window ceiling is a scan bound rather than a response bound: the
     /// thinning already limits the row count, while a quarter-year still reads
     /// every row behind it holding the write connection.
