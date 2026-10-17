@@ -2057,7 +2057,7 @@ function HeatRows({ edges, buckets, slowest }: {
 }
 
 /// 丢包条的**行**：同样是「标签 + 格子」的一对 ✓（见 HeatRows 的说明）。
-function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
+function LossStrip({ points }: { points: { ts: number; loss: number; avg: number }[] }) {
   if (points.length === 0) return null
   const tone = (l: number) =>
     l <= 0 ? "bg-ok-fg/20" : l < 5 ? "bg-warn-fg/40" : l < 20 ? "bg-warn-fg/70" : l < 50 ? "bg-danger-fg/60" : "bg-danger-fg"
@@ -2069,11 +2069,16 @@ function LossStrip({ points }: { points: { ts: number; loss: number }[] }) {
       <span className="mt-3 text-right text-[10px] leading-none text-muted-foreground">丢包</span>
       <div className="mt-3 flex gap-px">
         {points.map((p) => (
+          // 每格上下两段：**底**是这一桶的平均丢包，**顶**（2px）是最差那台的档位。
+          // 平均回答"整体好不好"，最差回答"有没有一台在拖后腿" —— 两个问题原来只有后者。
           <span
             key={p.ts}
-            className={`h-2 flex-1 rounded-[1px] ${tone(p.loss)}`}
-            title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 丢包 ${p.loss}%`}
-          />
+            className="flex h-2 flex-1 flex-col overflow-hidden rounded-[1px]"
+            title={`${new Date(p.ts * 1000).toLocaleTimeString()} · 平均 ${p.avg.toFixed(0)}% · 最差 ${p.loss}%`}
+          >
+            <span className={`h-[2px] shrink-0 ${tone(p.loss)}`} />
+            <span className={`min-h-0 flex-1 ${tone(p.avg)}`} />
+          </span>
         ))}
       </div>
     </div>
@@ -2274,13 +2279,15 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // 它会**遮住**这个名字 —— 于是 `span === h` 拿分桶宽度去比 1/6/24/168，永远为假，
   // 四个选项**没有一个高亮** ✗（维护者查了元素 class 才看出来 ✓）。
   const [winHours, setSpan] = useState(24)
+  // 弹窗里的两个页签：曲线（多数人要看的）与明细（逐节点的那几张图）。
+  const [view, setView] = useState<"chart" | "detail">("chart")
 	// 首次请求失败时的原因。`load()` 原来把错误整个吞掉（`.catch(() => {})`），于是页面
 	// 显示「没有监控」——和「没能取到数据」长得一模一样，而这两件事需要完全不同的动作。
 	const [error, setError] = useState("")
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number; avg: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -2385,6 +2392,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
         // 逐桶丢包：每个任务一张 (ts → 最差那台的百分比) 的表。上面解析每一行时填，
         // 下面拼 pct 时读。放在这里而不是循环里，是因为它要跨行累积。
         const lossOf = new Map<number, Map<number, number>>()
+        // ⚠️ 色条要**平均**（底）与**最差**（顶）两个数 ✗✓：只取最差时，一台机器的抖动会把
+        // 整条刷成深红，读者以为整条链路都断了；只取平均又会把"一台全丢"摊平成浅色。
+        const lossSum = new Map<number, Map<number, number>>()
+        const lossN = new Map<number, Map<number, number>>()
         // **桶的时间轴必须在下面那句 `continue` 之前收集**：100% 丢包的桶 `latency` 是
         // `null`，会被跳过 —— 而它是运维最需要看见的那种桶（"这段彻底不通"）。
         // 从前桶在 continue 之后才建，于是那些桶在图上**根本不存在** ✗ —— 不是画成 0，
@@ -2413,6 +2424,12 @@ function Ping({ nodes }: { nodes: Node[] }) {
             const m = lossOf.get(p.task_id) ?? new Map<number, number>()
             m.set(p.ts, Math.max(m.get(p.ts) ?? 0, p.loss))
             lossOf.set(p.task_id, m)
+            const sum = lossSum.get(p.task_id) ?? new Map<number, number>()
+            sum.set(p.ts, (sum.get(p.ts) ?? 0) + p.loss)
+            lossSum.set(p.task_id, sum)
+            const cnt = lossN.get(p.task_id) ?? new Map<number, number>()
+            cnt.set(p.ts, (cnt.get(p.ts) ?? 0) + 1)
+            lossN.set(p.task_id, cnt)
           }
           // **必须在下面这句 continue 之前**：100% 丢包的桶 latency 是 null，会被跳过，
           // 而它正是运维最需要看见的那种桶。先前我把它插在了 continue **之后** ——
@@ -2463,7 +2480,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
         // "彻底不通"与"没数据"长得一样。
         const lossAxis = [...(tsOf.get(taskId) ?? [])]
           .sort((a, b) => a - b)
-          .map((ts) => ({ ts, loss: lossOf.get(taskId)?.get(ts) ?? 0 }))
+          .map((ts) => {
+            const n = lossN.get(taskId)?.get(ts) ?? 0
+            const sum = lossSum.get(taskId)?.get(ts) ?? 0
+            return { ts, loss: lossOf.get(taskId)?.get(ts) ?? 0, avg: n > 0 ? sum / n : 0 }
+          })
 
         next[taskId] = {
           last: series.length ? series[series.length - 1] : null,
@@ -2953,7 +2974,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
       			<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-3">
       				{/* 一眼要看到的三个数：标签小、数字大。 */}
       				<div className="grid grid-cols-3 divide-x divide-border rounded-lg bg-muted py-3">
-      					{[["列表值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
+      					{[["聚合值", line == null ? "—" : `${line} ms`, null], ["最差", top.avg == null ? "—" : `${top.avg} ms`, top.avg == null ? null : line == null ? nodeName(top.node) : `${nodeName(top.node)} +${top.avg - line} ms`], ["有数据的节点", `${all.length} / ${openTask.nodes.length} 台`, null]].map(([k, v, badge]) => (
       						<div key={k as string} className="px-4">
       							<div className="text-xs text-muted-foreground">{k as string}</div>
       							<div className="tnum text-lg font-medium leading-tight">{v as string}</div>
@@ -2963,7 +2984,28 @@ function Ping({ nodes }: { nodes: Node[] }) {
       					))}
       				</div>
 
-      				{pct.length > 1 && (
+      				{/* ⚠️ **两个页签** ✗✓：摘要卡 + 折线 + 色条 + 热力图 + 直方图 + 两张节点表全在一屏里，
+      				    要滚三屏才看完，而多数人只想回答"这个探测现在怎么样"。曲线是默认，明细按需切换。 */}
+      				<div className="mt-3 flex items-center gap-1 rounded-md bg-muted p-0.5 text-xs">
+      					{([["chart", "曲线"], ["detail", "明细"]] as const).map(([k, t]) => (
+      						<button
+      							key={k}
+      							type="button"
+      							onClick={() => setView(k)}
+      							aria-pressed={view === k}
+      							className={`rounded px-2.5 py-1 transition-colors ${
+      								view === k ? "bg-card font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+      							}`}
+      						>
+      							{t}
+      						</button>
+      					))}
+      					<span className="ml-auto pr-1.5 text-[10px] text-muted-foreground">
+      						近 {winHours} 小时 · {all.length} 台合并
+      					</span>
+      				</div>
+
+      				{view === "chart" && pct.length > 1 && (
       					<section className="mt-7">
       						<div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       							      							<h4 className="text-sm font-semibold">延迟随时间<Help>蓝带是 P25–P75：一半的节点落在这一层里。中间那条实线是 P50（中位数），上面两条琥珀线是 P90 与 P99 —— P99 就是长期最慢的那 1%。它若长期贴着上方，说明有一小批机器一直拖后腿。</Help></h4>
@@ -2993,7 +3035,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				    这里**没有任何宽度计算** ✓，所以不可能再错位 ✓。 */}
 				{/* 标签列**按内容定宽** ✓：最宽的标签是 `200–209 ms`（≈58px ✓），所以 4.5rem(72px)
 				    足够容纳 + 与图留一点空隙 ✓ —— 而原先的 6rem 白留了约 30px ✗，那 30px 给图更值 ✓。 */}
-				<div className="grid grid-cols-[4.5rem_1fr] items-center gap-x-2 gap-y-0.5">
+				<div className="grid grid-cols-[5.5rem_1fr] items-center gap-x-2 gap-y-0.5">
 					{/* 纵轴泳道：上界 / 0 —— 高度与内边距**跟图一致** ✓（150 与 14 都是 `BandChart`
 					    的默认值 ✓），于是两个数字与图里的网格线在同一条水平线上 ✓。 */}
 					<div className="flex h-[150px] flex-col justify-between py-[14px] text-right text-[9px] leading-none text-muted-foreground">
@@ -3004,10 +3046,32 @@ function Ping({ nodes }: { nodes: Node[] }) {
 						))}
 					</div>
 					<BandChart points={pct} />
-					<LossStrip points={stats[openTask.id]?.lossAxis ?? pct} />
+					<LossStrip
+						points={
+							stats[openTask.id]?.lossAxis ??
+							pct.map((p) => ({ ts: p.ts, loss: p.loss ?? 0, avg: p.loss ?? 0 }))
+						}
+					/>
 					<span />
 					<p className="flex items-baseline justify-between text-[10px] text-muted-foreground">
-						<span>每一格 = 一个时间桶；丢包取该桶里最差的那台</span>
+						{/* ⚠️ **图例** ✗✓：四档颜色不配图例，读者只能看出"红了一片"，看不出红到哪一档。
+						    顺带说清上下两段各是什么 —— 底是平均、顶是最差。 */}
+						<span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+							<span className="flex items-center gap-1">
+								<span className="flex h-2 w-6 flex-col overflow-hidden rounded-[1px]">
+									<span className="h-[2px] bg-danger-fg" />
+									<span className="min-h-0 flex-1 bg-ok-fg/20" />
+								</span>
+								底=平均 · 顶=最差
+							</span>
+							{[["bg-ok-fg/20", "0"], ["bg-warn-fg/40", "<5%"], ["bg-warn-fg/70", "<20%"],
+								["bg-danger-fg/60", "<50%"], ["bg-danger-fg", "≥50%"]].map(([c, t]) => (
+								<span key={t} className="flex items-center gap-1">
+									<span className={`size-2 rounded-[1px] ${c}`} />
+									{t}
+								</span>
+							))}
+						</span>
 						<span className="tnum">最高 {stats[openTask.id]?.loss ?? 0}%</span>
 					</p>
 				</div>
@@ -3017,7 +3081,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 
 				{/* **热力图与「各节点平均」同级** ✓（维护者要的 ✓）：自己的小节标题 ✓、
 				    自己的卡片 ✓、**自己的时间轴** ✓ —— 不再寄居在「延迟随时间」里 ✓。 */}
-				{heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
+				{view === "detail" && heat && openTask && heat.task === openTask.id && heat.buckets.length > 0 && (
 					<section className="mt-7">
 						<div className="flex flex-wrap items-baseline justify-between gap-x-3">
 							<h4 className="flex items-center gap-1.5 text-sm font-semibold">
@@ -3026,13 +3090,14 @@ function Ping({ nodes }: { nodes: Node[] }) {
 							</h4>
 						</div>
 						<div className="mt-2 rounded-lg bg-muted p-3">
-							<div className="grid grid-cols-[4.5rem_1fr] items-center gap-y-0.5">
+							<div className="grid grid-cols-[5.5rem_1fr] items-center gap-y-0.5">
 								<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
 							</div>
 						</div>
 					</section>
 				)}
 
+	{view === "detail" && (<>
       				<section className="mt-7">
       					<div className="flex flex-wrap items-baseline justify-between gap-x-3">
       						<h4 className="flex items-center gap-1.5 text-sm font-semibold">各节点平均<Help>每台节点一个圆点，落在延迟轴上；竖线是上面那个列表值。纵轴上的错开只是为了不让重叠的点盖住彼此。</Help></h4>
@@ -3086,6 +3151,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 	      					</div>
       					</div>
       				</section>
+	</>)}
       			</div>
       		)
       			})()}
@@ -4399,23 +4465,29 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
 
         <Section
           title="IP 风险（在线库）"
-          hint="把节点 IP 发给第三方风险库评分。默认关闭；关闭时一个请求都不会发出去。打开后每台节点每天查一次，结果缓存在本地。"
+          hint="把节点 IP 发给第三方风险库评分。默认关闭 —— 关闭时一个请求都不会发出去，也不会向任何第三方发送节点地址。打开后每台节点每天查一次，结果缓存在本地。"
         >
           <Card className="gap-6 p-6">
             <section className="space-y-3">
               <h4 className="text-sm font-medium">AbuseIPDB</h4>
+              {/* ⚠️ **竖排**，与这一页其它设置项一致 ✗✓：`row` 把说明推到行尾，和开关隔着
+                  上千像素，读者得横跨整行才把两件事对上（同一页两种布局也让人说不清哪里怪）。
+                  状态词补在开关旁边 —— 一个只有灰/蓝两态的开关，不写"开/关"要靠颜色猜。 */}
               <Field
-                row
                 label="启用"
                 hint="打开后会把节点 IP 发给 AbuseIPDB（第三方、国外服务）——这是本页唯一会把节点地址发出去的功能。"
               >
-                <Switch
-                  checked={text("risk_enabled") === "on"}
-                  onCheckedChange={(v) => set("risk_enabled", v ? "on" : "off")}
-                />
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={text("risk_enabled") === "on"}
+                    onCheckedChange={(v) => set("risk_enabled", v ? "on" : "off")}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    {text("risk_enabled") === "on" ? "已开启" : "已关闭"}
+                  </span>
+                </div>
               </Field>
               <Field
-                row
                 label="API Key"
                 hint={`${secretHint("risk_abuseipdb_key")}；在 abuseipdb.com 免费申请，留空表示这一家不查（正常状态，不是错误）。`}
               >
@@ -4427,12 +4499,8 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
                   onChange={(e) => set("risk_abuseipdb_key", e.target.value)}
                 />
               </Field>
-              {/* 关着时**明说不会发** ✓ —— 隐私这件事写在界面上 ✓，而不是只写在代码注释里 ✗。 */}
-              {text("risk_enabled") !== "on" && (
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  当前关闭：不会向任何第三方发送节点地址。
-                </p>
-              )}
+              {/* 账面上那句"当前关闭…"已并进 Section 的 hint：同一张卡里说两遍同一件事，
+                  反而让人以为它们指的是不同的状态。 */}
             </section>
             {/* ⚠️ 每节必须有**自己的保存** ✗ —— 这一页的 `set` 只是草稿 ✓（今天在流量报告那节栽过一次 ✓）。 */}
             <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
