@@ -1969,6 +1969,19 @@ pub struct PingSeriesQuery {
     group: Option<String>,
 }
 
+/// `tasks` 参数：既接受 `1,2`，也接受 `[1,2]`。
+///
+/// ⚠️ 以前只认逗号分隔 ✗，而面板发的是 `tasks=[5]` —— `"[5]".parse::<i64>()` 失败被丢掉，
+/// 任务列表因此成了**空数组** ⇒ 查询什么都不返回 ⇒ 弹窗显示"还没有收到任何节点的上报"，
+/// 而列表那一行（读 `ping_last`）明明写着"刚刚"。两种写法都收，免得下一个人再撞一次；
+/// 解析不出来的段直接忽略（宁可少一个任务，也不要整条 400）。
+fn parse_tasks(raw: &str) -> Vec<i64> {
+    raw.trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace())
+        .split(',')
+        .filter_map(|x| x.trim().trim_matches(|c: char| c == '"' || c == '\'').parse::<i64>().ok())
+        .collect()
+}
+
 pub async fn ping_series(
     State(app): State<Shared>,
     headers: HeaderMap,
@@ -1989,7 +2002,7 @@ pub async fn ping_series(
     // ⭐ 选择哪些任务：`tasks=1,2` 优先，其次单个 `task`，都不给 = 全部 ✓。
     // 转成 JSON 数组文本交给 db —— 那边用 `json_each` 吃它，不必动态拼占位符。
     let chosen: Option<Vec<i64>> = match (q.tasks.as_deref(), q.task) {
-        (Some(list), _) => Some(list.split(',').filter_map(|x| x.trim().parse::<i64>().ok()).collect()),
+        (Some(list), _) => Some(parse_tasks(list)),
         (None, Some(id)) => Some(vec![id]),
         (None, None) => None,
     };
@@ -2116,37 +2129,34 @@ pub async fn fx(_: Admin, State(app): State<Shared>) -> Json<Value> {
     }))
 }
 
-/// 让一台**已连接**的节点把自己升级到最新发布版（A 期：agent 只验签，**不替换自己**）。
+/// 把发布物推给一台在线节点。HTTP 端点与 Telegram bot **共用这一段** —— 否则两处各写一遍
+/// 「先刷新版本、再取架构、再推字节」，总有一天只改了一边。
 ///
-/// 走的是那条**已认证的 WS** —— agent 刻意没有自己的 HTTP 客户端，所以二进制只能从这里下去。
-/// 数据来源与 `/agent/{arch}` 中继完全一样（同一个 `release_url`，同一个 GitHub 代理），
-/// 于是"hub 能装节点"与"hub 能升级节点"见到的是同一份字节。
-///
-/// **这一段只做"把公告与字节推下去"**：结论由 agent 回报（`upgrade.report`）。
-pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
+/// 返回 `(版本, 字节数)`。错误带回状态码：HTTP 那边原样用，bot 那边只取文字。
+pub(crate) async fn push_upgrade(app: &Shared, id: i64) -> Result<(String, usize), (StatusCode, String)> {
     // 版本从 hub 每天读一次的那个 Check 来（面板上"有新版本"用的也是它）。
     //
     // **但"刚发完新版就按按钮"是很自然的动作**：那时缓存里还是旧版本，hub 会把旧的推下去，
     // 而 agent 会**正确地**拒掉它（反回滚 ✓）—— 操作者却看到一条看不懂的"被拒"。所以缓存
     // 过期时先刷新一次：这是人手触发的动作，一次 API 调用远比一条假失败便宜。
     const FRESH: i64 = 300;
-    if Utc::now().timestamp() - crate::agent_release::state(&app).checked_at > FRESH {
-        crate::agent_release::refresh(&app).await;
+    if Utc::now().timestamp() - crate::agent_release::state(app).checked_at > FRESH {
+        crate::agent_release::refresh(app).await;
     }
-    let Some(version) = crate::agent_release::state(&app).latest else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "hub 还没读到最新 agent 版本").into_response();
+    let Some(version) = crate::agent_release::state(app).latest else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "hub 还没读到最新 agent 版本".into()));
     };
     // 节点必须在线上：升级是在一条活着的连接上推的。
     let tx = {
         let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
         match agents.get(&id) {
             Some(a) => a.tx.clone(),
-            None => return (StatusCode::CONFLICT, "该节点当前不在线").into_response(),
+            None => return Err((StatusCode::CONFLICT, "该节点当前不在线".into())),
         }
     };
     // 一次取整块的代价受同一个闸门约束：这是要出 GitHub、约 1.8 MB 的操作。
     let Ok(_permit) = crate::RELAY_GATE.try_acquire() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "同时进行的下载过多，请稍后再试").into_response();
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "同时进行的下载过多，请稍后再试".into()));
     };
     let arch = {
         let agents = app.agents.read().unwrap_or_else(|e| e.into_inner());
@@ -2164,8 +2174,7 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
             }
         }
     };
-    let (bin_url, sig_url) =
-        (crate::release_binary_url(&app, arch), crate::release_signature_url(&app, arch));
+    let (bin_url, sig_url) = (crate::release_binary_url(app, arch), crate::release_signature_url(app, arch));
     // 缓冲而不是流式：整块必须在内存里才能切帧推下去。这与 relay 那条注释的结论一致
     // （1.73 MiB 对 MemoryMax=256M 来说缓冲是廉价的），而且这里由 RELAY_GATE 限着并发。
     let fetch = async {
@@ -2178,11 +2187,11 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
         Ok(v) => v,
         Err(e) => {
             app.clear_upgrade(id);
-            return (StatusCode::BAD_GATEWAY, format!("取发布物失败：{e}")).into_response();
+            return Err((StatusCode::BAD_GATEWAY, format!("取发布物失败：{e}")));
         }
     };
     if sig.trim().is_empty() || bin.is_empty() {
-        return (StatusCode::BAD_GATEWAY, "发布物或签名为空").into_response();
+        return Err((StatusCode::BAD_GATEWAY, "发布物或签名为空".into()));
     }
     // 公告必须**先**发：agent 要靠它知道该收多少字节（二进制帧在它那边原本是被忽略的）。
     let announce = json!({
@@ -2193,7 +2202,7 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
         "params": { "version": version, "sig": sig, "size": bin.len(), "apply": true },
     });
     if let Err(e) = tx.send(axum::extract::ws::Message::Text(announce.to_string().into())).await {
-        return (StatusCode::CONFLICT, format!("节点已断开：{e}")).into_response();
+        return Err((StatusCode::CONFLICT, format!("节点已断开：{e}")));
     }
     // 32 KiB 一块：agent 把 max_frame_size 设成 64 KiB（`MAX_MESSAGE`），留一半余量。
     // 这里用 send().await 而不是 try_send()：队列只有 16 格，而 1.8 MB 有五十多块 ——
@@ -2206,14 +2215,26 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
         let m = axum::extract::ws::Message::Binary(chunk.to_vec().into());
         if let Err(e) = tx.send(m).await {
             app.clear_upgrade(id);
-            return (StatusCode::CONFLICT, format!("推送到一半断了：{e}")).into_response();
+            return Err((StatusCode::CONFLICT, format!("推送到一半断了：{e}")));
         }
         sent += chunk.len() as u64;
         app.set_upgrade(id, crate::UpgradePhase::Pushing { sent, total });
     }
     // 字节到此为止，剩下的都在节点那边：验签、换二进制、重启。面板这段时间该显示"等待应用"。
     app.set_upgrade(id, crate::UpgradePhase::WaitingApply);
-    Json(json!({ "pushed": true, "version": version, "bytes": bin.len() })).into_response()
+    Ok((version, bin.len()))
+}
+
+/// 面板上的那个按钮。逻辑全在 [`push_upgrade`] 里 —— 这条只负责把结果包成 HTTP 响应。
+///
+/// **结论不在这里**：agent 会另发一条 `upgrade.report`（它才知道验签与替换的结果）。
+pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i64>) -> Response {
+    match push_upgrade(&app, id).await {
+        Ok((version, bytes)) => {
+            Json(json!({ "pushed": true, "version": version, "bytes": bytes })).into_response()
+        }
+        Err((status, message)) => (status, message).into_response(),
+    }
 }
 
 /// 站点图标：**三处各自独立**（标签页 / iOS 主屏 / 社交分享预览），可以只替换其中一处。
@@ -4125,6 +4146,18 @@ mod tests {
         app.db.set("public_page", "off").unwrap();
         assert_eq!(stream_audience(&app, None), None, "closing the status page must end anonymous streams");
         assert_eq!(stream_audience(&app, Some(&hash)), Some(true), "a signed-in operator still gets theirs");
+    }
+
+    ///  两种写法都要认：面板曾发过 ，而服务端只认 。
+    #[test]
+    fn the_task_filter_accepts_both_spellings() {
+        assert_eq!(parse_tasks("5"), vec![5]);
+        assert_eq!(parse_tasks("[5]"), vec![5], "面板真的发过这个形状");
+        assert_eq!(parse_tasks("[1, 2]"), vec![1, 2]);
+        assert_eq!(parse_tasks("1,2"), vec![1, 2]);
+        assert_eq!(parse_tasks(r#"["3"]"#), vec![3], "带引号也认");
+        assert!(parse_tasks("[]").is_empty(), "空数组就是什么都不选");
+        assert!(parse_tasks("x,,").is_empty(), "解析不出来的段忽略，不报错");
     }
 
     /// 快照要带上"这次升级走到哪一步"，而且**只带在管理帧里**（公开页没有升级入口）。
