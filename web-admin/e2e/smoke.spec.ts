@@ -91,3 +91,10 @@ test("实时通道真的连上了 WebSocket，而不是悄悄退回 5 秒轮询"
   const frame = await ws.waitForEvent("framereceived")
   expect(frame.payload.length, "第一帧不应当是空的").toBeGreaterThan(0)
 })
+
+test("节点页有实时资源列（CPU / 内存）", async ({ page }) => {
+  // 防的是：这一列被删掉、或者只在有数据的库上才渲染。
+  // 数值本身断言不了 —— CI 用全新库，一台节点都没有；表头在空表上也会渲染。
+  await page.goto("/admin/nodes")
+  await expect(page.getByRole("columnheader", { name: "资源" })).toBeVisible()
+})

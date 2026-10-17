@@ -1637,27 +1637,31 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
       )}
 
       <Card className="overflow-x-auto p-0">
-        <Table className="min-w-[880px]">
+        <Table className="min-w-[960px]">
           <TableHeader>
             {/* Percentages, or the address column swallows every spare pixel
                 and pushes status across the table. The version column was taken
                 out of the others rather than added on top: the table already
                 fills the page, and a version is five characters wide. */}
             <TableRow>
-              <TableHead className="w-[18%]">名称</TableHead>
-              <TableHead className="w-[20%]">IP</TableHead>
+              <TableHead className="w-[17%]">名称</TableHead>
+              <TableHead className="w-[18%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
               <TableHead className="w-[9%]">版本</TableHead>
-              <TableHead className="text-right w-[15%]">流量</TableHead>
-              <TableHead className="text-right w-[10%]">价格</TableHead>
-              <TableHead className="text-right w-[11%]">到期</TableHead>
+              {/* ⚠️ **实时资源** ✓：`Node.metrics` 本来就随 `/api/ws` 每 2 秒推来（零额外
+                  请求、零后端改动），此前面板只用它算"离线多久"，于是"这台是不是被打满了"
+                  只能切到给访客看的公开页去查。 */}
+              <TableHead className="text-right w-[10%]">资源</TableHead>
+              <TableHead className="text-right w-[12%]">流量</TableHead>
+              <TableHead className="text-right w-[9%]">价格</TableHead>
+              <TableHead className="text-right w-[10%]">到期</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {visible.length === 0 ? (
             	<TableRow>
-            		<TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
+            		<TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
             			{nodes.length === 0
             				? "还没有节点。用右上角的「添加节点」或「批量添加」，让机器自己登记。"
             				: "没有匹配的节点，换个搜索词或分组试试。"}
@@ -1783,6 +1787,23 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     />
                   )}
                 </TableCell>
+                {/* ⚠️ 三态：没有 `metrics`（从没上报）显示 `—`，**不能**显示 0% ——
+                    那是在说"这台此刻闲着"，与"不知道"是两件事（与 `uptime` 那条同一原则）。 */}
+                <TableCell className="tnum text-right text-sm">
+                  {n.metrics ? (
+                    <span title="CPU 与内存占用，来自 agent 每 2 秒的推送">
+                      {Math.round(n.metrics.cpu)}%
+                      <span className="text-muted-foreground">
+                        {" / "}
+                        {n.metrics.mem_total > 0
+                          ? `${Math.round((n.metrics.mem_used / n.metrics.mem_total) * 100)}%`
+                          : "—"}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
                 <TableCell className="tnum text-right text-sm">
@@ -1818,14 +1839,14 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
             ))}
             {nodes.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
                   还没有节点，右上角添加
                 </TableCell>
               </TableRow>
             )}
             {needle && nodes.length > 0 && !visible.length && (
               <TableRow>
-                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
                   没有匹配的节点
                 </TableCell>
               </TableRow>
