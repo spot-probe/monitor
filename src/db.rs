@@ -2113,7 +2113,8 @@ impl Db {
     /// 同一个 `Sample` 形状）、同一个 [`Tally`] 折叠、同一个 [`close_tallies`] 收尾、
     /// 同一套 rank 排序与**未取整**的窗口 loss。区别只有一个：这里按节点分组。
     ///
-    /// 先前两版都把参照认错了（先是小时级 `ping_records_hourly`，再是分钟级 `ping_records`），
+    /// 先前两版都把参照认错了（先是小时级的那条读路径，再是分钟级 `ping_records`；
+    /// 前者后来因为线上从未用到而被删除），
     /// 结果"与 X 一致"是对着一个**不是线上用的**函数成立的。这一版按 `ping_window` 的 SQL 抄。
     /// 一个探测任务在窗口内的**延迟分布矩阵**：时间桶 × 延迟区间 → 频次。
     ///
@@ -2895,84 +2896,6 @@ impl Db {
         Ok(())
     }
 
-    /// History for one node, thinned to one sample every `step` seconds.
-    ///
-    /// Bucketed rather than filtered on a multiple of `step`: rows normally land
-    /// on the minute, but nothing enforces it, and a filter would return nothing
-    /// for a stamp falling between grid lines.
-    ///
-    /// Averaged over the bucket rather than sampled from it. Keeping one row per
-    /// bucket would reintroduce the 1/60 sampling the write side already rejects:
-    /// the seven-day window integrated to 53.69 GB against the 27.52 GB the
-    /// minutes hold, while averaging gives 28.02 GB, matching the accumulator.
-    ///
-    /// `swap_used` and `load1` are returned alongside `mem_used`, all averaged
-    /// over the bucket, since a memory chart draws the first two together and
-    /// the CPU panel draws the load curve beside the CPU curve. `tcp`, `udp`
-    /// and `procs` are stored but not returned, as nothing draws them from
-    /// history. The columns are retained deliberately.
-    ///
-    /// `load1` is a real number, so unlike `mem_used`/`swap_used` it is left as
-    /// `AVG` returns it; and `AVG` over a bucket whose rows are all NULL is
-    /// NULL, which reaches the JSON as null rather than as the zero a chart
-    /// would draw as an idle machine.
-    ///
-    /// The stamp is the bucket's start rather than a row inside it, so every
-    /// series lands on one grid and the probe rows below can be shared.
-    ///
-    /// `net_rx_max` and `net_tx_max` are the bucket's **highest** rather than its
-    /// mean, since a maximum of maxima loses nothing: a week's window peaks at
-    /// the rate the busiest minute reached. Each row counts as at least its own
-    /// mean -- rows predating the column hold 0, and the mean, timed by the hub's
-    /// arrivals rather than the agent's own clock, can edge past the agent's
-    /// rates by the network's jitter.
-    /// The probe series as the hourly tier holds them, for a window that has already
-    /// been folded: each hour row is one sample whose median stands for `answered`
-    /// answers, and [`Tally`] weights it by exactly that.
-    ///
-    /// Read-only for now, like [`Db::metrics_hourly`]: the read path picks between
-    /// this and [`Db::ping_records`] once it also stitches the minute rows past the
-    /// watermark.
-    #[allow(dead_code)]
-    pub fn ping_records_hourly(
-        &self,
-        node_id: i64,
-        since: i64,
-        until: i64,
-        step: i64,
-    ) -> Result<Vec<serde_json::Value>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare_cached(
-            "SELECT (ts/?4)*?4, task_id, answered, lost, latency, lo, hi FROM ping_hour
-              WHERE node_id=?1 AND ts>=?2 AND ts<?3 ORDER BY ts/?4",
-        )?;
-        let mut rows = stmt.query(params![node_id, since, until, step])?;
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        let mut open: Option<(i64, std::collections::BTreeMap<i64, Tally>)> = None;
-        while let Some(r) = rows.next()? {
-            let bucket = r.get::<_, i64>(0)?;
-            if open.as_ref().map(|(b, _)| *b) != Some(bucket) {
-                if let Some((ts, tallies)) = open.take() {
-                    close_tallies(&mut out, tallies, ts);
-                }
-                open = Some((bucket, Default::default()));
-            }
-            let task = r.get::<_, i64>(1)?;
-            let sample = Sample {
-                answered: r.get(2)?,
-                lost: r.get(3)?,
-                median: r.get(4)?,
-                lo: r.get(5)?,
-                hi: r.get(6)?,
-            };
-            open.as_mut().expect("just set").1.entry(task).or_default().add(sample);
-        }
-        if let Some((ts, tallies)) = open.take() {
-            close_tallies(&mut out, tallies, ts);
-        }
-        Ok(out)
-    }
-
     /// The resource series for a window that **reaches past the watermark**: the
     /// hourly tier up to it, the minute rows after it, and the two merged by bucket.
     ///
@@ -3023,61 +2946,6 @@ impl Db {
              ) b GROUP BY (b.ts/?4)*?4 ORDER BY (b.ts/?4)*?4",
         )?;
         let rows = stmt.query_map(params![node_id, since, split, step], |r| {
-            Ok(serde_json::json!({
-                "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
-                "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
-                "disk_used": r.get::<_, i64>(4)?,
-                "net_rx": r.get::<_, i64>(5)?, "net_tx": r.get::<_, i64>(6)?,
-                "load1": r.get::<_, Option<f64>>(7)?,
-                "net_rx_max": r.get::<_, i64>(8)?, "net_tx_max": r.get::<_, i64>(9)?,
-                // 这三列可空：小时行里、迁移之前折出来的那些没有（`load1` 同理）。
-                "tcp": r.get::<_, Option<i64>>(10)?, "udp": r.get::<_, Option<i64>>(11)?,
-                "procs": r.get::<_, Option<i64>>(12)?,
-            }))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// The resource series as the hourly tier holds them, for a window that has
-    /// already been folded.
-    ///
-    /// Averaged **weighted by `minutes`**, so a bucket covering hours of different
-    /// lengths -- a hub that was down, an agent that reported late -- does not let a
-    /// short hour count as much as a full one, and the answer matches what the same
-    /// minutes would give one row at a time. `load1` divides by the minutes that
-    /// carried a value and is NULL when none did, which is what `AVG(load1)` does
-    /// over the minute rows by ignoring NULLs. Multiplied by `1.0` to divide as
-    /// reals: integer division would truncate twice where `AVG` truncates once.
-    ///
-    /// #[allow] until the read path picks between this and [`Db::metrics`]: a window
-    /// wider than the detail window reads this before the watermark and the minute
-    /// rows after it.
-    #[allow(dead_code)]
-    pub fn metrics_hourly(
-        &self,
-        node_id: i64,
-        since: i64,
-        until: i64,
-        step: i64,
-    ) -> Result<Vec<serde_json::Value>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare_cached(
-            "SELECT (ts/?4)*?4, SUM(cpu*minutes)*1.0/SUM(minutes),
-                    CAST(SUM(mem_used*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(swap_used*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(disk_used*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(net_rx*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(net_tx*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CASE WHEN SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) > 0
-                         THEN SUM(load1*minutes)*1.0/SUM(CASE WHEN load1 IS NOT NULL THEN minutes END) END,
-                    MAX(net_rx_max), MAX(net_tx_max),
-                    CAST(SUM(tcp*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(udp*minutes)*1.0/SUM(minutes) AS INTEGER),
-                    CAST(SUM(procs*minutes)*1.0/SUM(minutes) AS INTEGER)
-             FROM metric_hour WHERE node_id=?1 AND ts>=?2 AND ts<?3
-             GROUP BY ts/?4 ORDER BY ts/?4",
-        )?;
-        let rows = stmt.query_map(params![node_id, since, until, step], |r| {
             Ok(serde_json::json!({
                 "ts": r.get::<_, i64>(0)?, "cpu": r.get::<_, f64>(1)?,
                 "mem_used": r.get::<_, i64>(2)?, "swap_used": r.get::<_, i64>(3)?,
@@ -5733,182 +5601,6 @@ mod tests {
         }
     }
 
-    /// The hourly tier's probe series answer what the minute rows do, hour per point
-    /// and two hours per point. The median is the weighted one, so the second case is
-    /// where that shows: `Tally` counts each hour's median once per answer it stands
-    /// for, not once per hour.
-    #[test]
-    fn the_hourly_tier_draws_the_probes_the_minute_rows_would() {
-        let db = db();
-        let id = node(&db, 1);
-        let probe = db
-            .save_ping_task(&PingTask {
-                kind: None,
-                id: 0,
-                name: "p".into(),
-                target: "1.1.1.1:443".into(),
-                interval: 60,
-                nodes: vec![id],
-            })
-            .unwrap();
-        let start = 472_224 * 3_600;
-        // Six hours of different lengths, answers that differ per hour, and losses.
-        for h in 0..6i64 {
-            for m in 0..(60 - h * 7) {
-                let latency = if m % 13 == 0 { -1 } else { 20 + h * 10 + m % 5 };
-                db.insert_ping(id, probe, start + h * 3_600 + m * 60, latency).unwrap();
-            }
-        }
-        let until = start + 6 * 3_600;
-        db.roll_up(until + 7_200, 30).unwrap();
-
-        let key = |r: &serde_json::Value| (r["ts"].as_i64().unwrap(), r["task_id"].as_i64().unwrap());
-        let hourly = db.ping_records_hourly(id, start, until, 3_600).unwrap();
-        let (minutes, _) = db.ping_records(id, start, 3_600).unwrap();
-        let by: std::collections::HashMap<_, _> = minutes.iter().map(|m| (key(m), m.clone())).collect();
-        assert_eq!(hourly.len(), 6, "one point per hour");
-        for h in &hourly {
-            assert_eq!(
-                h,
-                by.get(&key(h)).expect("the minute path has this point"),
-                "an hour per point is exact"
-            );
-        }
-
-        // Two hours a point: the band and the loss are exact, the median is the
-        // weighted one and falls inside its own band.
-        let hourly = db.ping_records_hourly(id, start, until, 7_200).unwrap();
-        let (minutes, _) = db.ping_records(id, start, 7_200).unwrap();
-        let by: std::collections::HashMap<_, _> = minutes.iter().map(|m| (key(m), m.clone())).collect();
-        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
-        for h in &hourly {
-            let m = by.get(&key(h)).expect("the minute path has this point");
-            assert_eq!((&h["band"], &h["loss"]), (&m["band"], &m["loss"]), "exact either way");
-            let median = h["latency"].as_i64().unwrap();
-            let band = h["band"].as_array().map(|b| (b[0].as_i64().unwrap(), b[1].as_i64().unwrap()));
-            assert!(band.is_none_or(|(lo, hi)| (lo..=hi).contains(&median)), "{h}");
-        }
-
-        // The rank rule itself, computed here from the `ping_hour` rows rather than
-        // read back from the API: the median is the value at rank (answered+1)/2 by
-        // weight, counted once per answer an hour stands for. An unweighted median --
-        // one vote per hour, whatever it holds -- lands elsewhere as soon as the
-        // hours hold different numbers of answers, which is what this pins. (It is
-        // *not* the median over the underlying minutes: medians do not compose, which
-        // is why a point spanning hours is an approximation and the band sits beside
-        // it.)
-        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
-        for (i, first) in [0i64, 2, 4].iter().enumerate() {
-            let conn = db.conn();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT latency, answered FROM ping_hour
-                      WHERE node_id=?1 AND task_id=?2 AND ts>=?3 AND ts<?4",
-                )
-                .unwrap();
-            let mut samples: Vec<(i64, i64)> = stmt
-                .query_map(params![id, probe, start + first * 3_600, start + (first + 2) * 3_600], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
-            samples.sort_unstable();
-            let total: i64 = samples.iter().map(|s| s.1).sum();
-            let at = |rank: i64| {
-                let mut seen = 0;
-                samples
-                    .iter()
-                    .find(|s| {
-                        seen += s.1;
-                        seen >= rank
-                    })
-                    .map(|s| s.0)
-                    .unwrap()
-            };
-            let want = (at((total + 1) / 2) + at(total / 2 + 1)) / 2;
-            assert_eq!(
-                hourly[i]["latency"].as_i64().unwrap(),
-                want,
-                "bucket {i}: the median is the value at rank by weight"
-            );
-        }
-    }
-
-    /// The hourly tier's resource series answer what the minute rows they were
-    /// folded from answer, hour per point. The fold's own arithmetic is covered by
-    /// `folding_an_hour_sums_what_its_minute_rows_hold`; this is the **reading** of
-    /// it, which is what a window wider than the detail window does.
-    ///
-    /// Six hours with different numbers of minutes, so a plain average of the
-    /// hourly means would differ from the weighted one.
-    #[test]
-    fn the_hourly_tier_draws_what_the_minute_rows_would() {
-        let db = db();
-        let id = node(&db, 1);
-        let start = 472_224 * 3_600;
-        for h in 0..6i64 {
-            for m in 0..(60 - h * 7) {
-                db.insert_metric(
-                    id,
-                    start + h * 3_600 + m * 60,
-                    &serde_json::json!({"cpu": h as f64 + m as f64 / 100.0, "mem_used": 1_000 + m,
-                        "swap_used": 10, "disk_used": 5, "net_rx": 100 + m, "net_tx": 50,
-                        "load1": 0.25, "net_rx_max": 900 + m, "net_tx_max": 400}),
-                )
-                .unwrap();
-            }
-        }
-        let until = start + 6 * 3_600;
-        db.roll_up(until + 7_200, 30).unwrap();
-
-        let hourly = db.metrics_hourly(id, start, until, 3_600).unwrap();
-        let minutes = db.metrics(id, start, 3_600).unwrap();
-        assert_eq!(hourly.len(), 6, "one point per hour");
-        assert_eq!(hourly.len(), minutes.len());
-        for (h, m) in hourly.iter().zip(&minutes) {
-            assert_eq!(h["ts"], m["ts"]);
-            assert_eq!(h["net_rx_max"], m["net_rx_max"], "the peak is the peak either way");
-            assert_eq!(h["net_tx_max"], m["net_tx_max"]);
-            assert!(
-                (h["cpu"].as_f64().unwrap() - m["cpu"].as_f64().unwrap()).abs() < 1e-9,
-                "{} vs {}",
-                h["cpu"],
-                m["cpu"]
-            );
-            for key in ["mem_used", "swap_used", "disk_used", "net_rx", "net_tx"] {
-                assert_eq!(h[key], m[key], "{key}: the same minutes, weighted the same");
-            }
-            assert_eq!(h["load1"], m["load1"]);
-        }
-
-        // And at two hours a point, which is the case that actually guards the
-        // weighting: one point then covers hours of different lengths, so a plain
-        // average of the hourly means differs from the mean of the minutes. (At one
-        // hour a point it cannot: a bucket holds a single hour row, whose value is
-        // already that hour's mean. Verified by mutation -- summing instead of
-        // weighting left this test green until this case existed.)
-        //
-        // The integer columns are allowed one unit: the hour's own mean is truncated
-        // when it is stored, so two hours can add up to a fraction more or less than
-        // the mean over both.
-        let hourly = db.metrics_hourly(id, start, until, 7_200).unwrap();
-        let minutes = db.metrics(id, start, 7_200).unwrap();
-        assert_eq!(hourly.len(), 3, "two hours a point over six hours");
-        assert_eq!(hourly.len(), minutes.len());
-        for (h, m) in hourly.iter().zip(&minutes) {
-            assert_eq!(h["ts"], m["ts"]);
-            assert_eq!(h["net_rx_max"], m["net_rx_max"], "the peak is exact");
-            assert_eq!(h["net_tx_max"], m["net_tx_max"]);
-            let (got, want) = (h["cpu"].as_f64().unwrap(), m["cpu"].as_f64().unwrap());
-            assert!((got - want).abs() < 1e-9, "cpu {got} vs {want}");
-            for key in ["mem_used", "swap_used", "disk_used", "net_rx", "net_tx"] {
-                let d = (h[key].as_i64().unwrap() - m[key].as_i64().unwrap()).abs();
-                assert!(d <= 1, "{key} differs by {d}");
-            }
-        }
-    }
-
     /// The stitched probe reader agrees with the minute one on a database with
     /// nothing folded -- where it must degenerate to exactly that -- and still
     /// carries the fields the panel reads: latency, band and loss.
@@ -7448,7 +7140,10 @@ mod tests {
     /// **逐点相等**（行与窗口 loss 都相等）。
     ///
     /// 面板从此只发一个请求，但用户看到的数**一个也不能变** —— 这条测试就是那个保证。
-    /// 注意参照必须是**线上在用的**那条（`ping_records`，分钟级），不是 `ping_records_hourly`
+    /// 注意参照必须是**线上在用的**那条（`ping_records`，分钟级）—— 曾经并行存在过一条小时级
+    /// 读路径与两条“两者结果一致”的对照用例，它们在第 26 版前后被整体删除（见 `metrics_hourly`
+    /// 的删除说明）。⚠️ 若将来把那条路重新接上，**必须把它与本函数的对照用例一起加回来** ——
+    /// 那正是当初发现“两条路会分叉”的东西。
     /// 那条还没接上的小时级路径 —— 一开始我正是拿后者当了参照，那样写等于拿死代码证明一致性。
     /// ⭐ **一次请求拿到全部任务** ✓✓ —— 面板刷新时不再"一个任务一条请求"。
     ///
