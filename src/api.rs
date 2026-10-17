@@ -2898,9 +2898,19 @@ pub async fn settings_audit(_: Admin, State(app): State<Shared>) -> Response {
 }
 
 pub async fn settings(_: Admin, State(app): State<Shared>) -> Json<Value> {
+    // ⚠️ **一次读全**，不是每个键各查一次：此前这段 14 次 + 通知那半段约 10 次单键查询，
+    // 每次都是一次独立的 `query_row`（拿锁 + SQL 解析），而设置页一打开就把它们全跑一遍。
+    // 读失败仍要给面板一份可渲染的 JSON（否则整页打不开），但**留日志**，不再完全无声。
+    let all = match app.db.settings_map() {
+        Ok(all) => all,
+        Err(e) => {
+            tracing::warn!("settings read failed: {e:#}");
+            Default::default()
+        }
+    };
     let mut out = serde_json::Map::new();
     for key in READABLE_SETTINGS {
-        out.insert((*key).to_owned(), json!(app.db.get(key).unwrap_or_default()));
+        out.insert((*key).to_owned(), json!(all.get(*key).cloned().unwrap_or_default()));
     }
     // IP 数据库**到底在不在工作** ✓✓ —— 面板那个"呼吸灯"靠这几个字段 ✓。
     // ⚠️ 刻意**不只报"配没配"** ✗：配了 ≠ 生效 ✓（地址可能填错 ✓、下载可能一直失败 ✓、
@@ -2926,15 +2936,15 @@ pub async fn settings(_: Admin, State(app): State<Shared>) -> Json<Value> {
     out.insert("retention_days".into(), json!(app.db.retention_days().to_string()));
     out.insert(
         "github_secret_set".into(),
-        json!(app.db.get("github_client_secret").is_some_and(|v| !v.is_empty())),
+        json!(all.get("github_client_secret").is_some_and(|v| !v.is_empty())),
     );
     // Read-only here. A window is opened and closed through its own route, so the
     // key is always one the hub generated, and `save_settings` continues to refuse
     // both names.
     for key in ["register_key", "register_until"] {
-        out.insert(key.into(), json!(app.db.get(key).unwrap_or_default()));
+        out.insert(key.into(), json!(all.get(key).cloned().unwrap_or_default()));
     }
-    crate::notify::settings(&app, &mut out);
+    crate::notify::settings(&all, &mut out);
     Json(Value::Object(out))
 }
 

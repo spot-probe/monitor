@@ -113,28 +113,43 @@ fn template(app: &App, key: &str, default: &str) -> String {
 
 /// The notification half of `GET /api/settings`, defaults filled in so that the
 /// panel can echo every value back unchanged.
-pub fn settings(app: &App, out: &mut serde_json::Map<String, Value>) {
+pub fn settings(all: &std::collections::HashMap<String, String>, out: &mut serde_json::Map<String, Value>) {
+    // 吃一份**已经读好**的设置表（`Db::settings_map`）：调用方一次读完，这里按 key 取，
+    // 不再为每个通知项各查一次库。
+    let get = |key: &str| all.get(key).cloned();
+    let number = |key: &str| -> i64 {
+        let (_, min, max, default) =
+            NUMBERS.iter().copied().find(|(k, ..)| *k == key).expect("a numeric setting");
+        get(key).and_then(|v| v.parse().ok()).filter(|n| (min..=max).contains(n)).unwrap_or(default)
+    };
+    let setting = |key: &str| get(key).filter(|v| !v.is_empty());
     for (key, ..) in NUMBERS {
-        out.insert(key.into(), json!(number(app, key).to_string()));
+        out.insert(key.into(), json!(number(key).to_string()));
     }
-    let login = if app.db.get("notify_login").as_deref() == Some("off") { "off" } else { "on" };
+    let login = if get("notify_login").as_deref() == Some("off") { "off" } else { "on" };
     out.insert("notify_login".into(), json!(login));
     // On by default, like the sign-in alert above: it can only fire once a
     // channel exists, and then once per release, so an upgrade that adds it does
     // not need a visit to the panel to be useful.
-    let update = if app.db.get("notify_update").as_deref() == Some("off") { "off" } else { "on" };
+    let update = if get("notify_update").as_deref() == Some("off") { "off" } else { "on" };
     out.insert("notify_update".into(), json!(update));
-    out.insert("notify_telegram_chat".into(), json!(app.db.get("notify_telegram_chat").unwrap_or_default()));
-    out.insert("notify_telegram_text".into(), json!(template(app, "notify_telegram_text", DEFAULT_TEXT)));
-    out.insert("notify_webhook_body".into(), json!(template(app, "notify_webhook_body", DEFAULT_BODY)));
+    out.insert("notify_telegram_chat".into(), json!(get("notify_telegram_chat").unwrap_or_default()));
+    out.insert(
+        "notify_telegram_text".into(),
+        json!(setting("notify_telegram_text").unwrap_or_else(|| DEFAULT_TEXT.into())),
+    );
+    out.insert(
+        "notify_webhook_body".into(),
+        json!(setting("notify_webhook_body").unwrap_or_else(|| DEFAULT_BODY.into())),
+    );
     // 流量报告（调度在 `report_watch` ✓）。**默认：一个周期都不发** ✓ ——
     // 不能"默认全发" ✗：那会让升级后的机器突然开始给所有人发报告 ✓。
     // 时间与时区给默认值 ✓（+08:00 是维护者定的 ✓）—— 否则面板会看到空串 ✗。
-    out.insert("report_periods".into(), json!(app.db.get("report_periods").unwrap_or_default()));
-    out.insert("report_time".into(), json!(app.db.get("report_time").unwrap_or_else(|| "09:00".to_string())));
-    out.insert("report_tz".into(), json!(app.db.get("report_tz").unwrap_or_else(|| "+08:00".to_string())));
+    out.insert("report_periods".into(), json!(get("report_periods").unwrap_or_default()));
+    out.insert("report_time".into(), json!(get("report_time").unwrap_or_else(|| "09:00".to_string())));
+    out.insert("report_tz".into(), json!(get("report_tz").unwrap_or_else(|| "+08:00".to_string())));
     for key in SECRETS {
-        out.insert(format!("{key}_set"), json!(setting(app, key).is_some()));
+        out.insert(format!("{key}_set"), json!(setting(key).is_some()));
     }
 }
 
@@ -1069,11 +1084,11 @@ mod tests {
     fn the_update_alert_is_a_setting_that_defaults_on() {
         let app = app();
         let mut out = serde_json::Map::new();
-        settings(&app, &mut out);
+        settings(&app.db.settings_map().unwrap(), &mut out);
         assert_eq!(out["notify_update"], "on");
         app.db.set("notify_update", "off").unwrap();
         let mut out = serde_json::Map::new();
-        settings(&app, &mut out);
+        settings(&app.db.settings_map().unwrap(), &mut out);
         assert_eq!(out["notify_update"], "off");
 
         assert_eq!(setting_error("notify_update", "on"), None);

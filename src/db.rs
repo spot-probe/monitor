@@ -1564,6 +1564,18 @@ impl Db {
             .optional()?)
     }
 
+    /// 一次读出**所有**设置键值。
+    ///
+    /// 面板每打开一次设置页，此前要对每个可读键各查一次（14 次），通知那半段再查约 10 次，
+    /// 而且每次都是一次独立的 `query_row`（拿锁 + SQL 解析）。一次 `SELECT` 建 map 之后，
+    /// 调用方按 key 取即可。
+    pub fn settings_map(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached("SELECT key, value FROM setting")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+    }
+
     /// 内部写入（默认值、迁移、测试）：更新时间，但**不覆盖**上次的改动者。
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         self.conn().execute(
@@ -7038,6 +7050,20 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// 一次读全 vs 逐键读取，必须完全一致（否则设置页会显示半份数据）。
+    #[test]
+    fn the_settings_map_matches_reading_each_key() {
+        let db = Db::open(":memory:").unwrap();
+        db.set("site_name", "实例").unwrap();
+        db.set_by("retention_days", "30", "alice").unwrap();
+        db.set("public_page", "0").unwrap();
+        let all = db.settings_map().unwrap();
+        for key in ["site_name", "retention_days", "public_page"] {
+            assert_eq!(all.get(key), db.get(key).as_ref(), "键 {key}");
+        }
+        assert_eq!(all.len(), 3, "map 里只有写入过的键（未写的键不凭空出现）");
     }
 
     /// 广播走的那条（吃已读列表）必须与按节点读的那条给出**完全相同**的输出。
