@@ -735,12 +735,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 前端拿不到那种聚合），所以只取一次、切换榜不再发请求。
   type RiskRow = { task: string; node: string; value: number; samples: number }
   type Risk = { latency: RiskRow[]; loss: RiskRow[]; down: { node: string; last_seen: number }[] }
-  // 汇率：给第 4 张公共卡用。成本 tab 自己也会取一份，两个请求打同一个端点、结果一致 ——
-  // **关键是算法只在一处**：两边都用模块级的 `costRow()`，所以不会各算一套。
-  const [fx, setFx] = useState<{ per_unit: Record<string, number> } | null>(null)
+  // 汇率：**只在这里取一次**，公共卡与成本 tab 共用同一份快照。
+  // 此前成本 tab 自己又取了一遍：同一个端点两次请求，两份时间戳可能不同帧 —— 而且
+  // 「算法只在一处」的说法成立、数据却没有。
+  const [fx, setFx] = useState<Fx | null>(null)
   useEffect(() => {
     let stop = false
-    api<{ per_unit: Record<string, number> }>("/fx")
+    api<Fx>("/fx")
       .then((d) => { if (!stop) setFx(d) })
       .catch(() => { if (!stop) setFx(null) })
     return () => { stop = true }
@@ -1834,7 +1835,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
 
         </>
       ) : (
-        <CostBlock nodes={allNodes} group={group} />
+        <CostBlock nodes={allNodes} group={group} fx={fx} />
       )}
         {/* ⭐ **"我已续费"那张卡** ✓（用户提的做法 ✓）：入口是总览页顶部
             「30 天内到期」那张 KPI 卡 ✓（点它弹出来 ✓）。一行一台 ✓，
@@ -2396,21 +2397,20 @@ function ExpiryBadge({ date }: { date: string | null }) {
  * - 表格默认只列前 12 行、其余收进对话框（100 台时把整页拉长是不能接受的）；
  * - 月份的逐台明细是**常驻 callout**，不是浮在柱子上的卡片（不遮挡、不会在最左/最右顶出边界）。
  */
-function CostBlock({ nodes, group }: { nodes: Node[]; group: string }) {
-  const [fx, setFx] = useState<{ per_unit: Record<string, number>; fetched_at: number; manual: boolean; available: boolean } | null>(null)
+/** `/fx` 的一份快照。两处消费者共用，所以只有一个请求、一份时间戳。 */
+type Fx = {
+  per_unit: Record<string, number>
+  fetched_at: number
+  manual: boolean
+  available: boolean
+}
+
+function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx | null }) {
   const [sort, setSort] = useState<"monthly" | "expiry">("monthly")
   const [allOpen, setAllOpen] = useState(false)
   const [pick, setPick] = useState<string | null>(null)
   const [only, setOnly] = useState<"priced" | "noprice" | "norate" | "all">("priced")
   const [q, setQ] = useState("")
-
-  useEffect(() => {
-    let alive = true
-    api<{ per_unit: Record<string, number>; fetched_at: number; manual: boolean; available: boolean }>("/fx")
-      .then((d) => alive && setFx(d))
-      .catch(() => alive && setFx(null))
-    return () => { alive = false }
-  }, [])
 
   const shown = group ? nodes.filter((n) => n.group === group) : nodes
   const perUnit = fx?.per_unit ?? {}

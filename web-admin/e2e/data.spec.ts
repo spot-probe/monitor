@@ -38,3 +38,19 @@ test("节点表不再是空的：至少三行（就是种子那三台）", async
   const rows = page.locator("tbody tr")
   await expect.poll(async () => rows.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(3)
 })
+
+test("进成本视图只请求一次汇率", async ({ page }) => {
+  // 此前总览顶层取一份、成本块自己又取一份：同一个端点两次请求，两份时间戳可能不同帧，
+  // 而「算法只在一处」的说法成立、数据却没有。这里直接数请求。
+  const calls: string[] = []
+  page.on("request", (r) => {
+    if (new URL(r.url()).pathname.endsWith("/fx")) calls.push(r.url())
+  })
+  await page.goto("/admin")
+  await expect(page.locator("nav").first()).toBeVisible({ timeout: 20_000 })
+  await page.getByRole("button", { name: "成本", exact: true }).click()
+  await expect(page.getByText("剩余价值")).toBeVisible()
+  // 给"第二次请求"一点时间冒出来（真有的话）。
+  await page.waitForTimeout(400)
+  expect(calls.length, `请求了 ${calls.length} 次 /fx：${calls.join(", ")}`).toBe(1)
+})
