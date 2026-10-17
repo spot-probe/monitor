@@ -1718,21 +1718,20 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
               <TableHead className="sticky left-0 z-20 w-[17%] bg-card">名称</TableHead>
               <TableHead className="w-[18%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
-              <TableHead className="w-[9%]">版本</TableHead>
+              <TableHead className="w-[11%]">版本</TableHead>
               {/* ⚠️ **实时资源** ✓：`Node.metrics` 本来就随 `/api/ws` 每 2 秒推来（零额外
                   请求、零后端改动），此前面板只用它算"离线多久"，于是"这台是不是被打满了"
                   只能切到给访客看的公开页去查。 */}
-              <TableHead className="text-right w-[10%]">资源</TableHead>
-              <TableHead className="text-right w-[12%]">流量</TableHead>
+              <TableHead className="text-right w-[14%]">流量</TableHead>
               <TableHead className="text-right w-[9%]">价格</TableHead>
-              <TableHead className="text-right w-[10%]">到期</TableHead>
+              <TableHead className="text-right w-[12%]">到期</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {visible.length === 0 ? (
             	<TableRow>
-            		<TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
+            		<TableCell colSpan={8} className="py-12 text-center text-sm text-muted-foreground">
             			{nodes.length === 0 ? (
             				// ⚠️ 空态要给**可点的下一步**，而不是让读者去别处找按钮 ✗✓：
             				// 这是新装 hub 的第一屏，只有一句话会让人以为该去"设置"里找。
@@ -1870,26 +1869,8 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     />
                   )}
                 </TableCell>
-                {/* ⚠️ 三态：没有 `metrics`（从没上报）显示 `—`，**不能**显示 0% ——
-                    那是在说"这台此刻闲着"，与"不知道"是两件事（与 `uptime` 那条同一原则）。 */}
-                <TableCell className="tnum text-right text-sm">
-                  {n.metrics ? (
-                    // ⚠️ 两个数要**带标签** ✗✓：`2% / 59%` 得让读者猜哪个是内存。列宽放得下
-                    // 「CPU … · 内存 …」，标签用弱色、数字用正文色，扫读时看的仍然是数字。
-                    <span title="CPU 与内存占用，来自 agent 每 2 秒的推送">
-                      <span className="text-muted-foreground">CPU </span>
-                      {Math.round(n.metrics.cpu)}%
-                      <span className="text-muted-foreground">{" · 内存 "}</span>
-                      <span className="text-muted-foreground">
-                        {n.metrics.mem_total > 0
-                          ? `${Math.round((n.metrics.mem_used / n.metrics.mem_total) * 100)}%`
-                          : "—"}
-                      </span>
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </TableCell>
+                {/* 资源列删掉了：CPU/内存是**此刻的瞬时值**，列表里扫过去没有决策价值，
+                    真要看去节点详情；而它占着一列位置，把价格与到期挤窄了。 */}
                 {/* Counted by the node's own billing rule, as on the public
                     page. */}
                 <TableCell className="tnum text-right text-sm">
@@ -2985,22 +2966,29 @@ function Ping({ nodes }: { nodes: Node[] }) {
       				</div>
 
       				{/* ⚠️ **两个页签** ✗✓：摘要卡 + 折线 + 色条 + 热力图 + 直方图 + 两张节点表全在一屏里，
-      				    要滚三屏才看完，而多数人只想回答"这个探测现在怎么样"。曲线是默认，明细按需切换。 */}
-      				<div className="mt-3 flex items-center gap-1 rounded-md bg-muted p-0.5 text-xs">
-      					{([["chart", "曲线"], ["detail", "明细"]] as const).map(([k, t]) => (
-      						<button
-      							key={k}
-      							type="button"
-      							onClick={() => setView(k)}
-      							aria-pressed={view === k}
-      							className={`rounded px-2.5 py-1 transition-colors ${
-      								view === k ? "bg-card font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-      							}`}
-      						>
-      							{t}
-      						</button>
-      					))}
-      					<span className="ml-auto pr-1.5 text-[10px] text-muted-foreground">
+      				{/* ⚠️ **两个页签** ✗✓：摘要卡 + 折线 + 色条 + 热力图 + 直方图 + 两张节点表全在一屏里，
+      				    要滚三屏才看完，而多数人只想回答"这个探测现在怎么样"。曲线是默认，明细按需切换。
+      				    ⚠️ 样式与下方的**时间胶囊**（1 小时 / 6 小时 / 24 小时 / 7 天）逐字一致 ✗✓：
+      				    同一个弹窗里两个选择器长得不一样，读者会以为它们是两种不同的东西。 */}
+      				<div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+      					<div className="inline-flex items-center rounded-lg bg-muted p-1">
+      						{([["chart", "曲线"], ["detail", "明细"]] as const).map(([k, t]) => (
+      							<button
+      								key={k}
+      								type="button"
+      								onClick={() => setView(k)}
+      								aria-pressed={view === k}
+      								className={`rounded-md px-3.5 py-1 text-[13px] font-medium transition-all ${
+      									view === k
+      										? "bg-primary text-primary-foreground shadow-xs"
+      										: "text-muted-foreground hover:bg-muted-foreground/10 hover:text-foreground"
+      								}`}
+      							>
+      								{t}
+      							</button>
+      						))}
+      					</div>
+      					<span className="text-[11px] text-muted-foreground">
       						近 {winHours} 小时 · {all.length} 台合并
       					</span>
       				</div>

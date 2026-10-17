@@ -96,9 +96,10 @@ test("实时通道真的连上了 WebSocket，而不是悄悄退回 5 秒轮询"
   expect(frame.payload.length, "第一帧不应当是空的").toBeGreaterThan(0)
 })
 
-test("节点页有实时资源列（CPU / 内存）", async ({ page }) => {
-  // 防的是：这一列被删掉、或者只在有数据的库上才渲染。
-  // 数值本身断言不了 —— CI 用全新库，一台节点都没有；表头在空表上也会渲染。
+test("节点页不再有实时资源列", async ({ page }) => {
+  // 这一列被**有意删掉**（维护者：CPU/内存是瞬时值，列表里没有决策价值，还挤窄了价格与到期）。
+  // 断言它不在，比删掉用例强：哪天有人"顺手加回来"，这里会红。
   await page.goto("/admin/nodes")
-  await expect(page.getByRole("columnheader", { name: "资源" })).toBeVisible()
+  await expect(page.getByRole("columnheader", { name: "名称" })).toBeVisible()
+  await expect(page.getByRole("columnheader", { name: "资源" })).toHaveCount(0)
 })
