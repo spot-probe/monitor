@@ -1,6 +1,9 @@
 name: ci
 
 on:
+  # ⚠️ 手工触发：需要重跑一次 check 时（GitHub 抖动、或想验证一个 revert）
+  # 不必再推一个空提交 —— notes 里已经记过『空提交测不出 push 触发』这个坑。
+  workflow_dispatch:
   push:
     # The line this fork ships from. It read `[main, dev]` while main was a mirror of
     # upstream and dev carried our commits; the fork went solo, so main is the line
@@ -64,7 +67,10 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # `--locked`：release 阶段用 `cross build --release --locked`。这里不带的话，往
+      # Cargo.toml 加依赖却忘了 Cargo.lock 时，CI 会在 runner 上**静默把 lock 补好**并通过，
+      # 而发版时才失败（v1.5.4 就是这么来的）。
+      - run: cargo test --locked
 
       # Behaviour and **real layout**, on the running hub. jsdom cannot see either one:
       # it has no layout engine (every box is 0x0), and "the dialog closed" is a fact
