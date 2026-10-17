@@ -2830,7 +2830,21 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				<span className="flex flex-wrap items-center gap-2 text-sm font-normal text-muted-foreground">
       						<span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">{openTask.target}</span>
       						<span className="rounded border px-1.5 py-0.5 text-xs">{openTask.kind === "icmp" ? "ICMP" : "TCP"}</span>
-      						<span className="text-xs">共 {openTask.nodes.length} 台节点</span>
+      						<span className="text-xs">
+      							共 {openTask.nodes.length} 台节点
+      							{(() => {
+      								// ⚠️ **部分沉默**：列表那一行的「最近上报」是**任务级**的 —— 8 台里只有
+      								// 1 台在报时它照样显示"刚刚"，看起来完全正常。逐节点样本本来就在手边
+      								// （`perNode`），这里把"这个窗口里有几台真的报了"写出来。
+      								// 只在**部分**沉默时提示：全都报了是常态，不必占字数。
+      								const seen = (perNode[openTask.id] ?? []).filter(
+      									(p) => p.points.length > 0,
+      								).length
+      								return seen > 0 && seen < openTask.nodes.length
+      									? ` · 本次窗口 ${seen} 台有样本`
+      									: ""
+      							})()}
+      						</span>
       					</span>
       					<Help>
       						每个节点独立探测目标。列表里那一行是各节点按时间戳平均后的结果 —— 平均会藏起离群的那台，所以逐节点摊在这里看。
