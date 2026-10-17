@@ -248,7 +248,9 @@ async fn serve(app: Shared, node_id: i64, ip: String, mut socket: WebSocket) -> 
     info!("node {node_id} connected from {ip}");
 
     // Send the probe list before the first report arrives.
-    let _ = socket.send(Message::Text(ping_tasks_message(&app, node_id).into())).await;
+    if let Some(message) = ping_tasks_message(&app, node_id) {
+        let _ = socket.send(Message::Text(message.into())).await;
+    }
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.tick().await; // The first tick completes immediately.
@@ -866,9 +868,17 @@ fn report(app: &App, node_id: i64, mut metrics: serde_json::Value) -> Result<()>
     Ok(())
 }
 
-fn ping_tasks_message(app: &App, node_id: i64) -> String {
-    let tasks = app.db.ping_tasks_for(node_id).unwrap_or_default();
-    json!({"jsonrpc": "2.0", "method": "ping.tasks", "params": tasks}).to_string()
+fn ping_tasks_message(app: &App, node_id: i64) -> Option<String> {
+    // ⚠️ 读失败**不再**发一份空探测表 ✗：那会让 agent 把"库读不出来"当成"管理员删光了所有
+    // 探测"，静默停掉全部探测（直到下一次重连才可能恢复）。宁可这一轮不发，让它继续用手上
+    // 那份；日志里留一条，至少能被看见。
+    match app.db.ping_tasks_for(node_id) {
+        Ok(tasks) => Some(json!({"jsonrpc": "2.0", "method": "ping.tasks", "params": tasks}).to_string()),
+        Err(e) => {
+            warn!("probe list for node {node_id} failed; leaving the agent as it was: {e:#}");
+            None
+        }
+    }
 }
 
 /// Pushes the current probe list to every connected agent, so a panel edit takes
@@ -886,7 +896,10 @@ pub fn push_ping_tasks(app: &App) {
         // that has stopped reading its socket. It is dropped within SILENCE and
         // reconnects onto the current list; what must not happen is the panel
         // reporting a push that never occurred.
-        if sender.try_send(Message::Text(ping_tasks_message(app, node_id).into())).is_err() {
+        let Some(message) = ping_tasks_message(app, node_id) else {
+            continue;
+        };
+        if sender.try_send(Message::Text(message.into())).is_err() {
             warn!("node {node_id} is not draining its queue; it gets the new probe list when it reconnects");
         }
     }
@@ -1305,7 +1318,7 @@ mod tests {
                 kind: Some("icmp".into()),
             })
             .unwrap();
-        let message = ping_tasks_message(&app, id);
+        let message = ping_tasks_message(&app, id).unwrap();
         let sent: serde_json::Value = serde_json::from_str(&message).unwrap();
         assert_eq!(sent["method"], "ping.tasks");
         assert_eq!(sent["params"][0]["kind"], "icmp", "{message}");
@@ -1322,7 +1335,7 @@ mod tests {
                 kind: None,
             })
             .unwrap();
-        let message = ping_tasks_message(&app, id);
+        let message = ping_tasks_message(&app, id).unwrap();
         let sent: serde_json::Value = serde_json::from_str(&message).unwrap();
         let kinds: Vec<&str> =
             sent["params"].as_array().unwrap().iter().filter_map(|t| t["kind"].as_str()).collect();

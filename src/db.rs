@@ -2516,6 +2516,11 @@ impl Db {
                     t.day_rx, t.day_tx, t.day_start, n.traffic_reset_day
                  FROM traffic t JOIN node n ON n.id = t.node_id",
         ) else {
+            // ⚠️ 至少留一条日志：以前这里静默返回空表，于是"流量读不出来"与"这一轮没有流量"
+            // 在下游完全一样（所有节点的流量显示 0）。彻底的做法是返回 `Result`，让三处生产
+            // 调用各自决定（告警跳过、报表留空、面板显示"未知"），但那会波及十来个测试断言，
+            // 留作单独一件 —— 记在清单里，不假装它已经解决。
+            tracing::warn!("traffic query failed; every node will read as zero this round");
             return HashMap::new();
         };
         let today = Local::now().date_naive();

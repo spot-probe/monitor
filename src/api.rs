@@ -731,7 +731,20 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
     if (0..SNAPSHOT_TTL_MS).contains(&now.saturating_sub(cache[slot].0)) {
         return cache[slot].1.clone();
     }
-    let nodes = visible_nodes(app, full).unwrap_or_default();
+    // ⚠️ 读失败**不能**变成"零台机器" ✗：一份空列表会被缓存 1.9 秒，而面板与公开页都会把它
+    // 读成"集群空了"。上一份好快照（哪怕过期）远比它接近事实；只有在**从来没有过**成功快照
+    // 时才退成空列表，并且留一条日志 —— 此前这里连日志都没有。
+    let nodes = match visible_nodes(app, full) {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            tracing::warn!("node list failed; serving the last frame: {e:#}");
+            if cache[slot].0 == 0 {
+                Vec::new()
+            } else {
+                return cache[slot].1.clone();
+            }
+        }
+    };
     // `admin` is included so the panel's first fetch and its stream share one
     // cached frame.
     let mut payload = json!({"nodes": nodes, "admin": full});
