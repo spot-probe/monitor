@@ -28,8 +28,16 @@ export default defineConfig({
   projects: [
     { name: "auth", testMatch: /auth\.setup\.ts/ },
     {
-      name: "smoke",
+      // ⚠️ 种子在 smoke **之前**跑：CI 用全新库，没有它时所有用例只看得到"0 台节点"的页面。
+      // 幂等（同名跳过），所以本地预览里反复跑也不会堆出一串重复节点。
+      name: "seed",
       dependencies: ["auth"],
+      testMatch: /seed\.ts/,
+      use: { storageState: "e2e/.auth/state.json" },
+    },
+    {
+      name: "smoke",
+      dependencies: ["auth", "seed"],
       testMatch: /.*\.spec\.ts/,
       use: { storageState: "e2e/.auth/state.json" },
     },
