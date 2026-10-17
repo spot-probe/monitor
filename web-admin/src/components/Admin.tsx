@@ -2293,8 +2293,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
     // ⚠️ **`points` 必须传** ✓：不传就是 hub 的默认 1440 ⇒ 24 小时窗口下一分钟一个点，
     // 而一条线上的点数是「节点数 × 桶数 × 任务数」⇒ 任务一多，响应会大到画不动。
     // 360 是"够画"与"别浪费"之间的选择（24 小时合每 4 分钟一个点）。
+    //
+    // ⚠️ **点名 `tasks`** ✗：此前虽然带上 `points`，却仍然把**所有任务**的序列拉回来，
+    // 而弹窗只画展开的那一条 ⇒ 载荷按任务数白涨几倍。`tasks` 收 JSON 数组文本。
     api<{ nodes: Record<string, { ping: PingPoint[]; loss?: Record<string, number> }> }>(
-      `/nodes/ping-series?hours=${winHours}&points=360`,
+      `/nodes/ping-series?hours=${winHours}&points=360&tasks=[${openNodes}]`,
     )
       .then((d) => Object.entries(d.nodes ?? {}).map(([id, v]) => [Number(id), v] as const))
       .catch((e) => {
