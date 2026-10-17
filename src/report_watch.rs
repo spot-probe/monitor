@@ -177,3 +177,69 @@ fn report_rows(app: &App, from: &str, to: &str) -> Vec<crate::report::Row> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⚠️ 这个模块此前是**全仓唯一零测试的模块** ✗，而 `valid_periods` / `valid_time` /
+    /// `valid_tz` 是报告设置**唯一**的写入校验（`api.rs` 的 `save_settings` 直接调它们）。
+    /// 写错的表现是"永远不发报告且无人知道"——正是那个文件注释里写明要挡住的那类静默失败。
+    #[test]
+    fn valid_time_accepts_only_hh_mm_within_a_day() {
+        for ok in ["00:00", "09:05", "23:59", " 9:5 "] {
+            assert!(valid_time(ok), "{ok:?} 应当合法");
+        }
+        for bad in ["24:00", "09:60", "9", "0900", "", "09:05:00", "abc", "-1:00"] {
+            assert!(!valid_time(bad), "{bad:?} 应当被拒绝");
+        }
+    }
+
+    /// ⚠️ **校验与换算的语义不同** ✗：`valid_tz` 是"坏值就拒绝"，而 `offset_minutes` 是
+    /// "坏值就退默认 +08:00"。两者用途不同，不能共用——这条用例把两边的边界都钉住。
+    #[test]
+    fn valid_tz_rejects_what_offset_minutes_would_silently_default() {
+        // 合法：空串（用默认）、±HH:MM、±14:00 上限
+        for ok in ["", "+08:00", "-05:30", "+00:00", "+14:00", "-14:00"] {
+            assert!(valid_tz(ok), "{ok:?} 应当合法");
+        }
+        // 非法：没符号、超过 ±14、分钟越界、形状不对
+        for bad in ["08:00", "+15:00", "+14:01", "+08:60", "+8", "UTC+8", "+08"] {
+            assert!(!valid_tz(bad), "{bad:?} 应当被拒绝");
+        }
+        // 同一个坏值：校验拒绝，而换算悄悄用默认值 —— 这是刻意的不对称
+        assert!(!valid_tz("+99:00"));
+        assert_eq!(offset_minutes("+99:00"), 8 * 60, "坏值退默认 +08:00");
+        assert_eq!(offset_minutes("+08:00"), 480);
+        assert_eq!(offset_minutes("-05:30"), -330);
+        assert_eq!(offset_minutes(""), 8 * 60);
+    }
+
+    /// 空串是合法的：那表示"一个周期都不发"，与"配置写坏了"必须分得开。
+    ///
+    /// ⚠️ 顺带钉住一个**宽容**的地方 ✓：`"day,"` 与 `"day,,week"` 都是**合法**的 ——
+    /// 空段匹配 `""`，而 `parse_periods` 会跳过空段，所以多余的逗号等价于没写。
+    /// 我第一版把 `"day,"` 当成应当被拒的输入 ✗，用例红了才发现是**断言写错**、不是代码错。
+    /// 合法集合来自 `valid_periods` 里的那个 `matches!`：六个周期名 + 空串。
+    #[test]
+    fn valid_periods_accepts_the_known_names_and_the_empty_list() {
+        for ok in [
+            "",
+            "day",
+            "week",
+            "month",
+            "quarter",
+            "half",
+            "year",
+            "day,week",
+            " week , month ",
+            "day,",
+            "day,,week",
+        ] {
+            assert!(valid_periods(ok), "{ok:?} 应当合法");
+        }
+        for bad in ["hourly", "DAY", "Year", "day;week", "days", " day week "] {
+            assert!(!valid_periods(bad), "{bad:?} 应当被拒绝");
+        }
+    }
+}
