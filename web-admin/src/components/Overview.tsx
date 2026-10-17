@@ -759,7 +759,12 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const inScope = dated.filter((x) => x.r.monthly !== null && x.d !== null && x.d >= 0)
   const monthlyNow = inScope.reduce((a, x) => a + (x.r.monthly ?? 0), 0)
   // 剩余价值 = 价格 ÷ 周期天数 × 剩余天数（例：600/年、剩 180 天 → 600/365×180 = ¥295.89）
+  // ⚠️ 一次性买断**不进剩余价值** ✗：那个口径是「价格 ÷ 周期天数 × 剩余天数」，而它没有周期
+  // —— 此前落到 `cycleDays` 的 default（30 天），剩 90 天时算出来是**原价的三倍**，比漏算更糟。
+  // 它也没有"已付但尚未用到的时间价值"这回事（买断即拥有），所以按 0 计，并把台数报出来。
+  const oneOffs = inScope.filter((x) => isOneOff(x.n.billing_cycle)).length
   const residual = inScope.reduce((a, x) => {
+    if (isOneOff(x.n.billing_cycle)) return a
     const days = cycleDays(x.n.billing_cycle)
     return a + (x.n.price / days) * (x.d as number) * (perUnitTop[x.n.currency] ?? 1)
   }, 0)
@@ -1065,7 +1070,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <CalendarClock className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="truncate text-muted-foreground">
                 剩余价值 <span className="tnum">{cny(residual)}</span>
-                <span className="ml-1">（{inScope.length} 台计入）</span>
+                <span className="ml-1">
+                  （{inScope.length - oneOffs} 台计入
+                  {oneOffs > 0 ? ` · 另有 ${oneOffs} 台一次性买断未摊` : ""}）
+                </span>
               </span>
             </div>
           </CardContent>
@@ -2366,6 +2374,13 @@ function cycleDays(cycle: string): number {
   }
 }
 
+/** 一次性买断：**没有周期** —— 不是"认不出"，是**已知的没有** ✓。
+ *  两者必须分开：`cycleMonths` 的 default（认不出按 1 个月）是为了"宁可少算一项，
+ *  也不要静默漏掉整台机器"，而 `once` 是明确的语义。 */
+function isOneOff(cycle: string): boolean {
+  return (cycle || "").trim().toLowerCase() === "once"
+}
+
 function cycleMonths(cycle: string): number {
   switch ((cycle || "").toLowerCase()) {
     case "quarterly": case "quarter": case "3m": return 3
@@ -2384,7 +2399,13 @@ function costRow(n: Node, perUnit: Record<string, number>): CostRow {
   if (!(n.price > 0)) return { n, monthly: null, why: "none" }
   const rate = perUnit[n.currency]
   if (!rate || rate <= 0) return { n, monthly: null, why: "norate" }
-  return { n, monthly: (n.price / cycleMonths(n.billing_cycle)) * rate, why: null }
+  // ⚠️ `once`（一次性买断）此前落到 `cycleMonths` 的 default，被当成**月付** ⇒ ¥500 的买断
+  // 被算成「每月 ¥500」，月开销凭空多出这个数。它不是"认不出"，所以这里显式分流：
+  // 一次性买断对「每月开销」的贡献是 **0**。
+  const monthly = isOneOff(n.billing_cycle)
+    ? 0
+    : (n.price / cycleMonths(n.billing_cycle)) * rate
+  return { n, monthly, why: null }
 }
 
 /** 到期状态。用**本仓的语义 token**（`warn-fg` / `danger-fg`），不写死调色板 —— 深色模式才跟着走。 */
