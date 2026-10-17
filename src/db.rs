@@ -3244,6 +3244,14 @@ impl Db {
                 }
             }
         }
+        // ⚠️ **`probe_history` 的清理不能只挂在写路径上** ✗✗ —— 它此前只在 `save_probe`
+        // 里顺手删过期行，于是**一台不再上报流媒体的机器**的旧行就永远留着（那台机器被关掉、
+        // 或探测配置被关掉之后，正是这种情况）。这里跟着保留期一起删。
+        // 注意列名是 `at`（不是 `ts`），而 `node_id` 是 TEXT —— 所以它不参与上面那个按节点
+        // 分片删除的循环，一条语句即可（行数很小：每节点每服务每小时一行）。
+        pruned += self
+            .conn()
+            .execute("DELETE FROM probe_history WHERE at < ?1", [now - PROBE_HISTORY_KEEP_DAYS * 86_400])?;
         Ok(pruned)
     }
 
@@ -6816,6 +6824,29 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// `probe_history` 的清理**不能只挂在写路径上**：一台不再上报流媒体的机器，
+    /// 旧行就在那里躺着。保留期这一趟必须顺手清掉。
+    #[test]
+    fn pruning_drops_probe_history_nobody_reports_any_more() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        for (service, age_days) in [("netflix", 40i64), ("youtube", 1)] {
+            db.conn()
+                .execute(
+                    "INSERT INTO probe_history (node_id, service, status, region, at)
+                     VALUES ('1', ?1, 'unlocked', 'US', ?2)",
+                    rusqlite::params![service, now - age_days * 86_400],
+                )
+                .unwrap();
+        }
+        db.prune(90).unwrap();
+        let left: i64 = db.conn().query_row("SELECT COUNT(*) FROM probe_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "40 天前那条该清掉，昨天那条留着");
+        let service: String =
+            db.conn().query_row("SELECT service FROM probe_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(service, "youtube");
     }
 
     /// `risk_day` 只留最近 30 天：更早的原始响应用不上，却会一直长。
