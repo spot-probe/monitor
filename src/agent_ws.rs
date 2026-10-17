@@ -376,6 +376,8 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             let source =
                 country_source(ip, field("ipv4"), field("ipv6")).map_or_else(String::new, |a| a.to_string());
             let owed = app.db.save_facts(node_id, &rpc.params, ip, &source)?;
+            // 重连上来 ⇒ 这场升级到此结束（新版本由 `node.agent_version` 自己说）。
+            app.clear_upgrade(node_id);
             return Ok(owed.then_some(source));
         }
         "report" => report(app, node_id, rpc.params)?,
@@ -403,6 +405,13 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             };
             // 刻意同时打日志：面板上那是"某一刻的状态"，而日志留得住先后顺序。
             info!("node {node_id} upgrade report: ok={} {}", status.ok, status.reason);
+            // 进度：成功 ⇒ 它马上会退出并被 systemd 拉起，面板该显示"等待重连"；
+            // 失败 ⇒ 进度到此为止（原因由 `node.upgrade` 展示，不在进度里重复）。
+            if status.ok {
+                app.set_upgrade(node_id, crate::UpgradePhase::WaitingReconnect);
+            } else {
+                app.clear_upgrade(node_id);
+            }
             if let Some(agent) = app.agents.write().unwrap_or_else(|e| e.into_inner()).get_mut(&node_id) {
                 agent.upgrade = Some(status);
             }

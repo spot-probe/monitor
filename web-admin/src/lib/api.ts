@@ -144,7 +144,16 @@ export type Node = {
   /** agent 是否允许被 hub 远程升级。**只能在那台机器上打开**（重跑安装命令）。 */
   allow_remote_upgrade?: boolean
   /** 最近一次远程升级的结论（agent 回报）。只在节点在线时有 —— 升级只可能在在线时发生。 */
-  upgrade?: { ok: boolean; reason: string; version: string; at: number } | null
+  upgrade?: { ok: boolean; reason: string; version: string; at: number }
+  /**
+   * 这一次下发走到哪一步。只在下发期间存在（hub 的秒级事实，不落库）；
+   * 结束后由 `upgrade` 那条结论接手。
+   */
+  upgrade_progress?: {
+    phase: "downloading" | "pushing" | "waiting_apply" | "waiting_reconnect"
+    sent?: number
+    total?: number
+  } | null
   /** Panel only. Empty for nodes created before the hub retained a copy. */
   token?: string
   /** Panel only. Whether going offline and returning are announced. */

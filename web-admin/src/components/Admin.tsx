@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
-import { Gauge, Timer } from "lucide-react"
+import { Gauge, Loader2, Timer } from "lucide-react"
 import { ExternalLink } from "lucide-react"
 import { LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
@@ -861,6 +861,35 @@ function upgradeSummary(reason: string): string {
   return "升级失败"
 }
 
+/**
+ * 一次下发**走到哪一步**（文字阶段：取发布物 / 推送 N% / 等待应用 / 等待重连）。
+ *
+ * 和 `UpgradeResult` 分工：那一个是**结论**（成功/失败，留半小时或直到你处理），
+ * 这一个是**过程**（秒级事实，节点重连上来就消失）。百分比来自 hub 真正推下去的字节数，
+ * 不是估计。
+ */
+function UpgradeStage({ node }: { node: Node }) {
+  const p = node.upgrade_progress
+  if (!p) return null
+  const text =
+    p.phase === "downloading"
+      ? "取发布物…"
+      : p.phase === "pushing"
+        ? `推送 ${p.total ? Math.min(100, Math.round(((p.sent ?? 0) / p.total) * 100)) : 0}%`
+        : p.phase === "waiting_apply"
+          ? "等待应用"
+          : "等待重连"
+  return (
+    <span
+      className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"
+      title="这次下发的进度：推送的百分比来自真实字节数"
+    >
+      <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden />
+      {text}
+    </span>
+  )
+}
+
 function UpgradeResult({ node }: { node: Node }) {
   const [open, setOpen] = useState(false)
   const up = node.upgrade
@@ -1472,6 +1501,21 @@ function DragHandle({ onStart, onEnd, onKey, disabled, title, label }: {
 ///
 /// 只挑**开着开关、确实落后、而且在线**的：不在线的推不过去（端点会回 409），
 /// 没开开关的更不该被碰（那台机器只能手动升）。
+/// 正在升级几台、刚完成几台 —— 批量下发时一眼看清全局，不必逐个看行内的小字。
+function UpgradeTally({ nodes }: { nodes: Node[] }) {
+  const running = nodes.filter((n) => n.upgrade_progress).length
+  const now = Date.now() / 1000
+  const done = nodes.filter((n) => n.upgrade?.ok && now - n.upgrade.at < 600).length
+  if (running === 0 && done === 0) return null
+  return (
+    <span className="text-xs whitespace-nowrap text-muted-foreground">
+      {running > 0 && `${running} 台升级中`}
+      {running > 0 && done > 0 && " · "}
+      {done > 0 && `${done} 台已完成`}
+    </span>
+  )
+}
+
 function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -1645,6 +1689,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
           )}
         {/* An open window is visible from the list itself, so nobody has to
             remember they left one open. */}
+        <UpgradeTally nodes={nodes} />
         <BatchUpgrade nodes={nodes} onDone={refresh} />
         <Button variant="outline" disabled={!canProvision} onClick={() => setRegistering(true)}>
           <Server /> 批量添加{reg.left > 0 && ` · ${Math.ceil(reg.left / 60)} 分`}
@@ -1802,6 +1847,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                       原来把整句红字铺在这儿，实测会把这一列撑宽半列 —— 和升级确认那个
                       "撑宽整行"是同一类毛病。 */}
                   <UpgradeResult node={n} />
+                  <UpgradeStage node={n} />
                   {n.agent_old && (
                     <span
                       className="ml-1.5 inline-block size-1.5 shrink-0 rounded-full bg-warn align-middle"

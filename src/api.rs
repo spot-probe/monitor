@@ -798,6 +798,21 @@ fn live_snapshot(app: &App, full: bool) -> (Utf8Bytes, axum::http::HeaderValue) 
     // is pushed to every viewer every tick and a visitor has no use for it.
     if full {
         payload["agent_latest"] = json!(crate::agent_release::state(app).latest);
+        // 每台节点的升级进度（秒级事实，只给面板看）。公开页没有升级入口，不必带。
+        if let Some(arr) = payload.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+            for v in arr.iter_mut() {
+                let Some(id) = v.get("id").and_then(|x| x.as_i64()) else { continue };
+                let Some(phase) = app.upgrade_of(id) else { continue };
+                v["upgrade_progress"] = match phase {
+                    crate::UpgradePhase::Downloading => json!({ "phase": "downloading" }),
+                    crate::UpgradePhase::Pushing { sent, total } => {
+                        json!({ "phase": "pushing", "sent": sent, "total": total })
+                    }
+                    crate::UpgradePhase::WaitingApply => json!({ "phase": "waiting_apply" }),
+                    crate::UpgradePhase::WaitingReconnect => json!({ "phase": "waiting_reconnect" }),
+                };
+            }
+        }
     }
     let payload = Utf8Bytes::from(payload.to_string());
     // ⚠️ 摘要**跟着快照一起算**：`/api/nodes` 每请求都在哈希几百 KB，而内容 1.9 秒才变一次。
@@ -2150,9 +2165,13 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
         let bin = app.http.get(&bin_url).send().await?.error_for_status()?.bytes().await?;
         anyhow::Ok((sig, bin))
     };
+    app.set_upgrade(id, crate::UpgradePhase::Downloading);
     let (sig, bin) = match fetch.await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("取发布物失败：{e}")).into_response(),
+        Err(e) => {
+            app.clear_upgrade(id);
+            return (StatusCode::BAD_GATEWAY, format!("取发布物失败：{e}")).into_response();
+        }
     };
     if sig.trim().is_empty() || bin.is_empty() {
         return (StatusCode::BAD_GATEWAY, "发布物或签名为空").into_response();
@@ -2171,12 +2190,21 @@ pub async fn upgrade_node(_: Admin, State(app): State<Shared>, Path(id): Path<i6
     // 32 KiB 一块：agent 把 max_frame_size 设成 64 KiB（`MAX_MESSAGE`），留一半余量。
     // 这里用 send().await 而不是 try_send()：队列只有 16 格，而 1.8 MB 有五十多块 ——
     // 接收端就是那条会话循环，它会一边收一边把帧写到 socket 上。
+    // ⚠️ **推的每一块就是进度本身** ✗✓：面板上那句「推送 43%」是真实字节数，不是估计。
+    // 每块 32 KiB、1.8 MB 也就五十多次加锁，远比"猜一个百分比"诚实。
+    let total = bin.len() as u64;
+    let mut sent = 0u64;
     for chunk in bin.chunks(32 * 1024) {
         let m = axum::extract::ws::Message::Binary(chunk.to_vec().into());
         if let Err(e) = tx.send(m).await {
+            app.clear_upgrade(id);
             return (StatusCode::CONFLICT, format!("推送到一半断了：{e}")).into_response();
         }
+        sent += chunk.len() as u64;
+        app.set_upgrade(id, crate::UpgradePhase::Pushing { sent, total });
     }
+    // 字节到此为止，剩下的都在节点那边：验签、换二进制、重启。面板这段时间该显示"等待应用"。
+    app.set_upgrade(id, crate::UpgradePhase::WaitingApply);
     Json(json!({ "pushed": true, "version": version, "bytes": bin.len() })).into_response()
 }
 
@@ -4089,6 +4117,22 @@ mod tests {
         app.db.set("public_page", "off").unwrap();
         assert_eq!(stream_audience(&app, None), None, "closing the status page must end anonymous streams");
         assert_eq!(stream_audience(&app, Some(&hash)), Some(true), "a signed-in operator still gets theirs");
+    }
+
+    /// 快照要带上"这次升级走到哪一步"，而且**只带在管理帧里**（公开页没有升级入口）。
+    #[test]
+    fn the_snapshot_carries_the_upgrade_stage() {
+        let app = app();
+        let id = node(&app, "upgrading", true);
+        app.set_upgrade(id, crate::UpgradePhase::Pushing { sent: 300, total: 600 });
+        let admin: serde_json::Value = serde_json::from_str(live_snapshot(&app, true).0.as_str()).unwrap();
+        let progress = &admin["nodes"][0]["upgrade_progress"];
+        assert_eq!(progress["phase"], "pushing");
+        assert_eq!(progress["sent"], 300);
+        assert_eq!(progress["total"], 600, "百分比由真实字节数算出");
+
+        let public = live_snapshot(&app, false).0;
+        assert!(!public.as_str().contains("upgrade_progress"), "公开帧不该带");
     }
 
     /// 摘要跟快照一起缓存：同一帧命中时不变，内容变了必须变。

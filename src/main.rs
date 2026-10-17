@@ -39,6 +39,32 @@ use db::Db;
 
 pub type Shared = Arc<App>;
 
+/// 一次远程升级的**进度**，只活在内存里，给面板看"到哪一步了"。
+///
+/// 为什么不落库：它是秒级事实，进程没了就没有意义。**结论**（成功/失败/版本）由 agent 的
+/// `upgrade.report` 落库（`node.upgrade`），那才是需要跨重启的那一份。
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpgradePhase {
+    /// 正在从 GitHub 取发布物与签名。
+    Downloading,
+    /// 正在把字节推给节点；`sent`/`total` 是真实字节数。
+    Pushing { sent: u64, total: u64 },
+    /// 推完了，等 agent 验签并换二进制。
+    WaitingApply,
+    /// agent 已换上并重启，等它重新连上来（那之后节点会报新版本）。
+    WaitingReconnect,
+}
+
+#[derive(Clone)]
+pub struct UpgradeProgress {
+    pub phase: UpgradePhase,
+    /// 记下时间，用来过期：久到没人关心的进度不该一直挂在面板上。
+    pub at: i64,
+}
+
+/// 进度留多久。升级本身是几十秒的事；留太久会让"上次失败的那次"一直挂着。
+const UPGRADE_PROGRESS_TTL: i64 = 600;
+
 pub struct App {
     pub db: Db,
     /// IP 库（MaxMind / Tor 列表 …）放在哪 ✓ —— 与数据库同目录 ✓（推导见 `geo::data_dir` ✓）。
@@ -60,6 +86,8 @@ pub struct App {
     /// The last `overview_daily` answer, with the second it was built. See
     /// `App::overview_cached` for why this is worth caching.
     pub overview: Mutex<OverviewCache>,
+    /// 每台节点当前那次升级走到哪一步（见 `UpgradePhase`）。秒级事实，只在这里活着。
+    pub upgrades: Mutex<HashMap<i64, UpgradeProgress>>,
     pub throttle: auth::Throttle,
     /// Failed agent registrations, counted separately from failed sign-ins: the
     /// two have different threat models, and a batch install run with a stale
@@ -124,6 +152,25 @@ pub struct HubRelease {
 }
 
 impl App {
+    /// 记下这一跳走到哪了。调用点是升级那条路，见 `api::upgrade_node`。
+    pub fn set_upgrade(&self, id: i64, phase: UpgradePhase) {
+        let mut map = self.upgrades.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(id, UpgradeProgress { phase, at: chrono::Utc::now().timestamp() });
+    }
+
+    /// 这场升级已经结束（成功、失败或节点重连上来）⇒ 进度不再有意义。
+    pub fn clear_upgrade(&self, id: i64) {
+        self.upgrades.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    /// 这台节点当前的进度；顺带把过期的清掉（读少写多，不值得单起一个清扫）。
+    pub fn upgrade_of(&self, id: i64) -> Option<UpgradePhase> {
+        let now = chrono::Utc::now().timestamp();
+        let mut map = self.upgrades.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, p| now - p.at < UPGRADE_PROGRESS_TTL);
+        map.get(&id).map(|p| p.phase.clone())
+    }
+
     fn new(
         db: Db,
         site: String,
@@ -143,6 +190,7 @@ impl App {
             ]),
             uptime: Mutex::new((0, HashMap::new())),
             overview: Mutex::default(),
+            upgrades: Mutex::default(),
             throttle: auth::Throttle::default(),
             registrations: auth::Throttle::default(),
             theme_api: Mutex::default(),
