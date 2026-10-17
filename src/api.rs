@@ -45,6 +45,39 @@ fn fail(e: impl std::fmt::Display) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
 }
 
+/// 带 **ETag** 的 JSON 响应，并处理条件请求（`If-None-Match` ⇒ 304）。
+///
+/// 存在的理由：历史图重开一次就要重新传一份几十 KB 的 JSON、客户端再解析一遍，而这份内容
+/// 在同一分钟里通常没变。`/api/nodes` 早就是这么做的（它每次请求现算整份快照的 SHA-256）；
+/// 三条历史响应此前**没有任何缓存头**。
+///
+/// ⚠️ 说清它省什么：省**传输与客户端解析**，**不省服务端算力** —— 查询照样跑完才知道内容
+/// 变没变。要省算力得另做服务端缓存（那是另一件事，见清单）。
+///
+/// `Cache-Control: private, no-cache` 让浏览器**存**但每次都回来验；历史端点是有权限的，
+/// 不能进共享缓存。
+fn with_etag(headers: &HeaderMap, body: &serde_json::Value) -> Response {
+    let bytes = match serde_json::to_vec(body) {
+        Ok(bytes) => bytes,
+        Err(e) => return fail(e),
+    };
+    let etag =
+        axum::http::HeaderValue::from_str(&format!("\"{}\"", &hex::encode(Sha256::digest(&bytes))[..32]))
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"\""));
+    if headers.get(axum::http::header::IF_NONE_MATCH) == Some(&etag) {
+        return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json")),
+            (axum::http::header::ETAG, etag),
+            (axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("private, no-cache")),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 fn bad(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, message.to_owned()).into_response()
 }
@@ -655,7 +688,7 @@ pub async fn metrics(
     })
     .await;
     match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
-        Ok(body) => Json(body).into_response(),
+        Ok(body) => with_etag(&headers, &body),
         Err(e) => fail(e),
     }
 }
@@ -1955,7 +1988,7 @@ pub async fn ping_series(
             if let Some(visible) = &visible {
                 nodes.retain(|id, _| visible.contains(id));
             }
-            Json(json!({ "hours": hours, "task": task, "tasks": tasks, "nodes": nodes })).into_response()
+            with_etag(&headers, &json!({ "hours": hours, "task": task, "tasks": tasks, "nodes": nodes }))
         }
         Err(e) => fail(e),
     }
@@ -2000,8 +2033,11 @@ pub async fn ping_heatmap(
                 .into_iter()
                 .map(|b| json!({ "ts": b.ts, "counts": b.counts, "lost": b.lost }))
                 .collect();
-            Json(json!({ "hours": hours, "task": task, "edges": h.edges, "buckets": buckets }))
-                .into_response()
+            with_etag(
+                &headers,
+                &json!({ "hours": hours, "task": task, "edges": h.edges, "buckets": buckets }),
+            )
+            .into_response()
         }
         Err(e) => fail(e),
     }
@@ -4732,6 +4768,48 @@ mod tests {
         app.db.set("public_page", "off").unwrap();
         assert!(!readable(&app, false, open));
         assert!(readable(&app, true, open), "and never closes it for the panel");
+    }
+
+    /// 历史响应带 ETag，且**内容变了就必须变**。
+    ///
+    /// 条件请求最容易写错的地方是"标签算错了但没人发现"：客户端于是永远拿到旧数据。
+    /// 所以这里两头都钉：同样的内容 ⇒ 304；新数据进来 ⇒ 200 且标签不同。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // see `gate_tests`
+    async fn a_history_response_revalidates_and_its_tag_follows_the_data() {
+        let _serial = gate_tests();
+        let app = std::sync::Arc::new(app());
+        let id = node(&app, "n", true);
+        let now = Utc::now().timestamp();
+        app.db.insert_metric(id, now - 60, &json!({"cpu": 1.0})).unwrap();
+
+        let ask = |headers: HeaderMap| {
+            let q = serde_urlencoded::from_str::<Window>("hours=1&series=metrics").unwrap();
+            metrics(State(app.clone()), headers, Path(id), Query(q))
+        };
+
+        let first = ask(HeaderMap::new()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first.headers().get(axum::http::header::ETAG).cloned().expect("历史响应必须带 ETag");
+        let cache = first
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(cache, "private, no-cache", "有权限的响应不能进共享缓存");
+
+        let mut again = HeaderMap::new();
+        again.insert(axum::http::header::IF_NONE_MATCH, etag.clone());
+        let second = ask(again).await;
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED, "内容没变 ⇒ 304");
+
+        // 新样本进来 ⇒ 内容变了 ⇒ 不能再用 304。
+        app.db.insert_metric(id, now, &json!({"cpu": 2.0})).unwrap();
+        let mut stale = HeaderMap::new();
+        stale.insert(axum::http::header::IF_NONE_MATCH, etag);
+        let third = ask(stale).await;
+        assert_eq!(third.status(), StatusCode::OK, "数据变了就必须重新传");
     }
 
     /// ⭐ **按任务看延迟的那条路必须尊重"未发布"** ✓✓ —— 这条是那条安全修复的闸。
