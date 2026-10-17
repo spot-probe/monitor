@@ -75,3 +75,19 @@ test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
   await expect(page.getByTitle("回到本月")).toBeVisible()
   await page.getByRole("button", { name: "下月" }).click()
 })
+
+test("实时通道真的连上了 WebSocket，而不是悄悄退回 5 秒轮询", async ({ page }) => {
+  // 防的是：`/api/ws` 坏掉时面板会**静默**退回 5 秒轮询（`lib/api.ts` 的兜底），页面照常显示、
+  // 其它用例全绿 —— 于是「每 2 秒推送」这条能力实际上无人验证。
+  //
+  // 必须在 `goto` **之前**挂监听：连接是在应用启动时就建立的，晚一步就等不到那个事件。
+  const opened = page.waitForEvent("websocket")
+  await page.goto("/admin/nodes")
+  const ws = await opened
+  expect(new URL(ws.url()).pathname, "面板应当连到 /api/ws").toBe("/api/ws")
+
+  // 光"握手成功"不够：一个连上就断、或者一直不推帧的实现也能过上面那条。
+  // 这里等第一帧真的收到 —— 面板靠它刷新节点状态。
+  const frame = await ws.waitForEvent("framereceived")
+  expect(frame.payload.length, "第一帧不应当是空的").toBeGreaterThan(0)
+})
