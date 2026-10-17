@@ -1705,7 +1705,8 @@ pub async fn overview_series(_: Admin, State(app): State<Shared>, Query(q): Quer
     // ⚠️ 这条查询在 `metric_hour`（注释自述两百多万行）上做全表聚合 + 三个窗口排序，
     // 90 天实测 684ms。它此前**同步跑在 tokio worker 上**，而同文件里同样昂贵的
     // `db_stats` 早就交给 `spawn_blocking` 了 —— 堵住一个 worker 会连带拖住同线程的其它请求。
-    let built = tokio::task::spawn_blocking(move || app.db.overview_daily(days, group.as_deref())).await;
+    // 走带缓存的版本：同一次自动刷新里所有开着的浏览器共用一份答案（见 App::overview_cached）。
+    let built = tokio::task::spawn_blocking(move || app.overview_cached(days, group.as_deref())).await;
     let rows = match built.map_err(|e| anyhow::anyhow!(e)).and_then(|r| r) {
         Ok(rows) => rows,
         // 与其它 handler 同一套：读失败映射成错误响应，而不是 panic（release 是 abort）。

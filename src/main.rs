@@ -55,6 +55,9 @@ pub struct App {
     /// 30d)}`. Longer-lived than the frames above because the figures move on a
     /// scale of days; see `api::uptime_map`.
     pub uptime: Mutex<(i64, HashMap<i64, api::Uptime>)>,
+    /// The last `overview_daily` answer, with the second it was built. See
+    /// `App::overview_cached` for why this is worth caching.
+    pub overview: Mutex<OverviewCache>,
     pub throttle: auth::Throttle,
     /// Failed agent registrations, counted separately from failed sign-ins: the
     /// two have different threat models, and a batch install run with a stale
@@ -95,6 +98,21 @@ pub struct App {
     pub hub_release: Mutex<HubRelease>,
 }
 
+/// The last `overview_daily` answer and the parameters it was computed for.
+///
+/// The query behind it aggregates `metric_hour` (two million rows in production) and
+/// sorts it three ways: 684 ms at 90 days on the audit fixture. The panel asks for it
+/// every 30 s while auto-refresh is on, and every open browser tab asks for the same
+/// thing — so one answer per minute per (days, group) serves all of them.
+#[derive(Default, Clone)]
+pub struct OverviewCache {
+    /// The second it was built, 0 when empty.
+    at: i64,
+    days: i64,
+    group: Option<String>,
+    rows: Vec<[f64; 12]>,
+}
+
 #[derive(Default, Clone)]
 pub struct HubRelease {
     /// The second it was read, 0 before the first read.
@@ -118,6 +136,7 @@ impl App {
             agents: RwLock::default(),
             snapshot: Mutex::new([(0, Default::default()), (0, Default::default())]),
             uptime: Mutex::new((0, HashMap::new())),
+            overview: Mutex::default(),
             throttle: auth::Throttle::default(),
             registrations: auth::Throttle::default(),
             theme_api: Mutex::default(),
@@ -133,6 +152,33 @@ impl App {
             notes,
             hub_release: Mutex::default(),
         }
+    }
+
+    /// `overview_daily` with a one-minute cache, keyed by the parameters.
+    ///
+    /// A minute matches `uptime_map`: the rows underneath are folded hourly, so a
+    /// fresher answer would only re-derive the same numbers. The lock is dropped
+    /// before the query runs — holding it would serialise every browser behind one
+    /// slow aggregate, which is the failure this cache exists to avoid, not cause.
+    pub fn overview_cached(&self, days: i64, group: Option<&str>) -> anyhow::Result<Vec<[f64; 12]>> {
+        const TTL: i64 = 60;
+        let now = chrono::Utc::now().timestamp();
+        {
+            let cache = self.overview.lock().unwrap_or_else(|e| e.into_inner());
+            // Non-negative age, for the reason `live_snapshot` gives: a clock that steps
+            // backwards would otherwise read as young and pin a stale answer.
+            if cache.at > 0
+                && (0..TTL).contains(&now.saturating_sub(cache.at))
+                && cache.days == days
+                && cache.group.as_deref() == group
+            {
+                return Ok(cache.rows.clone());
+            }
+        }
+        let rows = self.db.overview_daily(days, group)?;
+        let mut cache = self.overview.lock().unwrap_or_else(|e| e.into_inner());
+        *cache = OverviewCache { at: now, days, group: group.map(str::to_owned), rows: rows.clone() };
+        Ok(rows)
     }
 
     #[cfg(test)]

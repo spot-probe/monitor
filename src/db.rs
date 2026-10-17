@@ -6969,6 +6969,47 @@ mod tests {
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
     }
 
+    /// `overview_cached` 的一分钟缓存：同参数复用，不同参数不复用。
+    ///
+    /// 缓存值得存在的理由是可测的：那条 SQL 在 `metric_hour` 上做全表聚合 + 三个窗口排序，
+    /// 而面板开着自动刷新时每 30 秒打一次、每个开着的浏览器各打一次；同一分钟内的答案
+    /// 本来就一样（底层行是按小时折的）。
+    #[test]
+    fn the_overview_answer_is_reused_for_a_minute_and_kept_per_parameter() {
+        let app = crate::App::for_test(Db::open(":memory:").unwrap());
+        let ts = (Utc::now().timestamp() / 3600) * 3600;
+        let seed = |node: &str, rx: i64| {
+            let n = app
+                .db
+                .create_node(
+                    &Node { name: node.into(), mem_total: 1_000, disk_total: 1_000, ..Default::default() },
+                    &format!("tok-{node}"),
+                )
+                .unwrap();
+            app.db
+                .conn()
+                .execute(
+                    "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                              net_rx, net_tx, load1, net_rx_max, net_tx_max)
+                     VALUES (?1, ?2, 60, 10.0, 100, 0, 100, ?3, ?3, NULL, ?3, ?3)",
+                    rusqlite::params![n, ts, rx],
+                )
+                .unwrap();
+        };
+        seed("a", 100);
+        let first = app.overview_cached(1, None).unwrap();
+        assert_eq!(first.len(), 1, "只插了一个小时，应当只有一天");
+        assert_eq!(first[0][1], 100.0 * 3600.0);
+
+        // 一分钟内再写入一台不同的机器：若每次都重算，带宽会变成 (100+200) × 3600。
+        seed("b", 200);
+        let again = app.overview_cached(1, None).unwrap();
+        assert_eq!(again[0][1], first[0][1], "一分钟内同参数应当复用同一份答案");
+
+        // 换一个参数就是另一个键，必须重算 —— 这里 `east` 分组下没有节点，所以是空。
+        assert!(app.overview_cached(1, Some("east")).unwrap().is_empty(), "不同参数不复用");
+    }
+
     /// 全队聚合的三条规则：cpu 按节点加权平均、内存按 Σ已用/Σ总量、带宽按节点求和。
     /// 三台机器刻意给不同的 mem_total —— 若把内存写成「各节点百分比的算术平均」，这个用例就会红。
     #[test]
