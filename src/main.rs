@@ -8,6 +8,7 @@ mod agent_release;
 mod agent_ws;
 mod api;
 mod auth;
+mod bot;
 mod db;
 mod frontend;
 mod fx;
@@ -666,6 +667,8 @@ async fn main() -> Result<()> {
     // IP 库（MaxMind / Tor 列表 …）：启动后拉一次，再每小时刷一次 ✓（静态文件 ✓ 无额度 ✓）。
     tokio::spawn(geo::watch(app.clone()));
     tokio::spawn(notify::watch(app.clone()));
+    // 只读的 Telegram 命令（长轮询）。没配 token/chat 时它什么都不做。
+    tokio::spawn(bot::watch(app.clone()));
     // The hub embeds a theme, so a fresh install needs no network. That copy is
     // frozen at build time, though, and this is what tells the operator a newer
     // one exists without either of them releasing a hub version. It only

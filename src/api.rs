@@ -748,6 +748,14 @@ const SNAPSHOT_TTL_MS: i64 = 1_900;
 /// many tabs are watching: the public page is anonymous, so a per-connection
 /// build would make viewer count a multiplier on database work. Two slots,
 /// because the admin view carries fields the public one must never expose.
+/// 面板与 Telegram bot 用的同一份管理快照。
+///
+/// bot 读它而不是自己再查一遍库：同一个 `<name> · <版本> · CPU/内存` 不该在两处各算一次，
+/// 否则总有一天两边会给出不同的数字（本仓已经吃过一次"两个定义"的亏）。
+pub(crate) fn admin_frame(app: &App) -> Utf8Bytes {
+    live_snapshot(app, true).0
+}
+
 fn live_snapshot(app: &App, full: bool) -> (Utf8Bytes, axum::http::HeaderValue) {
     let now = Utc::now().timestamp_millis();
     let slot = usize::from(full);
