@@ -2218,7 +2218,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
   // Measured results, keyed by task id. The hub serves probe history per node --
   // `ping_record`'s key order is built for exactly that query -- so the page asks
   // each node that runs a probe and folds the answers together here.
-  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; series: number[]; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
+  const [stats, setStats] = useState<Record<number, { last: number | null; loss: number; points: { ts: number; latency: number }[]; pct: { ts: number; p25: number | null; p50: number | null; p75: number | null; p90: number | null; p99: number | null; loss: number }[]; lossAxis: { ts: number; loss: number }[] }>>({})
   // Why a probe produced nothing, when the agent said why: without this the row shows
   // only 100% loss, which reads as a broken link rather than as a probe that cannot run.
   const [probeErrors, setProbeErrors] = useState<PingError[]>([])
@@ -2408,7 +2408,6 @@ function Ping({ nodes }: { nodes: Node[] }) {
           // The worst node, not the average: a probe losing packets on one machine is
           // the thing worth seeing in a list.
           loss: Math.round(Math.max(0, ...(loss.get(taskId) ?? [0]))),
-					series,
 					points,
 					pct,
 					lossAxis,
