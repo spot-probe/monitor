@@ -17,9 +17,17 @@ jobs:
   # 不能可靠地当门禁。这段重复换来的是"发布不可能绕过测试"这条硬约束。
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       # build.rs 会调它把主题物化到 target/theme；没有它连 cargo 都跑不起来。
+      # ⚠️ 主题包从 GitHub Releases 下载。按 `web-theme.pin` 缓存：pin 一变缓存自然失效
+      # （而且 `theme.sh` 自己也会校验 sha256 与关键文件）。没有它时每次 CI 都要多做一次
+      # **与被测改动无关**的网络请求，网络抖一下就红。
+      - uses: actions/cache@v4
+        with:
+          path: target/theme
+          key: theme-${{ hashFiles('web-theme.pin') }}
       - run: ./scripts/theme.sh
       - uses: actions/setup-node@v7
         with:
@@ -30,6 +38,8 @@ jobs:
       - run: npm ci && npm run build
         working-directory: web-admin
       - uses: dtolnay/rust-toolchain@stable
+      # ⚠️ 没有缓存时 237 个 crate 每次从零编。
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       # `--locked`：与 build 阶段一致。不带它时，lock 漂移会在 CI 里被静默补好、只在
@@ -39,6 +49,8 @@ jobs:
   build:
     needs: check
     runs-on: ubuntu-latest
+    # 没有上限时，一次网络挂起可以占满默认的 6 小时。
+    timeout-minutes: 60
     strategy:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
@@ -60,6 +72,13 @@ jobs:
       # hash in web-theme.pin. Run on the runner rather than left to build.rs,
       # because the cross container below does not necessarily carry curl; it
       # finds the theme already unpacked.
+      # ⚠️ 主题包从 GitHub Releases 下载。按 `web-theme.pin` 缓存：pin 一变缓存自然失效
+      # （而且 `theme.sh` 自己也会校验 sha256 与关键文件）。没有它时每次 CI 都要多做一次
+      # **与被测改动无关**的网络请求，网络抖一下就红。
+      - uses: actions/cache@v4
+        with:
+          path: target/theme
+          key: theme-${{ hashFiles('web-theme.pin') }}
       - run: ./scripts/theme.sh
 
       - uses: actions/setup-node@v7
@@ -89,6 +108,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       packages: write
