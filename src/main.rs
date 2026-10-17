@@ -638,6 +638,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions", get(api::sessions))
         .route("/api/sessions/{id}", delete(api::delete_session))
         .route("/api/settings", get(api::settings).put(api::save_settings))
+        .route("/api/settings/audit", get(api::settings_audit))
         .route("/api/version", get(api::version))
         // 手动触发一次更新检测（Admin）：否则只能等缓存过期或重启 hub。
         .route("/api/version/refresh/{what}", post(api::check_updates))

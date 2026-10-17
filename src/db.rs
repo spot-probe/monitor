@@ -49,7 +49,11 @@ PRAGMA journal_size_limit = 1048576;
 
 CREATE TABLE IF NOT EXISTS setting (
   key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+  value TEXT NOT NULL,
+  -- 最后一次写入的时刻与作者（见 `Db::set_by`）。内部写入（默认值、迁移）作者留空，
+  -- 且**不覆盖**上次的作者 —— 否则"这项设置是谁改的"会被程序自己抹掉。
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS node (
@@ -349,7 +353,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 /// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
 /// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
@@ -751,6 +755,18 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         add_column(&tx, "metric_hour", "tcp INTEGER")?;
         add_column(&tx, "metric_hour", "udp INTEGER")?;
         add_column(&tx, "metric_hour", "procs INTEGER")?;
+    }
+
+    if from < 25 {
+        // ⚠️ **设置改动要能查到"谁、什么时候"** ✗✗ —— 此前 `setting` 只有 key/value，于是
+        // `public_page` 被谁关的、`retention_days` 何时改的，事后无从查起（而 session 表里
+        // 本来就有登录记录）。
+        //
+        // 用两列而不是独立审计表，是**刻意的取舍**：这里要回答的是"这项设置现在是谁改的"，
+        // 不是完整历史。完整历史会无限增长、要配保留策略，那是另一件事 —— 记在清单里，
+        // 不假装它已经解决。
+        add_column(&tx, "setting", "updated_at INTEGER NOT NULL DEFAULT 0")?;
+        add_column(&tx, "setting", "updated_by TEXT NOT NULL DEFAULT ''")?;
     }
 
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -1548,13 +1564,38 @@ impl Db {
             .optional()?)
     }
 
+    /// 内部写入（默认值、迁移、测试）：更新时间，但**不覆盖**上次的改动者。
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO setting (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
+            "INSERT INTO setting (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                            updated_at = excluded.updated_at",
+            params![key, value, Utc::now().timestamp()],
         )?;
         Ok(())
+    }
+
+    /// 同 [`Db::set`]，并记下**是谁**改的（面板的管理员写入走这条）。
+    pub fn set_by(&self, key: &str, value: &str, who: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO setting (key, value, updated_at, updated_by) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                            updated_at = excluded.updated_at,
+                                            updated_by = excluded.updated_by",
+            params![key, value, Utc::now().timestamp(), who],
+        )?;
+        Ok(())
+    }
+
+    /// 每项设置最后一次写入的时间与作者（`""` = 内部写入，没有人），新的在前。
+    pub fn setting_audit(&self) -> Result<Vec<(String, i64, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT key, updated_at, updated_by FROM setting
+              WHERE updated_at > 0 ORDER BY updated_at DESC, key",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ---- nodes ----
@@ -6985,6 +7026,52 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// 设置改动要记下"谁、什么时候"，而且**内部写入不能把作者抹掉**。
+    #[test]
+    fn setting_changes_record_who_and_when() {
+        let db = Db::open(":memory:").unwrap();
+        db.set_by("retention_days", "30", "alice").unwrap();
+        let row = |db: &Db, key: &str| -> (i64, String) {
+            let rows = db.setting_audit().unwrap();
+            let (_, at, by) = rows.iter().find(|(k, _, _)| k == key).unwrap().clone();
+            (at, by)
+        };
+        let (at, by) = row(&db, "retention_days");
+        assert_eq!(by, "alice", "管理员写入必须记下是谁");
+        assert!(at > 0, "改动时间必须记下来");
+
+        // 程序自己的写入（默认值、迁移）不该把作者改成"没人"，只该把时间推新。
+        db.set("retention_days", "14").unwrap();
+        let (at2, by2) = row(&db, "retention_days");
+        assert_eq!(by2, "alice", "内部写入不该抹掉上次的改动者");
+        assert!(at2 >= at);
+        assert_eq!(db.get("retention_days").as_deref(), Some("14"));
+    }
+
+    /// 从 24 版升上来：两列都要有，而且升完就能记作者。
+    #[test]
+    fn migrating_from_24_records_who_changed_a_setting() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        for c in ["updated_at", "updated_by"] {
+            conn.execute(&format!("ALTER TABLE setting DROP COLUMN {c}"), []).unwrap();
+        }
+        conn.execute("PRAGMA user_version = 24", []).unwrap();
+        let has = |c: &rusqlite::Connection, col: &str| -> bool {
+            c.query_row("SELECT COUNT(*) FROM pragma_table_info('setting') WHERE name=?1", [col], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+                > 0
+        };
+        assert!(!has(&conn, "updated_by"), "前提：两列已撤掉");
+        migrate(&conn, 24).unwrap();
+        assert!(has(&conn, "updated_at") && has(&conn, "updated_by"), "迁移后两列都要在");
+        drop(conn);
+        db.set_by("public_page", "0", "alice").unwrap();
+        assert_eq!(db.setting_audit().unwrap()[0].2, "alice");
     }
 
     /// 探针必须能分辨"进程活着"与"库是好的"：schema 不匹配时要报不健康。

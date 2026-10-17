@@ -2883,6 +2883,20 @@ pub async fn delete_session(_: Admin, State(app): State<Shared>, Path(id): Path<
     }
 }
 
+/// 每项设置**最后一次**的改动（谁、什么时候）。只给管理员。
+///
+/// 刻意只回"谁在什么时候改过"，不回凭据的**值** —— 这一节回答的是审计问题，不是回显秘密。
+pub async fn settings_audit(_: Admin, State(app): State<Shared>) -> Response {
+    match app.db.setting_audit() {
+        Ok(rows) => Json(json!(rows
+            .into_iter()
+            .map(|(key, at, by)| json!({ "key": key, "at": at, "by": by }))
+            .collect::<Vec<_>>()))
+        .into_response(),
+        Err(e) => fail(e),
+    }
+}
+
 pub async fn settings(_: Admin, State(app): State<Shared>) -> Json<Value> {
     let mut out = serde_json::Map::new();
     for key in READABLE_SETTINGS {
@@ -3009,6 +3023,8 @@ pub async fn save_settings(
             return bad(&message);
         }
     }
+    // 谁在改：会话里记着登录名，写进 `setting.updated_by`，这样"这项设置是谁改的"事后查得到。
+    let actor = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
     // Set when the password changed, so the caller receives a fresh session rather
     // than being logged out by their own change.
     let mut reissued = String::new();
@@ -3017,7 +3033,7 @@ pub async fn save_settings(
         // Changing the password logs out every existing session; the caller
         // receives a replacement.
         if key == "admin_password" {
-            let who = current_session(&headers).and_then(|h| app.db.session_login(&h)).unwrap_or_default();
+            let who = actor.clone();
             match hash_password(value).and_then(|h| {
                 app.db.replace_password(&h)?;
                 issue_session(&app, &headers, &who, "")
@@ -3027,7 +3043,7 @@ pub async fn save_settings(
             }
             continue;
         }
-        if let Err(e) = app.db.set(key, value) {
+        if let Err(e) = app.db.set_by(key, value, &actor) {
             return fail(e);
         }
     }
