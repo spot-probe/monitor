@@ -285,9 +285,15 @@ pub async fn archive(app: &App, owner: &str, repo: &str, tag: &str) -> Result<Ve
 /// Whether `latest` names a later version than `installed`.
 ///
 /// Dotted numbers compared component by component, which is what these manifests
-/// carry (`1.6.0` against a tag's `v1.6.0`). Anything that is not all numbers --
-/// a date, a hash, a `1.7.0-rc1` -- falls back to "different", so an odd version
-/// string shows a badge that a click resolves rather than hiding an update.
+/// carry (`1.6.0` against a tag's `v1.6.0`).
+///
+/// ⚠️ **Anything that is not all numbers is not judged at all** —— 日期、hash、
+/// `1.7.0-rc1`、`dev-abc` 这类版本一律返回 `false`。
+///
+/// 这里以前是反的：解析不出来就退回"字符串不同 ⇒ 有新版本"，理由是"多一个徽章只是
+/// 白点一次，少一个徽章就是有人永远看不到更新"。但面板里的 `versionBelow` 对**同样的
+/// 输入**是"不评判" —— 于是同一个 hub 对同一个问题给出两个答案（`behind("dev-abc",
+/// "1.9.0")` 为真，而面板不这么认为）。现在两边一致：说不清就不下判断。
 pub fn newer(latest: &str, installed: &str) -> bool {
     match (parts(latest), parts(installed)) {
         (Some(latest), Some(installed)) => {
@@ -299,7 +305,8 @@ pub fn newer(latest: &str, installed: &str) -> bool {
             }
             false
         }
-        _ => latest != installed,
+        // 解析不出来 ⇒ **不评判**（见上面那段：与面板的 `versionBelow` 保持一致）。
+        _ => false,
     }
 }
 
@@ -398,12 +405,13 @@ mod tests {
         // Shorter and longer spellings of the same version.
         assert!(!newer("1.5", "1.5.0"));
         assert!(newer("1.5.1", "1.5"));
-        // Anything unparseable is offered rather than hidden: the cost of a
-        // wrong badge is one wasted click, the cost of a missing one is the
-        // update nobody sees. See the note on `newer`.
-        assert!(newer("1.7.0-rc1", "1.6.0"));
+        // ⚠️ 解析不出来 ⇒ **不评判**（两个方向都不），与面板的 `versionBelow` 一致。
+        // 以前这里是"字符串不同就算新"；那种做法会让 `dev-abc` 永远显示"有新版本"。
+        assert!(!newer("1.7.0-rc1", "1.6.0"), "rc 版本不评判");
         assert!(!newer("1.7.0-rc1", "1.7.0-rc1"));
-        assert!(newer("2026-09-26", "1.6.0"));
+        assert!(!newer("2026-09-26", "1.6.0"), "日期不是版本号");
+        assert!(!newer("1.9.0", "dev-abc"), "对手方解析不出来也不评判");
+        assert!(!newer("dev-abc", "1.9.0"));
     }
 
     #[test]
