@@ -688,16 +688,17 @@ pub async fn metrics(
     }
 }
 
-/// Widest history window each audience may request.
+/// Widest history window.
 ///
 /// The thinning below bounds the response, not the scan behind it: `hours=2160`
 /// returns 320 rows after reading every probe result the node has retained. At a
 /// month of retention that is 224 ms holding the single write connection the
 /// agents report through, growing with `retention_days`.
 ///
-/// The public ceiling is a week because that is the widest chart the themes
-/// draw, so nothing in use is lost. The panel retains the quarter year, being
-/// one signed-in operator rather than an anonymous caller.
+/// ⚠️ **There is no separate ceiling per audience** ✗✗ —— 这里曾经写着"匿名一周、
+/// 登录一个季度"，而代码（`hours.clamp(1, retention_days * 24)`）对两种身份是**同一套**。
+/// 那段注释与主题 README 里"匿名 168 / 登录 2160"的说法都过期了，会误导主题作者去
+/// 自我夹取。真正的边界只有一个：hub 保留多少天（`/api/me` 的 `history_days`）。
 /// Seconds between the samples a window is drawn from.
 ///
 /// Thinning exists for what the screen cannot draw rather than as a convention:
