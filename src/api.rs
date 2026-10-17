@@ -4770,6 +4770,23 @@ mod tests {
         assert!(readable(&app, true, open), "and never closes it for the panel");
     }
 
+    /// 设置改动审计：**谁说改了什么**，从 handler 一路到 JSON。
+    ///
+    /// 这个端点只被管理员用到，写错的表现很安静 —— 面板上一列空白，看起来像"没人改过设置"。
+    #[tokio::test]
+    async fn the_settings_audit_names_who_changed_what() {
+        let app = std::sync::Arc::new(app());
+        app.db.set_by("public_page", "0", "alice").unwrap();
+        let resp = settings_audit(Admin, State(app.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = v.as_array().expect("应当是一个数组");
+        let row = rows.iter().find(|r| r["key"] == "public_page").expect("应当能查到 public_page 这一项");
+        assert_eq!(row["by"], "alice", "必须记下是谁改的");
+        assert!(row["at"].as_i64().unwrap() > 0, "必须记下什么时候改的");
+    }
+
     /// 历史响应带 ETag，且**内容变了就必须变**。
     ///
     /// 条件请求最容易写错的地方是"标签算错了但没人发现"：客户端于是永远拿到旧数据。
