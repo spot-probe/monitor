@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode, useCallback, useRef } from "react"
+import { isOneOff, monthlyCost, residualValue } from "@/lib/cost"
 import { ArrowUpCircle, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Search } from "lucide-react"
 
 import { api, behind, changes, probeHistory } from "@/lib/api"
@@ -763,11 +764,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // —— 此前落到 `cycleDays` 的 default（30 天），剩 90 天时算出来是**原价的三倍**，比漏算更糟。
   // 它也没有"已付但尚未用到的时间价值"这回事（买断即拥有），所以按 0 计，并把台数报出来。
   const oneOffs = inScope.filter((x) => isOneOff(x.n.billing_cycle)).length
-  const residual = inScope.reduce((a, x) => {
-    if (isOneOff(x.n.billing_cycle)) return a
-    const days = cycleDays(x.n.billing_cycle)
-    return a + (x.n.price / days) * (x.d as number) * (perUnitTop[x.n.currency] ?? 1)
-  }, 0)
+  const residual = inScope.reduce(
+    (a, x) => a + residualValue(x.n.price, x.n.billing_cycle, x.d as number, perUnitTop[x.n.currency] ?? 1),
+    0,
+  )
   const noExpiry = dated.filter((x) => x.d === null).length
   // 名字不能叫 `expired`：上面「30 天内到期」那张卡已经用了这个变量。
   const expiredCount = dated.filter((x) => x.d !== null && x.d < 0).length
@@ -2362,33 +2362,7 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
 
 // ───────────────────────── 成本 ─────────────────────────
 
-/** 计费周期 → 月数。认不出的一律按 1 个月（宁可少算一项，也不要静默漏掉整台机器）。 */
-/** 计费周期的**天数**，用于"剩余价值 = 价格 ÷ 周期天数 × 剩余天数"（维护者给的口径）。
- *  与 `cycleMonths` 分开：那个用来摊平成"每月"，这个用来按天折算剩余。 */
-function cycleDays(cycle: string): number {
-  switch ((cycle || "").toLowerCase()) {
-    case "quarterly": case "quarter": case "3m": return 91
-    case "semiannual": case "semi-annual": case "halfyear": case "half-yearly": case "6m": return 182
-    case "yearly": case "annual": case "annually": case "year": case "12m": return 365
-    default: return 30
-  }
-}
 
-/** 一次性买断：**没有周期** —— 不是"认不出"，是**已知的没有** ✓。
- *  两者必须分开：`cycleMonths` 的 default（认不出按 1 个月）是为了"宁可少算一项，
- *  也不要静默漏掉整台机器"，而 `once` 是明确的语义。 */
-function isOneOff(cycle: string): boolean {
-  return (cycle || "").trim().toLowerCase() === "once"
-}
-
-function cycleMonths(cycle: string): number {
-  switch ((cycle || "").toLowerCase()) {
-    case "quarterly": case "quarter": case "3m": return 3
-    case "semiannual": case "semi-annual": case "halfyear": case "half-yearly": case "6m": return 6
-    case "yearly": case "annual": case "annually": case "year": case "12m": return 12
-    default: return 1
-  }
-}
 
 const cny = (v: number) => (v >= 10000 ? `¥${(v / 10000).toFixed(2)} 万` : `¥${v.toFixed(v < 100 ? 2 : 0)}`)
 
@@ -2399,13 +2373,8 @@ function costRow(n: Node, perUnit: Record<string, number>): CostRow {
   if (!(n.price > 0)) return { n, monthly: null, why: "none" }
   const rate = perUnit[n.currency]
   if (!rate || rate <= 0) return { n, monthly: null, why: "norate" }
-  // ⚠️ `once`（一次性买断）此前落到 `cycleMonths` 的 default，被当成**月付** ⇒ ¥500 的买断
-  // 被算成「每月 ¥500」，月开销凭空多出这个数。它不是"认不出"，所以这里显式分流：
-  // 一次性买断对「每月开销」的贡献是 **0**。
-  const monthly = isOneOff(n.billing_cycle)
-    ? 0
-    : (n.price / cycleMonths(n.billing_cycle)) * rate
-  return { n, monthly, why: null }
+  // 口径都在 `lib/cost.ts`（可测、且是成本口径的唯一真相）：一次性买断贡献 0，不走兜底。
+  return { n, monthly: monthlyCost(n.price, n.billing_cycle, rate), why: null }
 }
 
 /** 到期状态。用**本仓的语义 token**（`warn-fg` / `danger-fg`），不写死调色板 —— 深色模式才跟着走。 */
