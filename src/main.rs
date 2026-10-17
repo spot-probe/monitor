@@ -50,7 +50,9 @@ pub struct App {
     /// Last rendered node list per audience, `[public, admin]`, with the
     /// millisecond it was built. Shared by every browser stream so viewers do
     /// not multiply the query load. See `api::live_snapshot`.
-    pub snapshot: Mutex<[(i64, axum::extract::ws::Utf8Bytes); 2]>,
+    /// ⚠️ 第三项是**摘要**：它跟快照一起缓存，而不是每个请求重算一次整份 payload 的
+    /// SHA-256（那是最便宜的端点在做最贵的事）。
+    pub snapshot: Mutex<[(i64, axum::extract::ws::Utf8Bytes, axum::http::HeaderValue); 2]>,
     /// Reporting fraction per node with the second it was built, `{id: (7d,
     /// 30d)}`. Longer-lived than the frames above because the figures move on a
     /// scale of days; see `api::uptime_map`.
@@ -134,7 +136,11 @@ impl App {
             data_dir,
             db,
             agents: RwLock::default(),
-            snapshot: Mutex::new([(0, Default::default()), (0, Default::default())]),
+            // ⚠️ 不能写成 [(...); 2]：`HeaderValue` 既不是 `Copy` 也不是 `Default`。
+            snapshot: Mutex::new([
+                (0, Default::default(), axum::http::HeaderValue::from_static("")),
+                (0, Default::default(), axum::http::HeaderValue::from_static("")),
+            ]),
             uptime: Mutex::new((0, HashMap::new())),
             overview: Mutex::default(),
             throttle: auth::Throttle::default(),

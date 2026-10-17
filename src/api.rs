@@ -516,16 +516,11 @@ pub async fn nodes(State(app): State<Shared>, headers: HeaderMap) -> Response {
     // The same rendered frame the browser streams receive, for the same reason:
     // otherwise every visitor would rebuild every node's row against the
     // connection the agents write through.
-    let snapshot = live_snapshot(&app, full);
+    let (snapshot, etag) = live_snapshot(&app, full);
     // 条件请求：内容没变就只回一个 304。
-    // 面板在流断掉时会退回每 5 秒轮询一次，而那时拉的是整份快照；
-    // 快照本身有 1.9 秒的缓存，所以这里省下的是**传输与客户端的解析**，不是服务端的计算。
-    // ETag 用内容自己的摘要，所以它只在内容真的变了时才变。
-    let etag = axum::http::HeaderValue::from_str(&format!(
-        "\"{}\"",
-        &hex::encode(Sha256::digest(snapshot.as_bytes()))[..32]
-    ))
-    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"\""));
+    // 面板在流断掉时会退回每 5 秒轮询一次，而那时拉的是整份快照。
+    // ⚠️ 摘要来自 `live_snapshot`（跟着帧一起缓存），这里**不再每请求哈希一遍** ——
+    // 那会让最便宜的端点在每次轮询时做一遍几百 KB 的 SHA-256。
     if headers.get(axum::http::header::IF_NONE_MATCH) == Some(&etag) {
         return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
     }
@@ -752,7 +747,7 @@ const SNAPSHOT_TTL_MS: i64 = 1_900;
 /// many tabs are watching: the public page is anonymous, so a per-connection
 /// build would make viewer count a multiplier on database work. Two slots,
 /// because the admin view carries fields the public one must never expose.
-fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
+fn live_snapshot(app: &App, full: bool) -> (Utf8Bytes, axum::http::HeaderValue) {
     let now = Utc::now().timestamp_millis();
     let slot = usize::from(full);
     let mut cache = app.snapshot.lock().unwrap_or_else(|e| e.into_inner());
@@ -761,7 +756,7 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
     // resulting negative reads as young, pinning the panel to a stale frame until
     // real time catches up.
     if (0..SNAPSHOT_TTL_MS).contains(&now.saturating_sub(cache[slot].0)) {
-        return cache[slot].1.clone();
+        return (cache[slot].1.clone(), cache[slot].2.clone());
     }
     // ⚠️ 读失败**不能**变成"零台机器" ✗：一份空列表会被缓存 1.9 秒，而面板与公开页都会把它
     // 读成"集群空了"。上一份好快照（哪怕过期）远比它接近事实；只有在**从来没有过**成功快照
@@ -773,7 +768,7 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
             if cache[slot].0 == 0 {
                 Vec::new()
             } else {
-                return cache[slot].1.clone();
+                return (cache[slot].1.clone(), cache[slot].2.clone());
             }
         }
     };
@@ -804,8 +799,14 @@ fn live_snapshot(app: &App, full: bool) -> Utf8Bytes {
         payload["agent_latest"] = json!(crate::agent_release::state(app).latest);
     }
     let payload = Utf8Bytes::from(payload.to_string());
-    cache[slot] = (now, payload.clone());
-    payload
+    // ⚠️ 摘要**跟着快照一起算**：`/api/nodes` 每请求都在哈希几百 KB，而内容 1.9 秒才变一次。
+    let etag = axum::http::HeaderValue::from_str(&format!(
+        "\"{}\"",
+        &hex::encode(Sha256::digest(payload.as_bytes()))[..32]
+    ))
+    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("\"\""));
+    cache[slot] = (now, payload.clone(), etag.clone());
+    (payload, etag)
 }
 
 /// Drops the cached frames so the next push rebuilds. Without it a node just
@@ -871,7 +872,7 @@ async fn stream_live(app: Shared, mut socket: WebSocket, session: Option<String>
         // panel rendering a list with every admin field missing. The close allows
         // a client to re-query /api/me and determine its current state.
         let Some(full) = stream_audience(&app, session.as_deref()) else { break };
-        let frame = live_snapshot(&app, full);
+        let frame = live_snapshot(&app, full).0;
         if last.as_ref().is_some_and(|previous| previous == &frame) {
             continue;
         }
@@ -4064,6 +4065,24 @@ mod tests {
         assert_eq!(stream_audience(&app, Some(&hash)), Some(true), "a signed-in operator still gets theirs");
     }
 
+    /// 摘要跟快照一起缓存：同一帧命中时不变，内容变了必须变。
+    ///
+    /// 它此前是**每个请求**现算的（几百 KB 的 SHA-256），而 `/api/nodes` 在流断掉时每
+    /// 5 秒被轮询一次 —— 最便宜的端点在反复做最贵的那种事。
+    #[test]
+    fn the_cached_digest_follows_the_frame() {
+        let app = app();
+        let (_, first) = live_snapshot(&app, false);
+        let (_, again) = live_snapshot(&app, false);
+        assert_eq!(again, first, "缓存命中 ⇒ 同一个摘要");
+
+        // 加一台节点 ⇒ 帧变了 ⇒ 摘要必须跟着变（否则客户端会一直拿到 304）。
+        node(&app, "later", true);
+        invalidate_snapshot(&app);
+        let (_, after) = live_snapshot(&app, false);
+        assert_ne!(after, first, "内容变了 ⇒ 摘要必须变");
+    }
+
     #[test]
     fn the_shared_snapshot_keeps_the_two_audiences_apart() {
         let app = app();
@@ -4071,8 +4090,8 @@ mod tests {
         node(&app, "hidden", false);
         app.db.save_facts(open, &json!({"hostname": "vps-1"}), "198.51.100.9", "").unwrap();
 
-        let public = live_snapshot(&app, false);
-        let admin = live_snapshot(&app, true);
+        let public = live_snapshot(&app, false).0;
+        let admin = live_snapshot(&app, true).0;
         // Caching must never let one audience's payload reach the other.
         assert!(!public.as_str().contains("198.51.100.9"), "the public frame must carry no address");
         assert!(!public.as_str().contains("hidden"), "the public frame must carry no private node");
@@ -4081,7 +4100,7 @@ mod tests {
         // Two reads over unchanged data prove nothing, since a rebuild returns the
         // same bytes, so the data is modified first.
         node(&app, "late", true);
-        assert_eq!(live_snapshot(&app, false), public, "the frame is reused, not rebuilt per viewer");
+        assert_eq!(live_snapshot(&app, false).0, public, "the frame is reused, not rebuilt per viewer");
     }
 
     #[test]
@@ -4094,7 +4113,7 @@ mod tests {
         // does not constitute a young frame.
         app.snapshot.lock().unwrap()[0].0 = Utc::now().timestamp_millis() + 60_000;
         node(&app, "added-after", true);
-        assert!(live_snapshot(&app, false).as_str().contains("added-after"));
+        assert!(live_snapshot(&app, false).0.as_str().contains("added-after"));
     }
 
     /// The panel sends only a name, and expects the node just added to appear in
@@ -4103,7 +4122,7 @@ mod tests {
     async fn a_node_added_from_the_panel_needs_only_a_name_and_shows_up_at_once() {
         let app = std::sync::Arc::new(app());
         node(&app, "existing", true);
-        assert!(!live_snapshot(&app, true).as_str().contains("added"));
+        assert!(!live_snapshot(&app, true).0.as_str().contains("added"));
 
         let added: Node = serde_json::from_value(json!({"name": "added"})).unwrap();
         // The defaults the panel relies on by omitting them, `public` above all:
@@ -4121,7 +4140,7 @@ mod tests {
         assert_eq!(created.status(), StatusCode::OK);
         // Frames are cached for nearly two seconds, so without dropping the cache
         // the node just added would disappear from the list.
-        assert!(live_snapshot(&app, true).as_str().contains("added"));
+        assert!(live_snapshot(&app, true).0.as_str().contains("added"));
 
         // A name consisting only of spaces is refused and leaves no node behind.
         let blank = Json(serde_json::from_value::<Node>(json!({"name": "   "})).unwrap());
