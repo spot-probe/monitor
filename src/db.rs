@@ -2114,46 +2114,102 @@ impl Db {
     pub fn ping_heatmap(&self, task_id: i64, since: i64, step: i64, group: Option<&str>) -> Result<Heatmap> {
         let conn = self.conn();
         let rolled = rolled(&conn)?.unwrap_or(0);
+
+        // ⚠️ **两趟聚合，不在内存里保留全部样本** ✗✗ —— 此前把这一个窗口的每一条
+        // `(bucket, latency)` 都推进一个 `Vec`（7 天窗口一个任务实测 20 万行、生产约百万行，
+        // 约 16 MB），排序后再遍历一遍分桶。峰值内存随窗口线性增长，而这里真正需要的只有
+        // 两样东西：**分位边界**与**每桶落在各带的数量**。
+        //
+        // 第一趟：按延迟值分组计数。延迟是整数毫秒，所以不同值的个数是**有界**的
+        // （几百到几千），拿它可以精确还原"排序后第 i 个样本"—— 分位就是这么取的。
+        let mut hist: Vec<(i64, i64)> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT latency, COUNT(*) FROM ping_record
+                  WHERE task_id=?1 AND ts>=?2 AND ts>=?3
+                  AND (?4 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?4))
+                  GROUP BY latency ORDER BY latency",
+            )?;
+            let rows = stmt.query_map(params![task_id, since, rolled, group], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        // 丢包没有延迟（写成负数），不能参与分位 —— 会把分布整体拉低。
+        hist.retain(|(v, _)| *v >= 0);
+        let edges = Db::band_edges_from_counts(&hist);
+        drop(hist);
+
+        // 第二趟：按时间桶分组，边读边累加。内存只与"桶数 × 带数"有关，与样本数无关。
         let mut stmt = conn.prepare_cached(
             "SELECT (ts/?4)*?4 AS bucket, latency FROM ping_record
-             WHERE task_id=?1 AND ts>=?2 AND ts>=?3
-             AND (?5 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?5))
-             ORDER BY bucket",
+              WHERE task_id=?1 AND ts>=?2 AND ts>=?3
+              AND (?5 IS NULL OR node_id IN (SELECT id FROM node WHERE \"group\"=?5))
+              ORDER BY bucket",
         )?;
         let mut rows = stmt.query(params![task_id, since, rolled, step, group])?;
-        let mut samples: Vec<(i64, i64)> = Vec::new();
+        let mut buckets: Vec<HeatBucket> = Vec::new();
+        let mut current: Option<HeatBucket> = None;
         while let Some(row) = rows.next()? {
-            samples.push((row.get(0)?, row.get(1)?));
+            let ts: i64 = row.get(0)?;
+            let lat: i64 = row.get(1)?;
+            let b = match &mut current {
+                Some(b) if b.ts == ts => b,
+                _ => {
+                    if let Some(done) = current.take() {
+                        buckets.push(done);
+                    }
+                    current = Some(HeatBucket { ts, counts: vec![0i64; edges.len() - 1], lost: 0 });
+                    current.as_mut().expect("just created")
+                }
+            };
+            if lat < 0 {
+                b.lost += 1;
+            } else {
+                let k = Db::band_of(&edges, lat);
+                b.counts[k] += 1;
+            }
         }
         drop(rows);
         drop(stmt);
-        // ⚠️ **排序前必须放手** ✗：`Db` 只有一把写连接，而下面这段是在内存里排序几十万行
-        // （7 天窗口一个任务实测 20 万行）。兄弟函数 `ping_series_by_task`、
-        // `ping_window` 都显式 `drop(conn)` —— 这里漏了，于是排序期间**所有 agent 的上报
-        // 都在等这把锁**，正是注释里"某台机器看起来掉线 12 秒"那类事故的形状。
+        // 排序与聚合都不再需要连接：早放手，agent 的写入不必等我们。
         drop(conn);
-        // 边界只由**有效样本**算（丢包没有延迟，写进来会把分布拉低）。
-        let mut ok: Vec<i64> = samples.iter().map(|(_, l)| *l).filter(|l| *l >= 0).collect();
-        ok.sort_unstable();
-        let edges = Db::band_edges(&ok);
-        let mut buckets: Vec<HeatBucket> = Vec::new();
-        let mut i = 0;
-        while i < samples.len() {
-            let ts = samples[i].0;
-            let mut counts = vec![0i64; edges.len() - 1];
-            let mut lost = 0i64;
-            while i < samples.len() && samples[i].0 == ts {
-                let lat = samples[i].1;
-                if lat < 0 {
-                    lost += 1;
-                } else {
-                    counts[Db::band_of(&edges, lat)] += 1;
-                }
-                i += 1;
-            }
-            buckets.push(HeatBucket { ts, counts, lost });
+        if let Some(done) = current.take() {
+            buckets.push(done);
         }
         Ok(Heatmap { edges, buckets })
+    }
+
+    /// 由"值 → 计数"（按值升序）算出**与 [`Db::band_edges`] 完全相同**的边界。
+    ///
+    /// 存在的理由：`band_edges` 要吃一个排好序的完整切片，而 `ping_heatmap` 不再保留全部
+    /// 样本。分位只取几个固定下标，累计计数就能回答"第 i 个样本是多少"，不必把值展开。
+    pub fn band_edges_from_counts(sorted: &[(i64, i64)]) -> Vec<i64> {
+        let total: i64 = sorted.iter().map(|(_, c)| *c).sum();
+        if total == 0 {
+            return vec![0, 1];
+        }
+        let at = |index: i64| -> i64 {
+            let mut seen = 0i64;
+            for (v, c) in sorted {
+                seen += *c;
+                if index < seen {
+                    return *v;
+                }
+            }
+            sorted.last().map(|(v, _)| *v).unwrap_or(0)
+        };
+        let n = total;
+        let mut edges = vec![at(0)];
+        for q in [0.10f64, 0.25, 0.50, 0.75, 0.90] {
+            let i = ((q * (n as f64 - 1.0)).round() as i64).min(n - 1);
+            edges.push(at(i));
+        }
+        edges.push(at(n - 1));
+        edges.dedup();
+        if edges.len() < 2 {
+            edges.push(edges[0] + 1);
+        }
+        edges
     }
 
     /// `task_id = None` ⇒ **全部任务一次取回** ✓（每一行都带自己的 `task_id`，折叠本来也按它分组 ✓）。
@@ -7606,6 +7662,38 @@ mod heatmap_tests {
         assert!(e.len() >= 2, "至少两个边界才成一条带子：{:?}", e);
         for w in e.windows(2) {
             assert!(w[0] < w[1], "边界必须严格递增：{:?}", e);
+        }
+    }
+
+    /// 直方图算法必须与"排序后取下标"给出**完全相同**的边界。
+    ///
+    /// 这是 `ping_heatmap` 不再保留全部样本的前提：一旦两者分叉，热力图的配色会随窗口
+    /// 大小悄悄改变，而测试全绿。
+    #[test]
+    fn band_edges_from_counts_matches_the_sorted_slice() {
+        let cases: Vec<Vec<i64>> = vec![
+            vec![],
+            vec![5],
+            vec![7, 7, 7, 7],
+            (1..=100).collect(),
+            vec![0, 1, 2, 100, 100, 100, 4000],
+            vec![12, 13, 14, 15, 16, 900],
+        ];
+        for case in cases {
+            let mut sorted = case.clone();
+            sorted.sort_unstable();
+            let mut counts: Vec<(i64, i64)> = Vec::new();
+            for v in sorted.iter() {
+                match counts.last_mut() {
+                    Some((last, c)) if last == v => *c += 1,
+                    _ => counts.push((*v, 1)),
+                }
+            }
+            assert_eq!(
+                Db::band_edges_from_counts(&counts),
+                Db::band_edges(&sorted),
+                "样本 {case:?} 两种算法必须一致"
+            );
         }
     }
 
