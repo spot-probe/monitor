@@ -129,4 +129,52 @@ mod tests {
         assert_eq!(cny_per_unit(&t, "CNY"), Some(1.0));
         assert_eq!(cny_per_unit(&t, "GBP"), None, "表里没有的币种必须给 None，绝不能当 1:1");
     }
+
+    fn app() -> crate::App {
+        crate::App::for_test(crate::db::Db::open(":memory:").unwrap())
+    }
+
+    /// 手动值**压过**缓存表，并且明确表示"不是从网络取的"（`fetched_at` 报 0）。
+    ///
+    /// 这是模块注释里四条硬规矩之一，此前只有纯算术有用例：把 `rates` 里手动分支挪到缓存
+    /// 分支之后，一条测试都不会红，而页面上 `$50` 会被折成 `¥50`。
+    #[test]
+    fn a_manual_rate_overrides_the_cached_table() {
+        let app = app();
+        app.db.set(RATES, r#"{"CNY":7.2,"EUR":0.9}"#).unwrap();
+        app.db.set(FETCHED_AT, "1700000000").unwrap();
+        let (table, at, manual) = rates(&app).expect("有缓存表就应当有汇率");
+        assert!(!manual, "没有手动值时不该报成手动");
+        assert_eq!(at, 1_700_000_000);
+        assert_eq!(table["CNY"], 7.2);
+
+        app.db.set(MANUAL, "7.5").unwrap();
+        let (table, at, manual) = rates(&app).expect("有手动值就应当有汇率");
+        assert!(manual, "手动值必须压过缓存表");
+        assert_eq!(at, 0, "手动值不是从网络取的，没有抓取时间");
+        assert_eq!(table["CNY"], 7.5);
+        assert_eq!(table["USD"], 1.0, "手动表里 USD 恒为 1");
+    }
+
+    /// **绝不回退成 1:1**：两个来源都没有时返回 `None`，而不是造一张 `USD == CNY` 的表。
+    ///
+    /// 手动值的非法形态（0 / 负数 / 非数字 / 空串）同样不生效 —— 它们会让 `¥0` 或 `¥NaN`
+    /// 悄悄出现在成本页上。
+    #[test]
+    fn without_either_source_there_is_no_rate_rather_than_one_to_one() {
+        let app = app();
+        assert!(rates(&app).is_none(), "宁可没有汇率，也不能静默按 1:1 折算");
+        for bad in ["0", "-1", "abc", "", "  ", "N/A"] {
+            app.db.set(MANUAL, bad).unwrap();
+            assert!(rates(&app).is_none(), "MANUAL={bad:?} 不该生效");
+        }
+    }
+
+    /// 缓存表坏掉（不是 JSON）也返回 `None`：半份数据不能拿去折算。
+    #[test]
+    fn a_corrupt_cached_table_is_not_a_rate_table() {
+        let app = app();
+        app.db.set(RATES, "not json").unwrap();
+        assert!(rates(&app).is_none());
+    }
 }
