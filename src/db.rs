@@ -1480,6 +1480,19 @@ impl Db {
         Ok(Self { conn: Mutex::new(conn), ping_errors: Default::default(), ping_last: Default::default() })
     }
 
+    /// `/healthz` 背后的检查：连接答得出来，且 schema 正是本二进制期望的那一版。
+    ///
+    /// 不用 `PRAGMA quick_check`：那要扫全部分页，而探针是每隔几秒一次。这里查的是真正
+    /// 会导致"进程活着但服务坏了"的两种情形 —— 库打不开（查询直接报错）、或者库里是别的
+    /// 版本的 schema（迁移失败/半途中断）。注意后者**不能**只看连接是否成功。
+    pub fn healthy(&self) -> anyhow::Result<()> {
+        let conn = self.conn();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        anyhow::ensure!(version == SCHEMA_VERSION, "schema {version}, expected {SCHEMA_VERSION}");
+        conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
+        Ok(())
+    }
+
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -6972,6 +6985,16 @@ mod tests {
         assert!(minutes.windows(2).all(|w| w[0] < w[1]), "oldest first");
         assert!(minutes.iter().all(|t| *t >= since7 && *t < now));
         assert_eq!(db.reported_minutes(idle, since7, now).unwrap().len(), 0);
+    }
+
+    /// 探针必须能分辨"进程活着"与"库是好的"：schema 不匹配时要报不健康。
+    #[test]
+    fn health_reports_a_missing_or_mismatched_schema() {
+        let db = Db::open(":memory:").unwrap();
+        db.healthy().expect("全新的库应当是健康的");
+        // 模拟"库里还是别的版本"：迁移失败或半途中断时就是这个样子。
+        db.conn().execute_batch("PRAGMA user_version = 99").unwrap();
+        assert!(db.healthy().is_err(), "schema 不匹配时必须报不健康，而不是 200");
     }
 
     /// `overview_cached` 的一分钟缓存：同参数复用，不同参数不复用。

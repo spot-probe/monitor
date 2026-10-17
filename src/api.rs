@@ -589,8 +589,7 @@ pub async fn metrics(
     // After the two point lookups above, so an unauthorised caller is told so
     // rather than asked to retry later.
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
-            .into_response();
+        return history_busy();
     };
     // Bounded by what is kept, for a signed-in browser and an anonymous one alike:
     // a window wider than the retention has nothing to draw, and past the detail
@@ -1781,6 +1780,31 @@ pub struct ProbeHistoryQuery {
 /// ⚠️ **一台没探过的节点返回空数组** ✓✓（不是 404 ✗、也不是报错 ✓）——
 /// 前端要靠"空"画出空点阵 ✓，并说明"从某日起才有记录" ✓。
 /// ⚠️ `days` 上限 **30** ✓ —— 与保留策略**同一个数** ✓✓（要更多也没有了 ✓）。
+/// 503，并带 `Retry-After: 1`。
+///
+/// 历史查询被闸门挡住时，调用方需要知道"等一秒再来"，而不是"这条坏了"。面板的 catch 会把
+/// 它静默吞掉（那是另一个已记在案的问题），但别的调用方 —— 主题、脚本、反代 —— 会看这个头。
+fn history_busy() -> Response {
+    let mut resp =
+        (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again").into_response();
+    resp.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
+    resp
+}
+
+/// 容器与反代的存活探针。
+///
+/// 存在的理由：未知路径会被 SPA 兜底成 **200 text/html**，所以一个坏掉的库照样"健康"。
+/// 这里把"进程活着"与"库答得出来、schema 对得上"分开。
+pub async fn healthz(State(app): State<Shared>) -> Response {
+    match app.db.healthy() {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(e) => {
+            tracing::warn!("health check failed: {e:#}");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+        }
+    }
+}
+
 pub async fn probe_history(
     State(app): State<Shared>,
     headers: HeaderMap,
@@ -1872,8 +1896,7 @@ pub async fn ping_series(
     // 都走 `authed` + `readable`。这里补上：非管理员只看得到公开节点。
     let full = authed(&app, &headers);
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
-            .into_response();
+        return history_busy();
     };
     let hours = q.hours.unwrap_or(24).clamp(1, app.db.retention_days() * 24);
     let step = sample_step(hours, q.points);
@@ -1959,8 +1982,7 @@ pub async fn ping_heatmap(
         return (StatusCode::UNAUTHORIZED, "sign-in required").into_response();
     }
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "too many history queries in flight, try again")
-            .into_response();
+        return history_busy();
     };
     let hours = q.hours.unwrap_or(24).clamp(1, app.db.retention_days() * 24);
     let step = sample_step(hours, q.points);

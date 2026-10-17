@@ -607,6 +607,8 @@ async fn main() -> Result<()> {
         .route("/install.sh", get(install_script))
         .route("/agent/{arch}", get(agent_binary))
         // Read paths; the public page reaches these unauthenticated.
+        // 不在 `/api/` 下，所以不会被 `is_api_path` 判成 404，也不会落进 SPA 兜底。
+        .route("/healthz", get(api::healthz))
         .route("/api/me", get(api::me))
         .route("/api/nodes", get(api::nodes))
         .route("/api/nodes/{id}/metrics", get(api::metrics))
