@@ -2683,6 +2683,11 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
                 <span key={g} className="flex items-center gap-1" title={g === "其他" ? ranked3.slice(3).map(([n2, v2]) => `${n2} ${cny(v2)}`).join(" · ") : undefined}>
                   <span aria-hidden className={`size-2 rounded-[2px] ${g === "其他" ? "bg-muted-foreground/40" : tones[i % tones.length]}`} />
                   {g} <span className="font-mono tabular-nums text-foreground">{cny(v)}</span>
+                  {/* 比例：条的长度已经在表达它，但没有数字就只能估。一位小数足够
+                      （这条比例条本身也没有刻度，再精确的数字反而与它对不上）。 */}
+                  {monthly > 0 && (
+                    <span className="tnum">({((v / monthly) * 100).toFixed(1)}%)</span>
+                  )}
                 </span>
               ))}
             </div>
