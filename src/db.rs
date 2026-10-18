@@ -2095,7 +2095,20 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// 每台节点只留最差的那条（输入已按值降序 ⇒ 第一次见到就是最差），保持原顺序。
+    ///
+    /// 单独抽出来是因为它有两处调用，而"哪一条算最差"的规则只该写一遍。
+    fn one_per_node(rows: &mut Vec<AtRiskRow>) {
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|r| seen.insert(r.1.clone()));
+    }
+
     /// 「需要处理的节点」三条榜。**一次算完**，卡片切榜时不必再发请求。
+    ///
+    /// ⚠️ 延迟与丢包**每台节点只占一行** ✗✓：查询本身按（任务 × 节点）分组（一条探测一台机器
+    /// 是一份数据 ✓），但这一栏问的是"**哪台**该处理" ✓ —— 同一台机器在两三个任务里各出现
+    /// 一次，读者看到的是"重复数据"，而不是"两条探测都慢" ✓。每台只留**最差的那条**，并把
+    /// 那条探测的名字一并给出（所以"是哪条探测把它拖下来的"仍然看得见 ✓）。
     ///
     /// - 延迟：`ping_hour.latency` 是**逐小时的中位**，所以这里按 `answered` 加权求平均 ——
     ///   那是**均值**，不是中位。**标签就写「平均」**，不冒充 p50。
@@ -2116,16 +2129,18 @@ impl Db {
                        FROM ping_hour h
                        JOIN ping_task t ON t.id = h.task_id
                        JOIN node n ON n.id = h.node_id
-                      WHERE h.ts >= ?1 AND h.answered > 0 AND (?3 IS NULL OR n.[group] = ?3)
+                      WHERE h.ts >= ?1 AND h.answered > 0 AND (?2 IS NULL OR n.[group] = ?2)
                       GROUP BY h.task_id, h.node_id
-                      ORDER BY 3 DESC
-                      LIMIT ?2",
+                      ORDER BY 3 DESC",
             )?;
-            let rows = stmt.query_map(params![since, limit, group], |r| {
+            let rows = stmt.query_map(params![since, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
             })?;
             // ⚠️ 不再 filter_map 吞行错误；先收成有所有权的 Vec，借用因此不跨作用域。
-            rows.collect::<Result<Vec<AtRiskRow>, _>>()?
+            let mut rows = rows.collect::<Result<Vec<AtRiskRow>, _>>()?;
+            Self::one_per_node(&mut rows);
+            rows.truncate(limit as usize);
+            rows
         };
         let loss = {
             let mut stmt = conn.prepare_cached(
@@ -2135,17 +2150,18 @@ impl Db {
                        FROM ping_hour h
                        JOIN ping_task t ON t.id = h.task_id
                        JOIN node n ON n.id = h.node_id
-                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0 AND (?3 IS NULL OR n.[group] = ?3)
+                      WHERE h.ts >= ?1 AND (h.answered + h.lost) > 0 AND (?2 IS NULL OR n.[group] = ?2)
                       GROUP BY h.task_id, h.node_id
                       HAVING SUM(h.lost) > 0
-                      ORDER BY 3 DESC
-                      LIMIT ?2",
+                      ORDER BY 3 DESC",
             )?;
-            let rows = stmt.query_map(params![since, limit, group], |r| {
+            let rows = stmt.query_map(params![since, group], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, i64>(3)?))
             })?;
-            // ⚠️ 不再 filter_map 吞行错误；先收成有所有权的 Vec，借用因此不跨作用域。
-            rows.collect::<Result<Vec<AtRiskRow>, _>>()?
+            let mut rows = rows.collect::<Result<Vec<AtRiskRow>, _>>()?;
+            Self::one_per_node(&mut rows);
+            rows.truncate(limit as usize);
+            rows
         };
         let down = {
             let mut stmt = conn.prepare_cached(
@@ -7181,6 +7197,46 @@ mod tests {
         // 离线榜：never（last_seen=0）不该出现
         assert_eq!(down.len(), 2, "从来未上报的不是离线，应排除");
         assert!(down.iter().all(|(name, _)| name != "never"), "实际 {:?}", down);
+    }
+
+    /// ⚠️ 同一台机器在两三条探测里都会出现（查询按「任务 × 节点」分组）。这一栏问的是
+    /// **哪台**该处理，所以每台只留一行 —— 但必须保留"把它拖下来的那条探测"的名字，
+    /// 否则读者会以为那台机器在所有探测上都慢。
+    #[test]
+    fn at_risk_names_each_node_once_with_its_worst_probe() {
+        let db = Db::open(":memory:").unwrap();
+        let now = Utc::now().timestamp();
+        let hour = (now / 3600) * 3600;
+        let node =
+            |name: &str| Node { name: name.into(), mem_total: 1000, disk_total: 1000, ..Default::default() };
+        let one = db.create_node(&node("one"), "one").unwrap();
+        let two = db.create_node(&node("two"), "two").unwrap();
+        for (id, name) in [(1_i64, "slow-probe"), (2, "fast-probe")] {
+            db.conn()
+                .execute(
+                    "INSERT INTO ping_task (id,name,target,interval,sort,kind) VALUES (?1,?2,'x',60,0,'icmp')",
+                    params![id, name],
+                )
+                .unwrap();
+        }
+        // one 在 slow-probe 上 300ms、在 fast-probe 上 20ms；two 只在 slow-probe 上 100ms 且丢包。
+        for (n, task, lat, lost) in [(one, 1, 300.0, 0), (one, 2, 20.0, 0), (two, 1, 100.0, 5)] {
+            db.conn()
+                .execute(
+                    "INSERT INTO ping_hour (node_id,task_id,ts,answered,lost,latency,lo,hi)
+                     VALUES (?1,?2,?3,100,?4,?5,0,999)",
+                    params![n, task, hour, lost, lat],
+                )
+                .unwrap();
+        }
+        let (latency, loss, _) = db.at_risk(7, 10, None).unwrap();
+        assert_eq!(latency.len(), 2, "每台一行：{latency:?}");
+        assert_eq!(latency.iter().filter(|r| r.1 == "one").count(), 1, "同一台只能出现一次：{latency:?}");
+        assert_eq!(latency[0].1, "one", "最慢的排第一：{latency:?}");
+        assert_eq!(latency[0].0, "slow-probe", "留下的应当是把它拖下来的那条探测");
+        assert_eq!(loss.len(), 1, "只有 two 丢过包：{loss:?}");
+        assert_eq!(loss[0].1, "two");
+        assert_eq!(loss[0].0, "slow-probe");
     }
 
     /// 分组筛选也要作用于「需要处理的节点」—— 否则切换分组时，KPI/事项跟着变、这三条榜不变，
