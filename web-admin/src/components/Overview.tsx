@@ -1266,9 +1266,13 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             <div className="rounded-lg border border-border bg-card">
             {/* ⚠️ 工具条**放进卡片里** ✗✓：筛选、排序、搜索都是"这张表"的事，而页面级那一行
                 已经装着「分组 / 视图 / 自动刷新」三组控件 —— 再塞进去就是四组挤一行（截图里
-                就是这么挤的）。分到表头之上，各管各的，也不再随表格横向滚动。 */}
+                就是这么挤的）。分到表头之上，各管各的，也不再随表格横向滚动。
+                ⚠️ 筛选**不用 `TRACK` 胶囊轨道** ✗✓：那与上面「分组 / 视图」长得一模一样，
+                一屏三条同款，读者分不清哪条管什么（维护者的原话："没有区分度"）。改用
+                **描边小胶囊**：常驻边框、选中时蓝底 —— 与轨道是两种控件。 */}
             <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
-              <div className={TRACK}>
+              <span className="text-xs text-muted-foreground">筛选</span>
+              <div className="flex flex-wrap items-center gap-1.5">
                 {([
                   ["all", "全部"],
                   ["risk", "有风险"],
@@ -1281,13 +1285,17 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     type="button"
                     onClick={() => setFilter(k)}
                     aria-pressed={filter === k}
-                    className={pill(filter === k)}
+                    className={`h-7 rounded-full border px-2.5 text-xs transition-colors ${
+                      filter === k
+                        ? "border-primary bg-primary/10 font-medium text-primary"
+                        : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                    }`}
                   >
                     {label}
                   </button>
                 ))}
               </div>
-              <span className="text-xs text-muted-foreground">
+              <span className="tnum text-xs text-muted-foreground">
                 {qualityRows.length} / {nodes.length} 台
               </span>
               <div className="ml-auto flex items-center gap-2">
