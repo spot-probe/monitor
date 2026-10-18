@@ -2456,7 +2456,26 @@ function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
 
 
 
-const cny = (v: number) => (v >= 10000 ? `¥${(v / 10000).toFixed(2)} 万` : `¥${v.toFixed(v < 100 ? 2 : 0)}`)
+/// 金额格式**一列只有一种样子**：整数不带小数（`¥88`）、非整数两位（`¥83.58`）、
+/// 过万才用「万」。原来是"小于 100 就两位"，于是同一列里 `¥88.00` 与 `¥128` 并排 ——
+/// 看起来像两套格式（截图里的价格表就是这样）。
+const cny = (v: number) => {
+  if (v >= 10000) return `¥${(v / 10000).toFixed(2)} 万`
+  return Number.isInteger(v)
+    ? `¥${v.toLocaleString("zh-CN")}`
+    : `¥${v.toFixed(2)}`
+}
+
+/// 计费周期的中文说法。库里存的是 `monthly` / `yearly` 这些键，直接摆在界面上是英文。
+const CYCLE_LABEL: Record<string, string> = {
+  monthly: "月付",
+  quarterly: "季付",
+  semiannual: "半年付",
+  yearly: "年付",
+  biennial: "两年付",
+  oneoff: "一次性",
+}
+const cycleLabel = (c: string) => CYCLE_LABEL[c] ?? c
 
 /** 一行成本。**两种缺失分得很清**：没填价格 → `none`；有价格但没汇率 → `norate`。 */
 type CostRow = { n: Node; monthly: number | null; why: "none" | "norate" | null }
@@ -2583,7 +2602,7 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
               {r.n.group ? <Badge variant="secondary" className="font-normal">{r.n.group}</Badge> : <span className="text-muted-foreground">—</span>}
             </TableCell>
             <TableCell className="py-2 font-mono text-xs text-muted-foreground">
-              {r.n.price > 0 ? `${r.n.price} ${r.n.currency} / ${r.n.billing_cycle}` : <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">未设置</Badge>}
+              {r.n.price > 0 ? `${r.n.price} ${r.n.currency} · ${cycleLabel(r.n.billing_cycle)}` : <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">未设置</Badge>}
             </TableCell>
             <TableCell className="py-2 text-right font-mono tabular-nums font-medium">
               {r.monthly === null ? <span className="text-muted-foreground">—</span> : cny(r.monthly)}
@@ -2684,6 +2703,13 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
         <CardContent className="p-0">
         <div className="overflow-hidden">
           <div className="flex items-end gap-1 px-3 pt-3">
+            {/* ⚠️ 这张图原来**没有 y 轴**：柱高只能互相比较，读者读不出"¥156 是多还是少"。
+                加两条刻度就够了（顶=峰值、底=0）—— 它只做相对比较，不需要五条网格线。
+                高度 = 120（柱区）+ 18（月份标签），所以 `pb-[18px]` 让"¥0"落在柱子的基线上。 */}
+            <div className="flex h-[138px] w-9 shrink-0 flex-col items-end justify-between pb-[18px] text-[10px] leading-none text-muted-foreground">
+              <span className="tnum">{cny(peak)}</span>
+              <span className="tnum">¥0</span>
+            </div>
             {months.map((m) => (
               <button
                 key={m.key}
