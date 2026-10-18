@@ -174,3 +174,17 @@
     scroll-behavior: auto !important;
   }
 }
+
+/*
+ * 粘连的首列：背景必须**不透明**。
+ *
+ * 原来悬停时用的是半透明色（`group-hover:bg-muted/50`）—— 横向滚动时，底下那一列的字会
+ * 从它下面**透出来**（预览里 IP 列直接穿过了名称列与 HK 徽标）。这里用现有 token 混出与
+ * 行悬停完全相同的颜色，既不引入新色，也不让粘连列在悬停时"不变色"。
+ */
+.sticky-col {
+  background-color: var(--color-card);
+}
+.group:hover .sticky-col {
+  background-color: color-mix(in oklab, var(--color-muted) 50%, var(--color-card));
+}

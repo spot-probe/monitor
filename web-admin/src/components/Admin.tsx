@@ -1715,7 +1715,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
             <TableRow>
               {/* ⚠️ 首列**固定在左边** ✗✓：窄屏上表格要横向滚动，滚到右边时若名称也滚走，
                   就不知道这一行是谁。表头同步固定，滚动时才不会错位。 */}
-              <TableHead className="sticky left-0 z-20 w-[17%] bg-card">名称</TableHead>
+              <TableHead className="sticky-col sticky left-0 z-20 w-[17%]">名称</TableHead>
               <TableHead className="w-[18%]">IP</TableHead>
               <TableHead className="w-[11%]">状态</TableHead>
               <TableHead className="w-[11%]">版本</TableHead>
@@ -1759,7 +1759,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 }
                 onDrop={(e) => { e.preventDefault(); drag.save(drag.order) }}
               >
-                <TableCell className="sticky left-0 z-10 bg-card transition-colors group-hover:bg-muted/50">
+                <TableCell className="sticky-col sticky left-0 z-10 transition-colors">
                   <div className="flex items-center gap-2">
                     <DragHandle
                       // A drop sends the order of every node, and a filtered list
