@@ -690,7 +690,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   }, [])
 
   // 筛选与排序：**替代**原来那个"只看有数据"的开关（它是这里面的一个特例 —— `nodata`）。
-  const [filter, setFilter] = useState<"all" | "risk" | "notor" | "bad" | "nodata">("all")
+  const [filter, setFilter] = useState<"all" | "hasdata" | "risk" | "notor" | "bad" | "nodata">("all")
   const [sortBy, setSortBy] = useState<"node" | "risk" | "bad" | "asn">("node")
   const [q, setQ] = useState("")
   // ⚠️ **不能去过滤 `nodes`** ✗ —— 资源与成本两个视图也在用它 ✓，
@@ -709,6 +709,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           return !n.tor_exit
         case "bad":
           return probeBadCount(n.probe) > 0
+        case "hasdata":
+          // ⚠️ 原来那个「只看有数据」**不能丢** ✗✓（维护者提的）：`nodata` 是它的反面
+          // （"找没查过的"），两者都有人要 —— 一个用来"只看能看的"，一个用来"找还没做的"。
+          return !!n.quality
         case "nodata":
           return !n.quality
         default:
@@ -1275,6 +1279,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               <div className="flex flex-wrap items-center gap-1.5">
                 {([
                   ["all", "全部"],
+                  ["hasdata", "有数据"],
                   ["risk", "有风险"],
                   ["notor", "非 Tor"],
                   ["bad", "实测异常"],
