@@ -329,7 +329,21 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+/// 一次投递的**唯一出口**：队列投递与「发送测试」都走它。
+///
+/// ⚠️ 结果记录写在这里，而不是写在队列循环里 ✗✓：第一版写在循环里，于是「发送测试」那条路
+/// （手点的、最需要看到失败的那条）**不会留下任何记录** —— 端到端一验就露了。
+/// 重试时会被覆盖，最后一次尝试的结果就是最终状态 ✓（成功即覆盖掉前面的失败 ✓）。
 async fn post(app: &App, channel: &Channel, note: &Note) -> Result<(), Failure> {
+    let outcome = post_once(app, channel, note).await;
+    match &outcome {
+        Ok(()) => remember_delivery(app, channel, true, ""),
+        Err(f) => remember_delivery(app, channel, false, &f.reason),
+    }
+    outcome
+}
+
+async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Failure> {
     let site = site_name(app);
     let request = match channel {
         // Plain text: under a parse mode Telegram rejects a message whose node
@@ -390,6 +404,14 @@ pub fn send(app: &App, mut note: Note) {
 /// At most once: an alert that exhausts its attempts is dropped, and the state
 /// that produced it (`down_since`, the traffic step, the digest date) already
 /// records it as sent, so it is not raised again.
+/// 记下这个渠道最近一次投递的结果。写库失败只记 debug 日志：**通知本身已经发出去了**，
+/// 不该因为"记不下来"把一轮投递搅乱。
+fn remember_delivery(app: &App, channel: &Channel, ok: bool, reason: &str) {
+    if let Err(e) = app.db.note_delivery(channel.name(), ok, reason) {
+        debug!("could not record {} delivery: {e:#}", channel.name());
+    }
+}
+
 pub async fn deliver(app: Shared, mut inbox: mpsc::Receiver<Note>) {
     while let Some(note) = inbox.recv().await {
         for channel in channels(&app) {

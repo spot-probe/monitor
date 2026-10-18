@@ -405,6 +405,11 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             };
             // 刻意同时打日志：面板上那是"某一刻的状态"，而日志留得住先后顺序。
             info!("node {node_id} upgrade report: ok={} {}", status.ok, status.reason);
+            // ⚠️ **落库** ✗✓：结论原先只挂在内存的会话上 —— 节点一重连、hub 一重启就没了，
+            // 而"回滚了"恰恰是最需要留痕的那件事。写不进去只记 debug，不能影响回报本身。
+            if let Err(e) = app.db.note_upgrade(node_id, status.ok, &status.version, &status.reason) {
+                debug!("could not record the upgrade result for node {node_id}: {e:#}");
+            }
             // 进度：成功 ⇒ 它马上会退出并被 systemd 拉起，面板该显示"等待重连"；
             // 失败 ⇒ 进度到此为止（原因由 `node.upgrade` 展示，不在进度里重复）。
             if status.ok {

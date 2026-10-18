@@ -22,7 +22,7 @@ import { RetryState } from "@/components/ui/retry-state"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type PingError, type PingTask, type Source } from "@/lib/api"
+import { addresses, api, behind, changes, configFields, configForm, configOverrides, configSections, configValues, fits, GIB, matchingGroups, provisioningSite, shortAddress, trafficCorrection, upload, type ConfigField, type Node, type NotifyState, type PingError, type PingTask, type Source } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { bytes, cycleFields, cycleOk, cyclePatch, FOREVER, money, monthUsage, uptime, type CycleUnit } from "@/lib/format"
 
@@ -892,8 +892,12 @@ function UpgradeStage({ node }: { node: Node }) {
 
 function UpgradeResult({ node }: { node: Node }) {
   const [open, setOpen] = useState(false)
-  const up = node.upgrade
+  // ⚠️ 先看**这次**下发（内存里的会话结论），没有再退回**落库的最近一次** ✗✓：
+  // 节点一重连、hub 一重启，会话结论就没了 —— 而"回滚了"恰恰是最该留下的那条。
+  const live = node.upgrade
+  const up = live ?? node.upgrade_last
   if (!up) return null
+  const stale = !live
   const bad = !up.ok
   // **成功只是一句回执**：半小时后就撤掉 —— 版本列本身已经说明了状态，而这行字只是
   // "你刚才那次操作成了"的一句话。**失败要留着**：那是一件需要你处理的事（重跑安装命令、
@@ -911,13 +915,21 @@ function UpgradeResult({ node }: { node: Node }) {
       >
         {bad ? <CircleAlert className="size-3.5 shrink-0" /> : <CircleCheck className="size-3.5 shrink-0" />}
         {/* 成功时说**结果**（升到哪个版本），不要说"失败" —— 摘要映射只对失败那一路有意义。 */}
-        {bad ? upgradeSummary(up.reason) : up.version ? `已升级到 ${up.version}` : "已生效"}
+        {bad
+          ? `${stale ? "上次升级失败：" : ""}${upgradeSummary(up.reason)}`
+          : up.version
+            ? `${stale ? "上次已升级到" : "已升级到"} ${up.version}`
+            : "已生效"}
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-lg" onOpenAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
-            <DialogTitle>{node.name} 的升级结果</DialogTitle>
-            <DialogDescription>{bad ? "这次下发没有执行完，原因如下。" : "这台机器已处理完这次下发。"}</DialogDescription>
+            <DialogTitle>{node.name} 的{stale ? "上次" : "这次"}升级结果</DialogTitle>
+            <DialogDescription>
+              {bad
+                ? `${stale ? "上一次" : "这次"}下发没有执行完，原因如下。`
+                : `这台机器已处理完${stale ? "上一次" : "这次"}下发。`}
+            </DialogDescription>
           </DialogHeader>
           <p className="text-sm break-all">{up.reason}</p>
           <p className="text-xs text-muted-foreground">
@@ -4019,7 +4031,44 @@ function TemplatePreview({ template, site, json = false }: { template: string; s
 
 // A channel's form, collapsed until needed. The summary carries whether the
 // channel is configured, so the closed card still answers the common question.
-function ChannelCard({ title, icon, configured, children }: { title: string; icon: React.ReactNode; configured: boolean; children: React.ReactNode }) {
+/// 投递失败原因的第一层翻译：原始错误（英文、带 errno）留在 tooltip 里，行内只给人话。
+/// 与 `upgradeSummary` 同一个想法 —— 一行红字若全是技术术语，读者会直接跳过它。
+function deliverySummary(reason: string): string {
+  if (/Connection refused/i.test(reason)) return "连不上这个地址（连接被拒绝）"
+  if (/dns error|failed to lookup|Name or service not known/i.test(reason))
+    return "域名解析失败"
+  if (/timed? out/i.test(reason)) return "超时没有响应"
+  if (/^401|Unauthorized/i.test(reason)) return "凭据被拒绝（401）"
+  if (/^403/.test(reason)) return "被拒绝（403）"
+  if (/^404/.test(reason)) return "地址不存在（404）"
+  if (/^429/.test(reason)) return "被限流（429）"
+  if (/^5\d\d/.test(reason)) return "对方服务器出错"
+  return reason
+}
+
+/// 「3 分钟前」/「2 小时前」/「刚刚」。只给投递那行用，所以留在文件里而不是 lib：
+/// 它的粒度是给人看的，不需要与别处的时间格式逐字一致。
+function ago(at: number): string {
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - at)
+  if (d < 60) return "刚刚"
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`
+  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`
+  return `${Math.floor(d / 86400)} 天前`
+}
+
+function ChannelCard({
+  title,
+  icon,
+  configured,
+  delivery,
+  children,
+}: {
+  title: string
+  icon: React.ReactNode
+  configured: boolean
+  delivery?: NotifyState
+  children: React.ReactNode
+}) {
   return (
     <Card className="p-5">
       <details className="group">
@@ -4037,6 +4086,22 @@ function ChannelCard({ title, icon, configured, children }: { title: string; ico
               {configured ? <CircleCheck className="size-3.5" /> : <CircleAlert className="size-3.5" />}
               {configured ? "已配置" : "未配置"}
             </span>
+            {/* ⚠️ **最近一次投递**：这才是"配了但它真的发得出去吗"的答案。失败不自动消失 ——
+                那是一件需要处理的事；成功则只留一句回执。 */}
+            {delivery && (
+              <span
+                className={`mt-0.5 flex items-baseline gap-1 text-xs ${delivery.ok ? "text-muted-foreground" : "text-danger-fg"}`}
+                title={delivery.reason}
+              >
+                {delivery.ok ? <CircleCheck className="size-3.5" /> : <CircleAlert className="size-3.5" />}
+                <span className="truncate">
+                  {delivery.ok
+                    ? "最近一次投递成功"
+                    : `最近一次投递失败：${deliverySummary(delivery.reason || "未知原因")}`}
+                </span>
+                <span className="shrink-0 opacity-70">· {ago(delivery.at)}</span>
+              </span>
+            )}
           </span>
           <span className="shrink-0 text-xs text-muted-foreground group-open:hidden">配置</span>
           <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
@@ -4119,6 +4184,15 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
   //（今天已经在别处栽过一次 ✓）。
   const [tab, setTab] = useState<"notify" | "ip">("notify")
   const [testing, setTesting] = useState(false)
+  // 各渠道**最近一次投递**的结果。⚠️ 它不是设置、也不该每 2 秒推：只有这一屏要，所以按需取一次。
+  // 有它之前，投递失败只写 journal —— token 过期、chat 写错在界面上完全没有痕迹。
+  const [delivery, setDelivery] = useState<Record<string, NotifyState>>({})
+  const loadDelivery = () =>
+    api<NotifyState[]>("/notify/state")
+      .then((rows) => setDelivery(Object.fromEntries(rows.map((r) => [r.channel, r]))))
+      // 取不到就不显示这一段：这里不是主信息，不值得为它弹一个错误。
+      .catch(() => {})
+  useEffect(() => { loadDelivery() }, [])
   if (!s) {
   	// 首次请求未回时不再是「什么都不画」：留一个与该页同形的骨架，
   	// 否则切过来先是空白，再突然长出内容 —— 这就是切换菜单的顿挫感。
@@ -4192,7 +4266,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         }
       >
 
-      <ChannelCard title="Telegram" icon={<Send className="size-4" />} configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}>
+      <ChannelCard title="Telegram" icon={<Send className="size-4" />} configured={!!s.notify_telegram_token_set && text("notify_telegram_chat") !== ""}
+        delivery={delivery.telegram}
+      >
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Bot Token" hint={secretHint("notify_telegram_token")}>
             <Input
@@ -4232,7 +4308,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
         </div>
       </ChannelCard>
 
-      <ChannelCard title="Webhook" icon={<Webhook className="size-4" />} configured={!!s.notify_webhook_url_set}>
+      <ChannelCard title="Webhook" icon={<Webhook className="size-4" />} configured={!!s.notify_webhook_url_set}
+        delivery={delivery.webhook}
+      >
         <Field label="URL" hint={secretHint("notify_webhook_url")}>
           <Input
             type="password"

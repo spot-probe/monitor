@@ -149,6 +149,16 @@ export type Node = {
    * 这一次下发走到哪一步。只在下发期间存在（hub 的秒级事实，不落库）；
    * 结束后由 `upgrade` 那条结论接手。
    */
+  /**
+   * 最近一次远程升级的**结论**（落库的那份，节点重连后仍在）。
+   * `null` = 从没升过 —— 不是失败。
+   */
+  upgrade_last?: {
+    at: number
+    ok: boolean
+    version: string
+    reason: string
+  } | null
   upgrade_progress?: {
     phase: "downloading" | "pushing" | "waiting_apply" | "waiting_reconnect"
     sent?: number
@@ -673,4 +683,12 @@ export function useNodes() {
   const refresh = useCallback(() => setReload((n) => n + 1), [])
 
   return { nodes, admin, agentLatest, error, refresh }
+}
+
+/** 一个通知渠道最近一次投递的结果（`/api/notify/state`）。 */
+export type NotifyState = {
+  channel: string
+  at: number
+  ok: boolean
+  reason: string
 }

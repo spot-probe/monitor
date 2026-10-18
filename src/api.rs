@@ -466,6 +466,18 @@ fn node_view(
         // 最近一次远程升级的结论（agent 回报的）。它挂在**会话**上，所以只在节点在线时有；
         // 这也正是它的语义：一次升级只可能发生在节点在线的时候。
         view["upgrade"] = json!(current.and_then(|a| a.upgrade.as_ref()));
+        // 最近一次远程升级的**结论**（落库的那份 ✓）：节点重连之后仍然查得到 —— 而"回滚了"
+        // 正是最需要留痕的那件事 ✓。`null` = **从没升过**（不是失败 ✗，与"不知道 ≠ 0%"同一规矩）。
+        view["upgrade_last"] = if node.upgrade_at > 0 {
+            json!({
+                "at": node.upgrade_at,
+                "ok": node.upgrade_ok,
+                "version": node.upgrade_version,
+                "reason": node.upgrade_reason,
+            })
+        } else {
+            serde_json::Value::Null
+        };
         view["token"] = json!(node.token);
         view["notify"] = json!(node.notify);
     }
@@ -2969,6 +2981,23 @@ pub async fn themes(_: Admin, State(app): State<Shared>) -> Response {
 ///
 /// `id` is the stored SHA-256 of the session token rather than the token itself:
 /// it identifies a row without being presentable as a cookie.
+/// 每个通知渠道最近一次投递的结果（管理端）。
+///
+/// ⚠️ **按需取，不进实时帧** ✗✓：只有「通用 → 通知」这一屏用它，而实时帧每 2 秒推给
+/// 每个管理端。失败原因里可能带着 webhook 地址，所以也只给管理端。
+pub async fn notify_state(_: Admin, State(app): State<Shared>) -> Response {
+    match app.db.deliveries() {
+        Ok(rows) => Json(json!(rows
+            .into_iter()
+            .map(|(channel, at, ok, reason)| {
+                json!({"channel": channel, "at": at, "ok": ok, "reason": reason})
+            })
+            .collect::<Vec<_>>()))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
 pub async fn sessions(_: Admin, State(app): State<Shared>, headers: HeaderMap) -> Response {
     let mine = current_session(&headers);
     match app.db.sessions() {

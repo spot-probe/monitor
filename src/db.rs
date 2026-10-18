@@ -173,7 +173,14 @@ CREATE TABLE IF NOT EXISTS node (
   -- 这两列存"**这台机器当前的结论**"（面板要的就是它 ✓）。
   -- `risk_ip` 与 `q_ip` **同一条规矩** ✓✓：换过出口后旧结论不作数 ✓（否则会显示过期结论 ✓）。
   risk          TEXT,
-  risk_ip       TEXT
+  risk_ip       TEXT,
+  -- 最近一次远程升级的**结论** ✓（成功/失败 ✓ 原因 ✓ 版本 ✓ 时间 ✓）。
+  -- ⚠️ 它原先**只在内存**（挂在会话上）✗：节点重连或 hub 重启就没了 —— 而"回滚了"恰恰是
+  -- 最需要留痕的那件事 ✓。`upgrade_at = 0` 表示**从没升过**（不是失败 ✗）。
+  upgrade_at      INTEGER NOT NULL DEFAULT 0,
+  upgrade_ok      INTEGER NOT NULL DEFAULT 0,
+  upgrade_version TEXT    NOT NULL DEFAULT '',
+  upgrade_reason  TEXT    NOT NULL DEFAULT ''
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -351,6 +358,16 @@ CREATE TABLE IF NOT EXISTS ping_last (
   at      INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+-- 每个通知渠道**最近一次投递**的结果 ✓。失败过去只写 journal ✗：token 过期、chat 写错、
+-- webhook 404 都不会在界面上有任何痕迹 —— "以为在监控，其实告警早就停了" ✓。
+-- 一行一个渠道（telegram / webhook），只留最近一次（要历史请去看 journal ✓）。
+CREATE TABLE IF NOT EXISTS notify_state (
+  channel TEXT    PRIMARY KEY,
+  at      INTEGER NOT NULL,
+  ok      INTEGER NOT NULL,
+  reason  TEXT    NOT NULL DEFAULT ''
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS session (
   token_hash TEXT    PRIMARY KEY,
   expires_at INTEGER NOT NULL,
@@ -375,7 +392,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 /// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
 /// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
@@ -598,6 +615,22 @@ fn migrate_to_26(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_to_27(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", "upgrade_at INTEGER NOT NULL DEFAULT 0")?;
+    add_column(conn, "node", "upgrade_ok INTEGER NOT NULL DEFAULT 0")?;
+    add_column(conn, "node", "upgrade_version TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "node", "upgrade_reason TEXT NOT NULL DEFAULT ''")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS notify_state (
+  channel TEXT    PRIMARY KEY,
+  at      INTEGER NOT NULL,
+  ok      INTEGER NOT NULL,
+  reason  TEXT    NOT NULL DEFAULT ''
+) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
 fn migrate_to_11(conn: &Connection) -> Result<()> {
     add_column(conn, "node", "country_ip TEXT NOT NULL DEFAULT ''")?;
     add_column(conn, "node", "country_prev_ip TEXT NOT NULL DEFAULT ''")?;
@@ -808,6 +841,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 26 {
         migrate_to_26(&tx)?;
     }
+    if from < 27 {
+        migrate_to_27(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -888,6 +924,19 @@ pub struct Node {
     /// 那次探测**什么时候**做的 ✓（Unix 秒 ✓，**由 hub 盖** ✓✓）。
     /// ⚠️ 与 `probe` 分开存 ✓：它是"新不新"的唯一依据 ✓，不该埋在 JSON 里让人各处解析 ✓。
     pub probe_at: Option<i64>,
+    /// 最近一次远程升级：时间戳（0 = 从没升过）、是否成功、版本、失败原因。
+    ///
+    /// ⚠️ `#[serde(default)]` **不是装饰** ✗✓：`Node` 会被**反序列化**（测试夹具、以及
+    /// `settings` 之外的路径），少了它，旧夹具会报 "missing field `upgrade_at`" —— 一次
+    /// 加列就把六条无关的 API 测试弄红，报错还指向别处。
+    #[serde(default)]
+    pub upgrade_at: i64,
+    #[serde(default)]
+    pub upgrade_ok: bool,
+    #[serde(default)]
+    pub upgrade_version: String,
+    #[serde(default)]
+    pub upgrade_reason: String,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -1692,6 +1741,55 @@ impl Db {
     /// Node id to the agent version it reported, for the one caller that judges whether
     /// a node can run a probe kind at all. `nodes()` would answer too and is much
     /// heavier; this is a single column.
+    /// 记下**最近一次远程升级**的结论。`upgrade_at = 0` 表示从没升过 —— 面板据此把
+    /// "没升过"与"升失败了"分开（与 `metrics: None` 那条同一规矩：不知道 ≠ 好）。
+    ///
+    /// ⚠️ 字段来自 agent（不被担保的机器），截断与"去控制字符"在调用方已经做过一次，
+    /// 这里再截一次长度：这条路径将来被别人复用时不至于把整段错误信息写进列里。
+    pub fn note_upgrade(&self, node_id: i64, ok: bool, version: &str, reason: &str) -> Result<()> {
+        let clip = |v: &str| v.chars().take(200).collect::<String>();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE node SET upgrade_at=?2, upgrade_ok=?3, upgrade_version=?4, upgrade_reason=?5
+              WHERE id=?1",
+            params![node_id, Utc::now().timestamp(), i32::from(ok), clip(version), clip(reason)],
+        )?;
+        Ok(())
+    }
+
+    /// 记下**最近一次通知投递**的结果，一行一个渠道（只留最近一次）。
+    ///
+    /// 有它之前，投递失败只写 journal：token 过期、chat 写错、webhook 404 在界面上都没有
+    /// 任何痕迹 —— 那是最危险的一类故障，"以为在监控，其实告警早就停了"。
+    pub fn note_delivery(&self, channel: &str, ok: bool, reason: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO notify_state (channel, at, ok, reason) VALUES (?1,?2,?3,?4)",
+            params![
+                channel,
+                Utc::now().timestamp(),
+                i32::from(ok),
+                reason.chars().take(300).collect::<String>()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 各渠道最近一次投递：`(渠道, 时间, 是否成功, 原因)`。没有记录的老库返回空表。
+    pub fn deliveries(&self) -> Result<Vec<(String, i64, bool, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT channel, at, ok, reason FROM notify_state ORDER BY channel")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn agent_versions(&self) -> Result<std::collections::HashMap<i64, String>> {
         let conn = self.conn();
         let mut stmt = conn.prepare("SELECT id, agent_version FROM node")?;
@@ -4222,6 +4320,10 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         // 空字符串与"没探测过"是两件事 ✓（前者会在视图里变成一个空的 probe 对象 ✓✗）。
         probe: r.get::<_, Option<String>>("probe").ok().flatten(),
         probe_at: r.get::<_, Option<i64>>("probe_at").ok().flatten(),
+        upgrade_at: r.get::<_, Option<i64>>("upgrade_at").ok().flatten().unwrap_or(0),
+        upgrade_ok: r.get::<_, Option<i64>>("upgrade_ok").ok().flatten().unwrap_or(0) != 0,
+        upgrade_version: r.get::<_, Option<String>>("upgrade_version").ok().flatten().unwrap_or_default(),
+        upgrade_reason: r.get::<_, Option<String>>("upgrade_reason").ok().flatten().unwrap_or_default(),
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,
@@ -7202,6 +7304,46 @@ mod tests {
     /// ⚠️ 同一台机器在两三条探测里都会出现（查询按「任务 × 节点」分组）。这一栏问的是
     /// **哪台**该处理，所以每台只留一行 —— 但必须保留"把它拖下来的那条探测"的名字，
     /// 否则读者会以为那台机器在所有探测上都慢。
+    /// 升级结论与通知投递结果都**落库** ✓ —— 它们原先一个只在内存、一个只在 journal：
+    /// 节点重连或 hub 重启后，"回滚了"与"告警发不出去"都会凭空消失。
+    #[test]
+    fn upgrade_results_and_delivery_states_survive() {
+        let db = Db::open(":memory:").unwrap();
+        // 新库就是最新版：`upgrade_at = 0` 表示"从没升过"，不是失败。
+        let stamped: i64 = db.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(stamped, SCHEMA_VERSION);
+        let id = db.create_node(&Node { name: "one".into(), ..Default::default() }, "one").unwrap();
+        let before = db.nodes().unwrap();
+        assert_eq!(before[0].upgrade_at, 0, "没升过的节点不该像失败");
+
+        db.note_upgrade(id, false, "1.1.17", "校验签名失败").unwrap();
+        let after = db.nodes().unwrap();
+        assert!(after[0].upgrade_at > 0, "升过之后必须留下时间");
+        assert!(!after[0].upgrade_ok);
+        assert_eq!(after[0].upgrade_version, "1.1.17");
+        assert_eq!(after[0].upgrade_reason, "校验签名失败");
+
+        // 成功那一次会覆盖上一次的失败（只留**最近**一次）。
+        db.note_upgrade(id, true, "1.1.17", "").unwrap();
+        let done = db.nodes().unwrap();
+        assert!(done[0].upgrade_ok);
+        assert_eq!(done[0].upgrade_reason, "");
+
+        // 投递：一次失败、一次成功，读回来只有后者（一行一个渠道）。
+        db.note_delivery("telegram", false, "401 Unauthorized").unwrap();
+        db.note_delivery("webhook", true, "").unwrap();
+        let rows = db.deliveries().unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let tg = rows.iter().find(|r| r.0 == "telegram").unwrap();
+        assert!(!tg.2);
+        assert_eq!(tg.3, "401 Unauthorized");
+        let wh = rows.iter().find(|r| r.0 == "webhook").unwrap();
+        assert!(wh.2);
+        // 再失败一次：仍然是两行，而不是三行。
+        db.note_delivery("telegram", false, "403 Forbidden").unwrap();
+        assert_eq!(db.deliveries().unwrap().len(), 2);
+    }
+
     #[test]
     fn at_risk_names_each_node_once_with_its_worst_probe() {
         let db = Db::open(":memory:").unwrap();
