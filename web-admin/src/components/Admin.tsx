@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook } from "lucide-react"
+import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook, Cpu
+} from "lucide-react"
 import { Gauge, Loader2, Timer } from "lucide-react"
 import { ExternalLink } from "lucide-react"
 import { LayoutDashboard } from "lucide-react"
@@ -1048,7 +1049,15 @@ function uninstallCommand(site: string) {
   return `curl -fsSL ${site}/install.sh | sh -s -- --uninstall`
 }
 
-export type Versions = { hub: string; hub_latest: string; agent_latest: string; notice: boolean }
+export type Versions = {
+  hub: string
+  hub_latest: string
+  agent_latest: string
+  notice: boolean
+  /** 上一次**真的去查** GitHub 的时间（0 = 还没查过）。用来把"已是最新"变成可验证的说法。 */
+  hub_checked_at: number
+  agent_checked_at: number
+}
 
 /**
  * What is running and what is published. Read once per panel load: the hub holds
@@ -5216,18 +5225,6 @@ const releaseUrl = (repo: string, version: string) => `https://github.com/spot-p
 const BATCH_DOCS = "https://spot-probe-docs.hualala.workers.dev/install/batch"
 
 /** `v1.2.0 → v1.3.0` when something is published, the running version alone otherwise. */
-function VersionPair({ current, latest }: { current: string; latest: string }) {
-  if (!behind(current, latest)) {
-    return <span className="text-xs text-muted-foreground">{latest ? `已是最新 v${current}` : `当前 v${current}`}</span>
-  }
-  return (
-    <span className="text-xs text-muted-foreground">
-      v{current} <span className="px-0.5">→</span>
-      <span className="ml-0.5 font-medium text-foreground">v{latest}</span>
-    </span>
-  )
-}
-
 /** Outdated nodes grouped by the version they run, oldest first. */
 function byVersion(nodes: Node[]): [string, Node[]][] {
   const groups = new Map<string, Node[]>()
@@ -5247,6 +5244,92 @@ function byVersion(nodes: Node[]): [string, Node[]][] {
  * The hub card names the release alone -- how to take it depends on how the hub
  * was installed, script or container, which the hub cannot tell.
  */
+/// 一张"版本"卡的表头：左边名字 + 副标题 + 状态，右边动作。**内容限宽**（`max-w-3xl`）——
+/// 整卡 1152px 时，名字与按钮之间原本隔着 836px，视线要横跨大半屏才把两件事对上。
+///
+/// 状态用**图标 + 语义色**，不是一档灰字：三种状态（最新 / 有新版 / 查不到）含义不同，
+/// 该不该动手应当一眼能看出来。
+function UpdateRow({
+  icon,
+  name,
+  technical,
+  subtitle,
+  current,
+  latest,
+  statusText,
+  statusTone,
+  checkedAt,
+  checking,
+  disabled,
+  onCheck,
+  checkTitle,
+  releaseHref,
+}: {
+  icon: React.ReactNode
+  name: string
+  technical: string
+  subtitle: string
+  current?: string
+  latest: string
+  statusText?: string
+  statusTone?: "ok" | "behind" | "unknown"
+  checkedAt: number
+  checking: boolean
+  disabled: boolean
+  onCheck: () => void
+  checkTitle: string
+  releaseHref: string
+}) {
+  const behindNow = current !== undefined ? behind(current, latest) : false
+  const tone = statusTone ?? (!latest ? "unknown" : behindNow ? "behind" : "ok")
+  const toneClass =
+    tone === "ok" ? "text-ok-fg" : tone === "behind" ? "text-warn-fg" : "text-muted-foreground"
+  const Icon = tone === "ok" ? CircleCheck : tone === "behind" ? ArrowUpCircle : CircleAlert
+  const text =
+    statusText ??
+    (tone === "unknown"
+      ? "查不到最新版本"
+      : tone === "behind"
+        ? `有新版本 v${latest}`
+        : `已是最新 · v${current}`)
+  return (
+    <div className="flex max-w-3xl flex-wrap items-start justify-between gap-x-6 gap-y-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-tag text-tag-foreground">
+          {icon}
+        </span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <h3 className="text-sm font-medium">{name}</h3>
+            <span className="text-xs text-muted-foreground">{technical}</span>
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
+          <p className={`mt-1.5 flex items-center gap-1.5 text-xs ${toneClass}`}>
+            <Icon className="size-3.5 shrink-0" />
+            <span>{text}</span>
+            {/* "已是最新"不带时间就是一句无法验证的话：一个三天没查过的 hub 也会这么说。 */}
+            {checkedAt > 0 && <span className="text-muted-foreground">· {ago(checkedAt)}检查</span>}
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button size="sm" variant="outline" className="h-7 text-xs" disabled={disabled} title={checkTitle} onClick={onCheck}>
+          <RefreshCw className={checking ? "animate-spin" : ""} />
+          {checking ? "检查中…" : "立即检查"}
+        </Button>
+        {releaseHref && (
+          <Button size="sm" variant="link" asChild>
+            <a href={releaseHref} target="_blank" rel="noreferrer">
+              发布说明<ExternalLink />
+              <span className="sr-only">（在新标签页打开）</span>
+            </a>
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Update({ versions, reload, nodes, site, canProvision, provisionNote, agentLatest }: {
   versions: Versions | null
   reload: () => void
@@ -5304,86 +5387,76 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
   }
 
   return (
-    <div className="space-y-4">
+      <div className="space-y-4">
       {unreachable && (
         <Card className="p-5">
-          <p className="text-sm text-muted-foreground">
+          <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
             查不到最新版本：这台 hub 连不上 api.github.com。面板里配的 GitHub 代理只用于下载，不作用于这一项。
           </p>
         </Card>
       )}
 
-      <Card className="gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-medium">hub</h3>
-          <div className="flex items-center gap-3">
-            {/* 放在 hub 这张卡上：它刷新的是**两条**检查（hub 与 agent 的缓存一起清）✓ */}
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              disabled={checking !== null}
-              title="立刻去 GitHub 读一次 hub 的最新版本，不等缓存过期（效果与重启 hub 相同）"
-              onClick={() => void checkNow("hub")}
-            >
-              <RefreshCw className={checking === "hub" ? "animate-spin" : ""} />
-              {checking === "hub" ? "检查中…" : "立即检查"}
-            </Button>
-            <VersionPair current={versions.hub} latest={versions.hub_latest} />
-            {behind(versions.hub, versions.hub_latest) && (
-              <Button size="sm" variant="link" asChild>
-                <a href={releaseUrl("monitor", versions.hub_latest)} target="_blank" rel="noreferrer">
-                  发布说明<ExternalLink />
-                  <span className="sr-only">（在新标签页打开）</span>
-                </a>
-              </Button>
-            )}
-          </div>
-        </div>
+      <Card className="p-5">
+        <UpdateRow
+          icon={<Server className="size-4" />}
+          name="控制端"
+          technical="hub"
+          subtitle="这个面板与 API 本身"
+          current={versions.hub}
+          latest={versions.hub_latest}
+          checkedAt={versions.hub_checked_at}
+          checking={checking === "hub"}
+          disabled={checking !== null}
+          onCheck={() => void checkNow("hub")}
+          checkTitle="立刻去 GitHub 读一次 hub 的最新版本，不等缓存过期（效果与重启 hub 相同）"
+          releaseHref={behind(versions.hub, versions.hub_latest) ? releaseUrl("monitor", versions.hub_latest) : ""}
+        />
       </Card>
 
-      <Card className="gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-medium">agent</h3>
-          <div className="flex items-center gap-3">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs"
-              disabled={checking !== null}
-              title="立刻去 GitHub 读一次 agent 的最新版本，不等缓存过期（效果与重启 hub 相同）"
-              onClick={() => void checkNow("agent")}
-            >
-              <RefreshCw className={checking === "agent" ? "animate-spin" : ""} />
-              {checking === "agent" ? "检查中…" : "立即检查"}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              {agentLatest
-                ? outdated.length
-                  ? <>最新 v{agentLatest} · <span className="font-medium text-foreground">{outdated.length} 台待升级</span></>
-                  : `全部已是最新 v${agentLatest}`
-                : "查不到版本"}
-            </span>
-          </div>
-        </div>
+      <Card className="p-5">
+        {/* agent 的"当前版本"不是一句话能说的：各台机器跑的可能不是一个版本。所以这一行
+            只说**最新是多少、有几台落后**，版本分布留给节点页与下面的折叠列表。 */}
+        <UpdateRow
+          icon={<Cpu className="size-4" />}
+          name="节点端"
+          technical="agent"
+          subtitle="装在每台被监控机器上的那个程序"
+          latest={agentLatest ?? ""}
+          statusText={
+            agentLatest
+              ? outdated.length
+                ? `${outdated.length} 台待升级 · 最新 v${agentLatest}`
+                : `全部已是最新 · v${agentLatest}`
+              : "查不到最新版本"
+          }
+          statusTone={!agentLatest ? "unknown" : outdated.length ? "behind" : "ok"}
+          checkedAt={versions.agent_checked_at}
+          checking={checking === "agent"}
+          disabled={checking !== null}
+          onCheck={() => void checkNow("agent")}
+          checkTitle="立刻去 GitHub 读一次 agent 的最新版本，不等缓存过期（效果与重启 hub 相同）"
+          releaseHref={agentLatest ? releaseUrl("agent", agentLatest) : ""}
+        />
         {needsAgents && (
-          <>
+          <div className="mt-4 space-y-3 border-t pt-4">
             {/* The order is not a preference, it is a failure mode we hit for real: an
                 agent older than a probe kind does not refuse the task, it runs it as a
                 TCP handshake, which reports nothing and explains nothing (a flat 100%
                 loss while the target answered in 8 ms). Upgrading the hub first does not
                 help -- the agent is what has to understand the new task. */}
-            <p className="rounded-lg border border-warn/30 bg-warn/5 px-3 py-2.5 text-xs leading-relaxed">
+            <p className="max-w-3xl rounded-lg border border-warn/30 bg-warn/5 px-3 py-2.5 text-xs leading-relaxed">
               <span className="font-medium">需先升 agent，再升 hub。</span>
               旧版本 agent 遇到陌生探测方式时，不会报错，而由 TCP 去兜底 ——
               读不到数据，且不报错。
             </p>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              以 root 在每台机器上执行一次。命令不含凭证、沿用机器上已有的设置，不会新建节点，也不会消耗注册窗口。
-            </p>
             {upgrade ? (
               <>
-                <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed select-all">
+                {/* ⚠️ 这段说明只在**命令真的渲染出来**时出现 ✗✓：拒绝状态下原来的两句
+                    自相矛盾 —— 先说"在每台机器上执行一次"，再说"这里生成不了命令"。 */}
+                <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">
+                  以 root 在每台机器上执行一次。命令不含凭证、沿用机器上已有的设置，不会新建节点，也不会消耗注册窗口。
+                </p>
+                <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted p-3 text-xs">
                   {upgrade}
                 </pre>
                 <div className="flex flex-wrap gap-2">
@@ -5408,7 +5481,7 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
             ) : (
               // Why the commands are not there: the hub or this browser refused,
               // and the two are fixed by different people.
-              <p className="text-xs leading-relaxed text-muted-foreground">
+              <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">
                 {provisionNote || "请通过 HTTPS 域名访问面板后生成升级命令。"}
               </p>
             )}
@@ -5416,7 +5489,7 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
                 once open, so any number of nodes stays one line on the page. */}
             {outdated.length > 0 && (
               <details className="group border-t pt-3">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-md text-xs text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 [&::-webkit-details-marker]:hidden">
+                <summary className="flex cursor-pointer list-none items-center justify-between text-xs text-muted-foreground">
                   <span className="flex items-center gap-1.5">
                     <ChevronRight className="size-4 transition-transform group-open:rotate-90" />
                     待升级的节点
@@ -5444,14 +5517,14 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
                 </div>
               </details>
             )}
-          </>
+          </div>
         )}
       </Card>
 
-      <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
-        <span>
-          <span className="block font-medium">更新提醒</span>
-          <span className="mt-0.5 block text-xs text-muted-foreground">
+      <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border p-4">
+        <span className="max-w-3xl">
+          <span className="block text-sm font-medium">更新提醒</span>
+          <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
             有新版本时在导航的「更新」旁显示小圆点。关闭只是不再显示圆点，这一页照常检查
           </span>
         </span>

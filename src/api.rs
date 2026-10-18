@@ -2353,6 +2353,11 @@ async fn versions_json(app: &App) -> Value {
         // github.com is a supported deployment, not a fault to report.
         "hub_latest": hub_latest(app).await.unwrap_or_default(),
         "agent_latest": crate::agent_release::latest_now(app).await.unwrap_or_default(),
+        // 这两次查询各自缓存，面板上"已是最新"若不带时间就无法验证新鲜度 ——
+        // 不新鲜比"没有新版本"更容易骗人（一个三天没查的 hub 也说自己是最新的）。
+        // `0` = 还没查过（面板据此不显示时间，而不是显示"1970 年"）。
+        "hub_checked_at": app.hub_release.lock().unwrap_or_else(|e| e.into_inner()).read_at,
+        "agent_checked_at": crate::agent_release::state(app).checked_at,
         // Whether the navigation marks an update. It governs the mark alone: the
         // lookup runs either way, so the update page still answers when opened.
         "notice": app.db.get("update_notice").as_deref() != Some("off"),

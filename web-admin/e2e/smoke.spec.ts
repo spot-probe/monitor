@@ -41,15 +41,20 @@ test("设置页：三个输入框的宽度按内容分档（320 / 160 / 672）",
   }
 })
 
-test("节点页：没有落后节点时不出现「待升级」按钮", async ({ page }) => {
-  // ⚠️ **这条依赖环境**：CI 用全新库（种子那三台没有 agent_version，空串是"不予评判"，
-  // 不是 0.0.0），所以页面上没有待升级节点。而**本地预览**里那 100 台 bench 节点的
-  // agent_version 是 1.1.6、最新是 1.1.15 —— 按钮会合法地出现，于是在预览上跑会红。
+test("节点页：落后节点与「待升级」按钮同进同退", async ({ page }) => {
+  // ⚠️ 原来断言的是"**永远不**出现"，而它的对象是整页、整页取决于库里有什么：
+  // CI 是全新库（种子节点没有 agent_version，"不予评判"），本地预览里却可能真有落后节点
+  // —— 于是这条会在预览上**合法地**红，此前只能在注释里认了。
   //
-  // 这不是 flaky，是"断言的对象是整页、而整页的内容取决于库里有什么"。要让它与数据无关，
-  // 得把断言收到种子行上；但按钮是页面级的（头部筛选），不在行内。所以保留原样并把前提写清。
+  // 现在读一次 `/api/nodes` 拿事实，两种数据下都对得上：有落后节点就必须有按钮，
+  // 没有就必须没有。它测的还是同一件事（按钮别乱出现），只是不再依赖环境。
+  const res = await page.request.get("/api/nodes")
+  const { nodes } = (await res.json()) as { nodes: { agent_old?: boolean }[] }
+  const behind = nodes.some((n) => n.agent_old)
   await page.goto("/admin/nodes")
-  await expect(page.getByRole("button", { name: /待升级/ })).toHaveCount(0)
+  const button = page.getByRole("button", { name: /待升级/ })
+  if (behind) await expect(button).toBeVisible()
+  else await expect(button).toHaveCount(0)
 })
 
 test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
