@@ -2625,7 +2625,7 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
     // 整块仍占满一整行（它落在页面末尾那个两列网格里）。
     <div className="space-y-4 lg:col-span-2">
       <Card>
-      <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
+      <CardHeader className="gap-0 pt-0.5 pb-2!">
         <CardTitle className="text-sm">成本概览</CardTitle>
         <CardAction>
           <span className="text-xs text-muted-foreground">
@@ -2636,7 +2636,7 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
           </span>
         </CardAction>
       </CardHeader>
-      <CardContent className="space-y-5 pt-4">
+      <CardContent className="space-y-5">
         {/* ① 三个指标各占一个浅色嵌板。第三格是"待补全"，用 Badge 标出来而不是让汉字挂在数字下面。 */}
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
@@ -2691,8 +2691,8 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
 
         </CardContent>
       </Card>
-      <Card>
-        <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
+      <Card className="gap-3">
+        <CardHeader className="gap-0 pt-0.5 pb-2!">
           <CardTitle className="text-sm">
             未来 12 个月摊平预测{" "}
             <span className="text-xs font-normal text-muted-foreground">
@@ -2706,7 +2706,13 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
             {/* ⚠️ 这张图原来**没有 y 轴**：柱高只能互相比较，读者读不出"¥156 是多还是少"。
                 加两条刻度就够了（顶=峰值、底=0）—— 它只做相对比较，不需要五条网格线。
                 高度 = 120（柱区）+ 18（月份标签），所以 `pb-[18px]` 让"¥0"落在柱子的基线上。 */}
-            <div className="flex h-[138px] w-9 shrink-0 flex-col items-end justify-between pb-[18px] text-[10px] leading-none text-muted-foreground">
+            {/* ⚠️ **一条真正的纵轴**（竖线 + 两个刻度），而不是两个裸数字 ✗✓：维护者说
+                它们"像两个冒出来的、没处理好的数字"。数字挂在竖线的刻度上，才读得出"这是轴"。
+                竖线只画柱区高度（120），不延伸到月份标签。 */}
+            <div className="relative flex h-[138px] w-12 shrink-0 flex-col items-end justify-between pb-[18px] pr-3 text-[10px] leading-none text-muted-foreground">
+              <span aria-hidden className="absolute top-0 right-0 h-[120px] w-px bg-border" />
+              <span aria-hidden className="absolute top-0 right-0 h-px w-1.5 bg-border" />
+              <span aria-hidden className="absolute right-0 bottom-[18px] h-px w-1.5 bg-border" />
               <span className="tnum">{cny(peak)}</span>
               <span className="tnum">¥0</span>
             </div>
@@ -2755,11 +2761,11 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
 
       </CardContent>
       </Card>
-      <Card>
-        <CardHeader className="gap-0 border-b border-border/60 pt-0.5 pb-2!">
+      <Card className="gap-3">
+        <CardHeader className="gap-0 pt-0.5 pb-2!">
           <CardTitle className="text-sm">服务器成本总览</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3 pt-4">
+        <CardContent className="space-y-3">
         {/* ③ 工具条：等高胶囊 + 带放大镜的搜索框。 */}
         <div className="flex flex-wrap items-center gap-2">
           {/* 分段控件**复用本页已有的 `TRACK` / `pill`**：过滤条与页面上其它分段控件同一套语汇，
