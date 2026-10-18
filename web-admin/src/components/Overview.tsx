@@ -102,6 +102,9 @@ const CHART_PAD = 18
 /// 左侧刻度槽。**必须有**：刻度原来画在 x=0，而第一根柱也从 x≈0 起 —— 于是"2.55 TB"
 /// 被柱子压住（实测刻度 289–327、首柱 310 起）。留一条 46 的槽后，刻度与图各占各的。
 const CHART_GUT = 46
+/// 右侧也要一条槽：累计线回来了 ⇒ 右轴刻度也在。刻度画在 `x=CHART_W` 时正好是**最后一根柱**
+/// 的位置，被柱子压住（截图里那半个 "1.6 TB" 就是它）。
+const CHART_RGUT = 54
 
 /// 右上角的状态徽章。卡片外框保持统一，状态只在这里和主数字上出现。
 /// 颜色一律走 token（`ok-fg` / `warn-fg` / `danger-fg`），不写死调色板 —— 暗色主题才成立。
@@ -222,7 +225,7 @@ function ChartTicks({ left, right, format }: { left: number; right?: number; for
     <>
       {[0, 0.5, 1].map((t) => (
         <g key={t}>
-          <line x1={CHART_GUT} y1={y(t)} x2={CHART_W} y2={y(t)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
+          <line x1={CHART_GUT} y1={y(t)} x2={CHART_W - CHART_RGUT} y2={y(t)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
           <text x={0} y={y(t) - 2} fontSize="9" className="fill-muted-foreground">{format(left * t)}</text>
           {right !== undefined && (
             <text x={CHART_W} y={y(t) - 2} fontSize="9" textAnchor="end" className="fill-warn-fg">{format(right * t)}</text>
@@ -256,7 +259,12 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 /// （[`Cumulative`]），柱只需要一根轴；逐日累计值仍在 tooltip 里。
 function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const top = chartTop("traffic", rows)
-  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
+  // 累计线**回到图里**（维护者的取舍：p2 那种叠法更紧凑）。当初我把它拆出去的理由是
+  // "双轴图读不清这条线对哪根轴" —— 那个问题靠**颜色**解决：右轴刻度与线同为橙色，
+  // 轴顶写「累计」；左轴是黑色刻度。两根轴各有各的颜色，就不会认错。
+  const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
+  const cumTop = Math.max(1, ...cum)
+  const bw = (CHART_W - CHART_GUT - CHART_RGUT) / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const bottom = CHART_H - CHART_PAD
@@ -265,7 +273,7 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
-      <ChartTicks left={top} format={bytes} />
+      <ChartTicks left={top} right={cumTop} format={bytes} />
       {rows.map((r, i) => {
         const x = CHART_GUT + i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
@@ -279,6 +287,15 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
           </g>
         )
       })}
+      {/* 累计线：叠在柱上，**对右轴**（橙色刻度 + 橙色线，颜色就是"它对哪根轴"的答案）。 */}
+      {!hidden?.has("累计") && (
+        <polyline
+          fill="none"
+          className="stroke-warn-fg"
+          strokeWidth="1.5"
+          points={cum.map((v, i) => `${CHART_GUT + i * bw + bw / 2},${yOf(v, cumTop)}`).join(" ")}
+        />
+      )}
       {/* 「高峰」徽标**去掉了** ✗✓：它和上面那张摘要卡「最高流量日 2.55 TB（9/19）」
           说的是同一件事，而位置正好压住顶部的 y 刻度（实测刻度 289–327、徽标 314–334）。
           一件事说两遍，还把刻度盖住了 —— 删掉徽标，两条问题一起消失。 */}
@@ -293,31 +310,6 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
   )
 }
 
-/// 累计：与柱**共用 x 位置**的一条窄带，单独一图、不共用 y 轴。
-///
-/// `cum` 与 tooltip 里那串数是同一套算法（逐日累加），所以图上看到的形状与悬停读到的数字一致。
-function Cumulative({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
-  if (hidden?.has("累计") || rows.length === 0) return null
-  const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
-  const top = Math.max(1, ...cum)
-  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
-  const h = 42
-  // 底部留 6px 给基线：一条**没有上下界的折线**看起来像飘在空白里（第一版就是），
-  // 加一条基线之后它才读成"这一条是累计"。
-  const base = h - 6
-  const y = (v: number) => base - 2 - (v / top) * (h - 20)
-  return (
-    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="mt-1 w-full" role="img"
-      aria-label="累计流量：区间内逐日累加">
-      <line x1={CHART_GUT} y1={base} x2={CHART_W} y2={base} className="stroke-border" strokeWidth="1" />
-      <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
-        points={cum.map((v, i) => `${CHART_GUT + i * bw + bw / 2},${y(v)}`).join(" ")} />
-      <text x={0} y={9} fontSize="9" className="fill-muted-foreground">累计</text>
-      <text x={CHART_W} y={9} fontSize="9" textAnchor="end" className="fill-warn-fg">{bytes(top)}</text>
-    </svg>
-  )
-}
-
 /// 带宽：**入站与出站两条日均速率线**（照维护者给的原型）。
 ///
 /// 两条线都是**同一个量纲**（字节/秒）：各自都是「当天总字节 ÷ **有数据覆盖的秒数**」。
@@ -328,7 +320,7 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
   const top = chartTop("bandwidth", rows)
-  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
+  const bw = (CHART_W - CHART_GUT - CHART_RGUT) / Math.max(1, rows.length)
   const yOf = (v: number) => chartY(v, top)
   const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${CHART_GUT + i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
@@ -595,7 +587,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             {tab === "traffic" ? (
               <>
                 <TrafficChart rows={rows} hidden={hidden} />
-                <Cumulative rows={rows} hidden={hidden} />
+
               </>
             ) : tab === "bandwidth" ? (
               <BandwidthChart rows={rows} hidden={hidden} />
@@ -1870,13 +1862,21 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <>
                   <span
                     className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
-                      day === todayKey ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40" : "text-muted-foreground"
+                      day === todayKey
+                        ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40"
+                        : list.length > 0
+                          ? // 有到期的那天也用主色：与它下面的蓝色徽章连成一体，扫一眼就知道"这天有事"。
+                            "font-medium text-primary" : "text-muted-foreground"
                     }`}
                   >
                     {Number(day.slice(8))}
                   </span>
                   {list.length > 0 && (
-                    <span className={`rounded px-1 text-[10px] leading-tight ${isPeak ? "bg-warn-fg/15 text-warn-fg" : "bg-muted text-muted-foreground"}`}>
+                    <span
+                      className={`rounded px-1 text-[10px] leading-tight ${
+                        isPeak ? "bg-primary font-medium text-primary-foreground" : "bg-primary/10 text-primary"
+                      }`}
+                    >
                       {list.length} 台
                     </span>
                   )}
