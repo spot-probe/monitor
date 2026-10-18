@@ -1,0 +1,11 @@
+# 钉住工具链：`cargo fmt --all --check` 的换行意见**随 rustfmt 版本变**。
+#
+# 2026-09 就撞过：本机先过、CI 却红，两边只是 rustfmt 版本不同。CI 的两个 workflow 也
+# 钉在同一个版本（`dtolnay/rust-toolchain@1.98.1`）—— 改这里时**三处一起改**。
+#
+# ⚠️ 发布用的 cross 容器**不跟随**这个文件（容器里的工具链由镜像决定）：`Cross.toml` 把
+# `RUSTUP_TOOLCHAIN` 透传进去，release.yml 里置为 `stable`。否则每次发布都要在容器里再
+# 装一遍同一个 Rust。
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

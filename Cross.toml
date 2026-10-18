@@ -1,0 +1,7 @@
+# 发布构建跑在 cross 的容器里，容器自带工具链。仓库根上的 `rust-toolchain.toml` 会盖过它
+# （rustup 见到就切成钉住的版本，等于每次发布在容器里再装一遍 Rust）——所以把
+# `RUSTUP_TOOLCHAIN` 放进传递列表，由 release.yml 置为 `stable`。
+#
+# 分工：**检查**（fmt / clippy / test）用钉住的 1.98.1；**出包**用镜像自带的 stable。
+[build.env]
+passthrough = ["RUSTUP_TOOLCHAIN"]

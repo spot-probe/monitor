@@ -37,7 +37,8 @@ jobs:
       # hub 内嵌面板：dist/ 必须在 cargo 之前就存在，否则编译出来的二进制服务的是旧面板。
       - run: npm ci && npm run build
         working-directory: web-admin
-      - uses: dtolnay/rust-toolchain@stable
+      # 检查用钉住的版本（与 rust-toolchain.toml 一致）；出包那一步另说。
+      - uses: dtolnay/rust-toolchain@1.98.1
       # ⚠️ 没有缓存时 237 个 crate 每次从零编。
       - uses: Swatinem/rust-cache@v2
       # ⚠️ **shellcheck 也要在这里跑** ✗✗ —— 它此前只在 ci.yml 里。于是 1.12.10 的
@@ -102,6 +103,10 @@ jobs:
 
       - run: cargo install --locked cross
       - run: cross build --release --locked --target ${{ matrix.target }}
+        env:
+          # 容器里的工具链由镜像决定，不跟随仓库的 rust-toolchain.toml（见 Cross.toml 的
+          # passthrough）。检查那一步用的是钉住的 1.98.1。
+          RUSTUP_TOOLCHAIN: stable
 
       - run: cp "target/${{ matrix.target }}/release/monitor-hub" "monitor-hub-${{ matrix.target }}"
 

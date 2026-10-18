@@ -10,3 +10,6 @@
 /docs/
 /CLAUDE.md
 /.claude/
+
+# e2e 的登录态：每次由 auth.setup.ts 生成，内容是会话 cookie（等同于密码）。
+e2e/.auth/

@@ -1,0 +1,31 @@
+# 依赖更新：cargo（hub）与 npm（内嵌面板）。
+#
+# 为什么按周、且分组：这个仓的依赖不多，但 cargo 与 npm 各自几十个传递依赖，逐个开 PR
+# 只会把真正的改动淹掉。分组之后一次 PR = 一次 CI = 一次可读的检查。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /web-admin
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      npm:
+        patterns: ["*"]
+  # 面板产物是构建进二进制的，工具链也按周看一眼。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2

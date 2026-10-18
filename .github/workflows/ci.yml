@@ -69,7 +69,24 @@ jobs:
       - run: npm ci && npm run lint && npm test && npm run build
         working-directory: web-admin
 
-      - uses: dtolnay/rust-toolchain@stable
+      # ⚠️ 体积门槛：这条一直在"盯着"但没有闸门。**上限是现量出来的**（2026-10-18：
+      # 主包 gzip 159 958 + 懒加载的 Overview 18 424 ≈ 178 KB），留了约 12% 余量。
+      # 超了就说明有人把大依赖拉进了主包 —— 该拆懒加载，而不是调高这个数。
+      - name: 前端产物的 gzip 体积不超过预算
+        run: |
+          total=0
+          for f in dist/assets/*.js; do
+            n=$(gzip -c "$f" | wc -c)
+            printf '  %-40s %8d\n' "$(basename "$f")" "$n"
+            total=$((total + n))
+          done
+          echo "总 gzip: $total 字节（预算 200000）"
+          [ "$total" -le 200000 ] ||
+            { echo "::error::前端 gzip 体积 $total 超过预算 200000 字节"; exit 1; }
+        working-directory: web-admin
+
+      # 与 rust-toolchain.toml 同一版本：`cargo fmt --all --check` 的结果随 rustfmt 版本变。
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy, rustfmt
       # ⚠️ Rust 构建缓存：237 个 crate（含 bundled SQLite）没有缓存时每次从零编。
