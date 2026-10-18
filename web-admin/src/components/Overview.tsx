@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 // `daysUntil` 与 `Expiry` 仍在 `Admin.tsx`（节点表也在用）。从那里 import 会形成**循环引用**，
 // 但两者都是函数声明 —— 声明会提升，且只在渲染时调用，所以这个环是安全的；比把它们复制一份好。
@@ -688,7 +689,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       })
   }, [])
 
-  const [onlyData, setOnlyData] = useState(false)
+  // 筛选与排序：**替代**原来那个"只看有数据"的开关（它是这里面的一个特例 —— `nodata`）。
+  const [filter, setFilter] = useState<"all" | "risk" | "notor" | "bad" | "nodata">("all")
+  const [sortBy, setSortBy] = useState<"node" | "risk" | "bad" | "asn">("node")
   const [q, setQ] = useState("")
   // ⚠️ **不能去过滤 `nodes`** ✗ —— 资源与成本两个视图也在用它 ✓，
   // 过滤了会让那两个视图**悄悄少几台** ✓✗（而且没人会立刻发现 ✓）。
@@ -696,14 +699,43 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // ⚠️ 名字避开 `shown` ✗（这个组件里**已经有一个同名变量** ✓ —— 我上一版就撞上了 ✓）。
   // ⚠️ 也**不用 `useMemo`** ✗：几十台节点的过滤，memo 的收益近乎零 ✓，却要多一个导入与依赖数组 ✓。
   const needle = q.trim().toLowerCase()
-  const qualityRows = nodes.filter((n) => {
-    if (onlyData && !n.quality) return false
-    if (!needle) return true
+  const qualityRows = nodes
+    .filter((n) => {
+      // 先按四类"要处理的"筛，再按搜索词筛 —— 两者是**与**关系。
+      switch (filter) {
+        case "risk":
+          return !!n.risk && (n.risk.score ?? 0) > 0
+        case "notor":
+          return !n.tor_exit
+        case "bad":
+          return probeBadCount(n.probe) > 0
+        case "nodata":
+          return !n.quality
+        default:
+          break
+      }
+      return true
+    })
+    .filter((n) => {
+      if (!needle) return true
     // 名称 / IP / ASN / 组织 / 城市 / 国家 都能搜 ✓（都是人真会拿来定位一台机器的字段 ✓）
-    return [n.name, n.ipv4, n.ip, n.quality?.asn, n.quality?.org, n.quality?.city, n.quality?.country]
-      .filter(Boolean)
-      .some((v) => String(v).toLowerCase().includes(needle))
-  })
+      return [n.name, n.ipv4, n.ip, n.quality?.asn, n.quality?.org, n.quality?.city, n.quality?.country]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(needle))
+    })
+    // 排序：**没有数据的排最后**（`-1` / `Infinity`），否则"缺数据"的会挤掉真正要看的那几台。
+    .sort((a, b) => {
+      switch (sortBy) {
+        case "risk":
+          return (b.risk?.score ?? -1) - (a.risk?.score ?? -1)
+        case "bad":
+          return probeBadCount(b.probe) - probeBadCount(a.probe)
+        case "asn":
+          return (a.quality?.asn ?? Number.MAX_SAFE_INTEGER) - (b.quality?.asn ?? Number.MAX_SAFE_INTEGER)
+        default:
+          return 0
+      }
+    })
   const hiddenRows = nodes.length - qualityRows.length
 
   // 用量榜：**只列设了额度的节点** —— 没设额度的谈"额度用量"没有意义。
@@ -1153,44 +1185,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               </button>
             ))}
           </div>
-          {/* 筛选控件 ✓（用户要求 ✓）—— 放在同一行的右端 ✓（`ml-auto` ✓），不新起一行 ✓
-              （免得又多一条横向带 ✓）。
-              ⚠️ 只在「IP 质量」这一栏显示 ✗：另外两栏没有『有数据 / 无数据』这个概念 ✓，
-              放上去会让人以为它对资源与成本也生效 ✓。 */}
-          {page === "quality" ? (
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              {/* ⚠️ **它原来是个"看起来像文字"的按钮** ✗（用户报的 ✓）：
-                  用的是 `pill(false)` —— 未激活态只有灰字、**没有边框也没有底色** ✓ ⇒
-                  与旁边一串说明文字长得一样 ✓，一眼看不出能点 ✓。
-                  ⇒ 改成**标准外框按钮** ✓：常驻边框 ✓ · 激活时蓝底 ✓ · 前缀点指示状态 ✓ ·
-                  带**计数徽章**（当前会显示几台 ✓）· 高度 `h-7` 与右侧搜索框**对齐** ✓。 */}
-              <button
-                type="button"
-                onClick={() => setOnlyData((v) => !v)}
-                aria-pressed={onlyData}
-                className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors ${
-                  onlyData
-                    ? "border-primary bg-primary/10 font-medium text-primary"
-                    : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                }`}
-              >
-                {/* 前缀点 ✓：亮 = 正在筛选 ✓、暗 = 未启用 ✓（同事说的"前缀点"正是这个作用 ✓） */}
-                <span className={`size-1.5 rounded-full ${onlyData ? "bg-primary" : "bg-muted-foreground/40"}`} />
-                只看有数据
-                {/* 计数徽章 ✓（用户要求 ✓）—— 只在激活时显示 ✓：
-                    它顺便回答了"筛掉了几台" ✓，与表下那句"已隐藏 N 台"是同一个数 ✓（`qualityRows` ✓）。 */}
-                {onlyData ? (
-                  <span className="rounded bg-primary/15 px-1 font-mono text-[11px]">{qualityRows.length}</span>
-                ) : null}
-              </button>
-              <Input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="搜名称 / IP / ASN / 城市"
-                className="h-7 w-56 text-xs"
-              />
-            </div>
-          ) : null}
         </div>
 
       {/* 自动刷新那一条：细、右对齐，不占卡片。开关本身就是"暂停"—— 再点一下即停。 */}
@@ -1269,7 +1263,54 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 这个主题里 `--background` = `#f7f8fa`（**就是那片浅灰** ✗）·
                 `--card` = `#ffffff`（**白** ✓✓）—— 所以"加了底色却没变化" ✓✓。
                 本仓的卡片一律用 `bg-card` ✓（`Login.tsx` 就是这么写的 ✓）。 */}
-            <div className="overflow-x-auto rounded-lg border border-border bg-card">
+            <div className="rounded-lg border border-border bg-card">
+            {/* ⚠️ 工具条**放进卡片里** ✗✓：筛选、排序、搜索都是"这张表"的事，而页面级那一行
+                已经装着「分组 / 视图 / 自动刷新」三组控件 —— 再塞进去就是四组挤一行（截图里
+                就是这么挤的）。分到表头之上，各管各的，也不再随表格横向滚动。 */}
+            <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2">
+              <div className={TRACK}>
+                {([
+                  ["all", "全部"],
+                  ["risk", "有风险"],
+                  ["notor", "非 Tor"],
+                  ["bad", "实测异常"],
+                  ["nodata", "缺数据"],
+                ] as const).map(([k, label]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setFilter(k)}
+                    aria-pressed={filter === k}
+                    className={pill(filter === k)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {qualityRows.length} / {nodes.length} 台
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                  <SelectTrigger className="h-7 w-36 text-xs" aria-label="排序方式">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="node">按节点顺序</SelectItem>
+                    <SelectItem value="risk">按风险分</SelectItem>
+                    <SelectItem value="bad">按实测异常</SelectItem>
+                    <SelectItem value="asn">按 ASN</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜名称 / IP / ASN / 城市"
+                  className="h-7 w-52 text-xs"
+                />
+              </div>
+            </div>
+            <div className="overflow-x-auto">
             <div className="min-w-[68rem]">
               <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
@@ -1467,6 +1508,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 </div>
               ))}
             </div>
+            </div>
           </div>
           {/* ⚠️ **筛掉的东西必须说出来** ✗✓：不说的话，『3 台』看起来就像『整个机队只有 3 台』✓ ——
               这与『空单元格被读成没问题』是同一类错 ✓（**沉默的省略 = 假信息** ✓）。 */}
@@ -1477,7 +1519,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 type="button"
                 className="ml-2 text-primary hover:underline"
                 onClick={() => {
-                  setOnlyData(false)
+                  setFilter("all")
                   setQ("")
                 }}
               >
@@ -2288,6 +2330,12 @@ function probeWord(status: string): string {
 ///（与那一列"坏消息在前"的排法同一条 ✓）。
 /// ⚠️ 纯函数 ✓：输入就是 hub 给的 `probe` 对象 ✓ ⇒ 不依赖任何组件状态 ✓，逻辑一眼可验 ✓。
 /// ⚠️ 顺序固定按 `PROBE_SERVICES` ✓（不按对象键序 ✓✗ —— 那个顺序在 JS 里是"看起来稳定但没说死"的 ✓）。
+/// 有实测异常的项数（状态不是 `unlocked` 的都算）。给筛选与排序用。
+function probeBadCount(probe?: Record<string, { status?: string }> | null): number {
+  if (!probe) return 0
+  return Object.values(probe).filter((r) => r.status && r.status !== "unlocked").length
+}
+
 function probeSummary(probe?: Record<string, { status?: string; region?: string }> | null): string | null {
   if (!probe) return null
   const bad: string[] = []
