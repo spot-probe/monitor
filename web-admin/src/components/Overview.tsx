@@ -1707,6 +1707,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             ) : (
               (() => {
                 const rows = riskTab === "latency" ? risk.latency : risk.loss
+                // 量条的分母：**这一榜里的最大值**（rows 已按值降序）。它不是"绝对好坏"，
+                // 而是"在这几台里差多少" —— 所以条只做横向对比，不写刻度。
+                const worst = rows[0]?.value || 1
                 return rows.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
                     {riskTab === "latency" ? "近 7 天没有探测数据。" : "近 7 天没有丢包。"}
@@ -1715,13 +1718,34 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   rows.map((r, idx) => (
                     // 定宽 + 不换行：数字列各自对齐，行高一致。**最差那行同时用加粗与语义色**
                     // 两种信号（颜色不单独承担含义）。
-                    <div key={`${r.task}-${r.node}`} className="flex items-center gap-3 py-0.5 text-sm">
-                      <span className="min-w-0 flex-1 truncate font-medium">{r.node}</span>
+                    // ⚠️ 每行一条**独立的量条列**（名字 | 条 | 任务 | 值 | 次数）。
+                    // 先试过两种画法，都不行：3px 下划线像"文字下划线"；整行背景填充的
+                    // 右边缘会切过数字，像"选中高亮"。放进自己的一列之后，条只做**横向
+                    // 比较**（分母是这一榜的最大值，不是绝对好坏），数字仍然给精度。
+                    <div
+                      key={`${r.task}-${r.node}`}
+                      className="flex items-center gap-3 py-1 text-sm"
+                    >
+                      <span className="w-40 shrink-0 truncate font-medium">{r.node}</span>
+                      <span className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+                        <span
+                          className={`block h-full rounded-full ${
+                            idx === 0 ? "bg-warn-fg/70" : "bg-primary/40"
+                          }`}
+                          style={{ width: `${Math.max(2, (r.value / worst) * 100)}%` }}
+                        />
+                      </span>
                       <span className="w-16 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
-                      <span className={`tnum w-24 shrink-0 text-right text-xs ${idx === 0 ? "font-medium" : "font-medium"}`}>
+                      <span
+                        className={`tnum w-24 shrink-0 text-right text-xs ${
+                          idx === 0 ? "font-medium text-warn-fg" : "text-muted-foreground"
+                        }`}
+                      >
                         {riskTab === "latency" ? `平均 ${Math.round(r.value)} ms` : `丢包 ${(r.value * 100).toFixed(1)}%`}
                       </span>
-                      <span className="tnum w-16 shrink-0 text-right text-xs text-muted-foreground">{r.samples} 次</span>
+                      <span className="tnum w-12 shrink-0 text-right text-[11px] text-muted-foreground">
+                        {r.samples} 次
+                      </span>
                     </div>
                   ))
                 )
@@ -1747,7 +1771,8 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 <div key={n.id} className="flex items-center gap-3 py-0.5 text-sm">
                   <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
                   <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                  <span className="w-24 shrink-0 overflow-hidden rounded-full bg-muted">
+                  {/* 轨道从 96px 改成弹性：宽屏下那块空白交给它，条越长越容易比较高低。 */}
+                  <span className="min-w-16 flex-1 shrink overflow-hidden rounded-full bg-muted">
                     <span
                       className={`block h-2 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
                       style={{ width: `${Math.min(100, pct * 100)}%` }}

@@ -5395,10 +5395,9 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
         </Card>
       )}
 
-      <Card className="divide-y p-0">
-        <div className="p-5">
-          <UpdateRow
-            name="控制端"
+      <Card className="p-5">
+        <UpdateRow
+          name="控制端"
             technical="hub"
             subtitle="这个面板与 API 本身"
             current={versions.hub}
@@ -5410,8 +5409,10 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
             checkTitle="立刻去 GitHub 读一次 hub 的最新版本，不等缓存过期（效果与重启 hub 相同）"
             releaseHref={behind(versions.hub, versions.hub_latest) ? releaseUrl("monitor", versions.hub_latest) : ""}
           />
-        </div>
-        <div className="p-5">
+      </Card>
+
+      <Card className="p-5">
+        <div>
           {/* agent 的"当前版本"不是一句话能说的：各台机器跑的可能不是一个版本。所以这一行
               只说**最新是多少、有几台落后**，版本分布留给节点页与下面的折叠列表。 */}
           <UpdateRow
@@ -5518,6 +5519,9 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
             )}
           </div>
         )}
+      </Card>
+
+      <Card className="p-0">
         <label className="flex cursor-pointer items-start justify-between gap-4 p-5">
         <span>
           <span className="block text-sm font-medium">更新提醒</span>
