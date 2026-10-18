@@ -2979,7 +2979,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 
       				{/* ⚠️ **两个页签** ✗✓：摘要卡 + 折线 + 色条 + 热力图 + 直方图 + 两张节点表全在一屏里，
       				{/* ⚠️ **两个页签** ✗✓：摘要卡 + 折线 + 色条 + 热力图 + 直方图 + 两张节点表全在一屏里，
-      				    要滚三屏才看完，而多数人只想回答"这个探测现在怎么样"。曲线是默认，明细按需切换。
+      				    要滚三屏才看完，而多数人只想回答"这个监控现在怎么样"。曲线是默认，明细按需切换。
       				    ⚠️ 样式与下方的**时间胶囊**（1 小时 / 6 小时 / 24 小时 / 7 天）逐字一致 ✗✓：
       				    同一个弹窗里两个选择器长得不一样，读者会以为它们是两种不同的东西。 */}
       				<div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -3128,7 +3128,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 				<span className="min-w-0 flex-1">延迟分布</span>
 				<span className="w-16 shrink-0 text-right">平均</span>
 				<span className="w-12 shrink-0 text-right">丢包</span>
-				<span className="w-14 shrink-0 text-right">探测</span>
+				<span className="w-14 shrink-0 text-right">样本</span>
 			</div>
 			<div className="mt-1 space-y-1">
 {rows.length === 0 && <p className="px-1 py-2 text-xs text-muted-foreground">这一桶里没有节点。</p>}
