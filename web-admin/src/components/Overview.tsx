@@ -1741,8 +1741,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       <span className="w-40 shrink-0 truncate font-medium">{r.node}</span>
                       <span className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
                         <span
+                          // ⚠️ **实心**，不带透明度 ✗✓：右边「用量榜」的条是 `bg-primary`，
+                          // 而这里原来是 `bg-primary/40` —— 两张并排的卡里，同一个"一根条"
+                          // 有两种颜色，读者会以为是两种含义。现在统一：蓝=数值，黄=该处理。
                           className={`block h-full rounded-full ${
-                            idx === 0 ? "bg-warn-fg/70" : "bg-primary/40"
+                            idx === 0 ? "bg-warn-fg" : "bg-primary"
                           }`}
                           style={{ width: `${Math.max(2, (r.value / worst) * 100)}%` }}
                         />
