@@ -1357,7 +1357,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       {n.quality?.time_zone && n.quality?.latitude != null ? " · " : null}
                       {n.quality?.latitude != null && n.quality?.longitude != null ? (
                         <a
-                          className="font-mono text-primary underline underline-offset-2"
+                          className="font-mono text-primary hover:underline"
                           href={`https://www.openstreetmap.org/?mlat=${n.quality.latitude}&mlon=${n.quality.longitude}#map=15/${n.quality.latitude}/${n.quality.longitude}`}
                           target="_blank"
                           rel="noreferrer"
@@ -1382,9 +1382,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                           {n.risk.label ?? "未分档"}
                         </span>
                       ) : (
-                        <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
-                        未启用或未查到
-                      </Badge>
+                        // ⚠️ 原来是**实心底的 Badge**，而这一列在没开在线库时**每行都一样**
+                        // ⇒ 七行七块灰底，视觉噪声大于信息。降成同色的轻文字：字还在（不能留空，
+                        // 留空会被读成"没问题"），但不再抢眼。
+                        <span className="text-xs text-muted-foreground">未启用或未查到</span>
                       )}
                     </div>
                     {/* 第二行 = Tor 出口 ✓（**本地清单** ✓ 与上面的在线库**不是一条路** ✓ —— 表下声明说清了 ✓）。
@@ -1495,40 +1496,40 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           {/* 图例 ✓ —— 表格里那一列用了几个人话词 ✓，这里解释它们分别是什么意思 ✓。
               ⚠️ 它**不是**"预留说明"了 ✗：流媒体检测**已经上线** ✓（agent 每 6 小时自己探一次 ✓），
               所以旧版那句"等待 agent 支持"现在**是假话** ✓✗ —— 已改掉 ✓。 */}
-          <div className="rounded-lg border border-dashed border-border bg-muted/30 p-3.5 text-xs leading-relaxed text-muted-foreground">
-            <p className="font-medium text-foreground">关于「节点实测」</p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+          <details className="group rounded-lg border border-dashed border-border bg-muted/30 p-3.5 text-xs leading-relaxed text-muted-foreground">
+            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium text-foreground">
+              <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+              这些标记是什么意思
+            </summary>
+            <ul className="mt-2 list-disc space-y-1 pl-4">
               <li>
-                <span className="text-warn">未允许检测</span> —— 这台机器没开「允许 IP 质量检测」✓，
-                允许之后 hub 才会为它查询与接收探测 ✓。
+                <span className="font-medium text-foreground">未允许检测</span>：这台机器没开「允许 IP
+                质量检测」。打开之后 hub 才会为它查询与接收探测。
               </li>
               <li>
-                <span className="text-muted-foreground/70">版本不支持</span> —— 它的 agent 还没有探测能力 ✓，
-                升级 agent 之后才会有结果 ✓（在那之前等多久都不会有 ✓）。
+                <span className="font-medium text-foreground">版本不支持</span>：agent 还没有探测能力，
+                升级之后才会出结果，在那之前等多久都不会有。
               </li>
               <li>
-                <span className="text-muted-foreground/70">还没测过</span> —— 有能力、也允许了 ✓，
-                只是还没到它那一次（每 6 小时一次 ✓，各台按自己的时点错开 ✓）。
+                <span className="font-medium text-foreground">还没测过</span>：有能力、也允许了，
+                只是还没轮到它那一次（每 6 小时一次，各台按自己的时点错开）。
               </li>
               <li>
-                <span className="text-warn">解锁（机房）</span> · <span className="text-warn">仅网页可用</span> ·
-                <span className="text-warn">仅 App 可用</span> —— 这三种都是"能用，但有限制" ✓：
-                机房 IP 在很多服务上吃亏 ✓；后两种是只通一边 ✓（例如网页能开、App 打不开 ✓）。
-                ⚠️ 它们既不是"解锁"也不是"未解锁" ✗ ⇒ 单独列出来 ✓，不合并 ✓。
+                <span className="font-medium text-foreground">解锁（机房）· 仅网页可用 · 仅 App 可用</span>：
+                能用，但有限制。机房 IP 在很多服务上吃亏；后两种只通一边（网页能开、App 打不开）。
+                它们既不是「解锁」也不是「未解锁」，所以单独列出。
               </li>
               <li>
-                <span className="text-warn">中国区</span> · <span className="text-warn">可用·无会员</span> ——
-                这两档来自 YouTube ✓：前者是响应来自中国版（`www.google.cn` ✓）；后者是
-                "视频能看，但 Premium 会员在这个国家买不到" ✓ —— ⚠️ 它能用 ✓，只是少一样东西 ✓
-                ⇒ 不要把它当成"没解锁" ✗。
+                <span className="font-medium text-foreground">中国区 · 可用·无会员</span>：来自 YouTube。
+                前者是响应来自中国版（`www.google.cn`）；后者是视频能看、但 Premium 会员在这个国家买不到。
+                两档都是「能用」，只是少一样东西，别当成「没解锁」。
               </li>
               <li>
-                结论带时效 ✓：今天解锁不等于下周解锁 ✓，所以每格下面都写着"多久之前测的" ✓。
-                探测从节点自己发出 ✓（hub 代不了 ✓），而失败不等于未解锁 ✓ ——
-                取不到页面时不会报结论，你会看到上一次的结论与它的年龄 ✓。
+                <span className="font-medium text-foreground">结论带时效</span>：今天解锁不等于下周解锁，
+                所以每格下面都写着多久之前测的。取不到页面时不会报结论 —— 你会看到上一次的结论与它的年龄。
               </li>
             </ul>
-          </div>
+          </details>
         </div>
       ) : page === "resource" ? (
         <>
