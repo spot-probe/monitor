@@ -43,6 +43,14 @@ const TRAFFIC_MODES: Record<string, string> = {
 
 // Reordering uses the browser's view transitions, so displaced rows slide.
 // Browsers without support jump instead.
+/// `2026-10-18 16:28`。浏览器默认的 `toLocaleString()` 是「10/18/2026, 4:28:34 PM」，
+/// 与整页其余时间（"刚刚" / "2 分钟前" / ISO 日期）不是一种写法。
+function stamp(at: number): string {
+  const d = new Date(at * 1000)
+  const p = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 function animate(update: () => void) {
   if (document.startViewTransition) document.startViewTransition(() => flushSync(update))
   else update()
@@ -4905,7 +4913,7 @@ function Sessions() {
             {rows.map((s) => (
               <TableRow key={s.id}>
                 <TableCell className="tnum text-sm whitespace-nowrap">
-                  {new Date(s.created_at * 1000).toLocaleString()}
+                  {stamp(s.created_at)}
                   {s.current && (
                     <Badge variant="secondary" className="ml-2">
                       当前设备
@@ -5118,6 +5126,9 @@ function Data() {
       <div className="tnum mt-0.5 text-sm">{value}</div>
     </div>
   )
+  // 已存多久 / 保留多久 —— 进度条要用，先算好（不在 JSX 里现算）。
+  const spanDays = info.oldest ? Math.floor((Date.now() / 1000 - info.oldest) / 86400) : 0
+  const usedPct = info.retention > 0 ? Math.min(100, (spanDays / info.retention) * 100) : 0
 
   return (
     <div className="space-y-4">
@@ -5133,6 +5144,21 @@ function Data() {
           {stat("历史跨度", info.oldest ? `${Math.floor((Date.now() / 1000 - info.oldest) / 86400)} 天` : "—")}
           {DB_ROWS.map(([key, label]) => stat(label, (info.rows[key] ?? 0).toLocaleString()))}
         </div>
+        {/* ⚠️ 两个数字是死的 ✗✓：`历史跨度 7 天` 与 `保留天数 90 天` 并排，读者要自己算
+            "离满还有多久"。一条进度条把这件事变成一眼。 */}
+        {info.retention > 0 && (
+          <div>
+            <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+              <span>
+                已存 {spanDays} 天 / 保留 {info.retention} 天
+              </span>
+              <span className="tnum">{Math.round(usedPct)}%</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${usedPct}%` }} />
+            </div>
+          </div>
+        )}
         <p className="truncate text-xs text-muted-foreground" title={info.path}>
           <code>{info.path}</code>
         </p>
