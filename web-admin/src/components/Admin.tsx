@@ -1933,20 +1933,6 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                 </TableCell>
               </TableRow>
             ))}
-            {nodes.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
-                  还没有节点，右上角添加
-                </TableCell>
-              </TableRow>
-            )}
-            {needle && nodes.length > 0 && !visible.length && (
-              <TableRow>
-                <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
-                  没有匹配的节点
-                </TableCell>
-              </TableRow>
-            )}
           </TableBody>
         </Table>
       </Card>

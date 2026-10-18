@@ -395,7 +395,12 @@ export default function App() {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6">
+        <main
+          // `key={path}` 让切页时这个容器重新挂载一次 —— 淡入只在这里发生，
+          // 数据刷新不会重放动画。
+          key={path}
+          className="page-in min-w-0 flex-1 space-y-5 p-4 md:min-h-0 md:overflow-y-auto md:p-6"
+        >
           {/* No heading band. Every page opened with its own name repeated on a line
               under the bar, and the name was the only thing in it: the sidebar already
               marks which item is current, and the breadcrumb above now ends with the

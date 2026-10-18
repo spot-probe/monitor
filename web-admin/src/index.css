@@ -71,7 +71,7 @@
   --accent-foreground: oklch(0.942 0.010 261.8);
   --destructive: oklch(0.711 0.166 22.2); /* #f87171 -- a fill; text uses danger-fg */
   --destructive-foreground: oklch(0.182 0.013 264.2);
-  --border: oklch(0.315 0.026 260.1); /* #2a323f */
+  --border: oklch(0.36 0.027 260); /* #333c4b —— 与卡片的对比从 1.35 提到 1.57 */
   --input: oklch(0.315 0.026 260.1);
   --ring: oklch(0.662 0.179 264.6);
   --ok: oklch(0.773 0.153 163.2); /* #34d399 */
@@ -124,6 +124,20 @@
   --color-danger-fg: var(--danger-fg);
   --color-tag: var(--tag);
   --color-tag-foreground: var(--tag-foreground);
+}
+
+/* 切页时淡入 120ms。**只挂在路由上**（`<main>` 的 key 是 path），
+   所以自动刷新 / 数据更新不会跟着闪 —— 那种闪才是真烦人。
+   `prefers-reduced-motion` 下整条关掉。 */
+@keyframes page-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.page-in {
+  animation: page-in 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-in { animation: none; }
 }
 
 @layer base {
