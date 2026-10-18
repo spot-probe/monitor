@@ -128,6 +128,16 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
+  /* ⚠️ **键盘焦点要有统一的样子** ✗✓：`outline-ring/50` 只给了颜色，宽度与样式还是浏览器默认
+     —— 实测侧栏里那排按钮聚焦时是 `outline: auto 1px`（各平台长得不一样），而 shadcn 的按钮
+     是 3px 的 ring。裸 `<button>` 全站有几十个，逐个补 `focus-visible:ring` 不现实，所以在
+     基础层给一条兜底：2px 实线 + 2px 偏移。
+     ⚠️ 不会把已有 ring 的组件画成"双框"：那些组件自带 `focus-visible:outline-none`，
+     这条被它们覆盖掉，只剩它们自己的 ring。 */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
   /* Reserve the scrollbar's width on every page: without it, leaving a route
      whose content exceeds the fold widens the page. */
   html { scrollbar-gutter: stable; }

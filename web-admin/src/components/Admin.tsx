@@ -554,7 +554,7 @@ function NodeForm({ node, groups, groupDropdown, onClose, onSaved }: {
               default. The placeholder carries the automatic value, so a box left
               alone shows what is in use. */}
           <div className="space-y-3 border-t pt-5">
-            <h3 className="text-sm font-medium">地址与地区</h3>
+            <h3 className="text-sm font-semibold">地址与地区</h3>
             <div className="grid gap-4 sm:grid-cols-[1fr_1.4fr_6rem]">
               <Field label="IPv4">
                 <Input value={form.ipv4_pin ?? ""} onChange={(e) => set("ipv4_pin", e.target.value)} placeholder={`自动：${automatic(false)}`} />
@@ -3529,7 +3529,7 @@ function Themes() {
       <Card className="gap-4 p-5">
         <div>
           <div className="flex items-center gap-1.5">
-            <h3 className="text-sm font-medium">安装主题</h3>
+            <h3 className="text-sm font-semibold">安装主题</h3>
             <Help width="max-w-[min(28rem,calc(100vw-2rem))]">
               <p>
                 填主题的 GitHub 仓库地址，例如 <span className="whitespace-nowrap">https://github.com/作者/仓库</span>
@@ -3874,7 +3874,7 @@ function SiteIcons() {
   return (
     <Card className="gap-6 p-6">
       <div>
-        <h3 className="text-sm font-medium">站点图标</h3>
+        <h3 className="text-sm font-semibold">站点图标</h3>
         <p className="mt-1 text-xs text-muted-foreground">
           三处各自独立：可以只替换其中一处，其余仍是主题自带的那张。支持 PNG 与 JPEG，单张不超过 512 KB（不收 SVG）。
         </p>
@@ -4168,7 +4168,7 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
     <Card className="gap-4 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium">离线通知</h3>
+          <h3 className="text-sm font-semibold">离线通知</h3>
           <p className="mt-1 text-xs text-muted-foreground">按节点打开，默认关。已打开 {enabled} / {nodes.length} 台</p>
         </div>
         {/* A matched pair inside one border: the same kind of action differing only in
@@ -4896,7 +4896,7 @@ function Sessions() {
   return (
     <Card className="gap-4 p-5">
       <div>
-        <h3 className="text-sm font-medium">登录会话</h3>
+        <h3 className="text-sm font-semibold">登录会话</h3>
         <p className="mt-1 text-xs text-muted-foreground">
           每次登录一条，14 天后过期。删除后该设备下一次请求就被登出。
         </p>
@@ -4990,7 +4990,7 @@ function Security({ site }: { site: string }) {
 
       <Card className="gap-4 p-5">
         <div>
-          <h3 className="text-sm font-medium">GitHub 单点登录</h3>
+          <h3 className="text-sm font-semibold">GitHub 单点登录</h3>
           <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
             <span>OAuth App 回调地址</span>
             {/* `break-all`：这个地址是一整串没有空格的 URL，窄屏上不换行会把整页撑出横向滚动。 */}
@@ -5047,7 +5047,7 @@ function Security({ site }: { site: string }) {
 
       <Card className="gap-4 p-5">
         <div>
-          <h3 className="text-sm font-medium">应急密码</h3>
+          <h3 className="text-sm font-semibold">应急密码</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             GitHub 不可用时的备用入口。修改后其它设备登录立即失效，当前设备不受影响。
           </p>
@@ -5174,7 +5174,7 @@ function Data() {
         {/* 路径挪到标题右侧：它原来自占一行，只为显示一个路径 —— 而它是"这台机器上是哪个文件"
             这种一眼信息，跟标题同级更合适。 */}
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <h3 className="text-sm font-medium">数据库</h3>
+          <h3 className="text-sm font-semibold">数据库</h3>
           <code className="min-w-0 truncate text-xs text-muted-foreground" title={info.path}>
             {info.path}
           </code>
@@ -5209,7 +5209,7 @@ function Data() {
 
       <Card className="gap-4 p-5">
         <div>
-          <h3 className="text-sm font-medium">回收空间</h3>
+          <h3 className="text-sm font-semibold">回收空间</h3>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             按保留天数清掉过期明细，再重建数据库文件把空出来的页还给磁盘（SQLite 的 VACUUM）。
             重建期间需要与数据库等量的空闲磁盘，过程中面板和上报会短暂变慢。
@@ -5224,7 +5224,7 @@ function Data() {
 
       <Card className="gap-4 p-5">
         <div>
-          <h3 className="text-sm font-medium">备份</h3>
+          <h3 className="text-sm font-semibold">备份</h3>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             导出的是整个数据库，含节点凭证与登录密码哈希，请当作密钥保管。恢复会用备份文件整体覆盖当前数据，
             当前节点、设置、历史全部作废，所有设备需要重新登录。
@@ -5366,7 +5366,7 @@ function UpdateRow({
     <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <h3 className="text-sm font-medium">{name}</h3>
+          <h3 className="text-sm font-semibold">{name}</h3>
           <span className="text-xs text-muted-foreground">{technical}</span>
         </div>
         <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
