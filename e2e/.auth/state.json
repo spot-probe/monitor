@@ -1,0 +1,25 @@
+{
+  "cookies": [
+    {
+      "name": "monitor_session",
+      "value": "72c216969b59e7b9a426c55f7baea54c50577c940de5886d02616c66170c6afd",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1793500913.421,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "http://127.0.0.1:8790",
+      "localStorage": [
+        {
+          "name": "nav",
+          "value": "open"
+        }
+      ]
+    }
+  ]
+}
