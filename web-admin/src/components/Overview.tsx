@@ -2296,7 +2296,10 @@ function probeSummary(probe?: Record<string, { status?: string; region?: string 
     const r = probe[sv]
     if (!r) continue
     if (r.status === "unlocked") ok += 1
-    else bad.push(PROBE_LABELS[sv] ?? sv)
+    // ⚠️ **带上状态词** ✗✓：原来只点名字（`Netflix · Reddit 等 3 项`），读者看到名字
+    // 也不知道**哪里不对** —— 得点开弹窗才知道是"未解锁"还是"仅网页"。带上状态词之后，
+    // 这一格自己就说得清（`Netflix 未解锁 · ChatGPT 仅网页 · 其余 3 项正常`）。
+    else bad.push(`${PROBE_LABELS[sv] ?? sv} ${probeWord(r.status ?? "")}`.trim())
   }
   if (bad.length === 0) return ok > 0 ? `${ok} 项正常` : null
   const rest = ok > 0 ? ` · 其余 ${ok} 项正常` : ""
