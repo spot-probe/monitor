@@ -99,6 +99,9 @@ const CHART_W = 640
 const CHART_BAR_MAX = 16
 const CHART_H = 150
 const CHART_PAD = 18
+/// 左侧刻度槽。**必须有**：刻度原来画在 x=0，而第一根柱也从 x≈0 起 —— 于是"2.55 TB"
+/// 被柱子压住（实测刻度 289–327、首柱 310 起）。留一条 46 的槽后，刻度与图各占各的。
+const CHART_GUT = 46
 
 /// 右上角的状态徽章。卡片外框保持统一，状态只在这里和主数字上出现。
 /// 颜色一律走 token（`ok-fg` / `warn-fg` / `danger-fg`），不写死调色板 —— 暗色主题才成立。
@@ -219,7 +222,7 @@ function ChartTicks({ left, right, format }: { left: number; right?: number; for
     <>
       {[0, 0.5, 1].map((t) => (
         <g key={t}>
-          <line x1={0} y1={y(t)} x2={CHART_W} y2={y(t)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
+          <line x1={CHART_GUT} y1={y(t)} x2={CHART_W} y2={y(t)} className="stroke-border" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 3"} />
           <text x={0} y={y(t) - 2} fontSize="9" className="fill-muted-foreground">{format(left * t)}</text>
           {right !== undefined && (
             <text x={CHART_W} y={y(t) - 2} fontSize="9" textAnchor="end" className="fill-warn-fg">{format(right * t)}</text>
@@ -253,7 +256,7 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 /// （[`Cumulative`]），柱只需要一根轴；逐日累计值仍在 tooltip 里。
 function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
   const top = chartTop("traffic", rows)
-  const bw = CHART_W / Math.max(1, rows.length)
+  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
   const bottom = CHART_H - CHART_PAD
@@ -264,7 +267,7 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
       <ChartTicks left={top} format={bytes} />
       {rows.map((r, i) => {
-        const x = i * bw + (bw - bar) / 2
+        const x = CHART_GUT + i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
         const hi = yOf(r.rx + r.tx, top)
         return (
@@ -276,24 +279,12 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
           </g>
         )
       })}
-      {/* 高峰标记：当天总量最大的那根柱子上方标出来 —— 运维第一眼想看的就是它。 */}
-      {(() => {
-        let peak = 0
-        rows.forEach((r, i) => {
-          if (r.rx + r.tx > rows[peak].rx + rows[peak].tx) peak = i
-        })
-        const x = peak * bw + bw / 2
-        const yy = yOf(rows[peak].rx + rows[peak].tx, top) - 6
-        return (
-          <g>
-            <rect x={x - 15} y={yy - 11} width={30} height={13} rx={6} className="fill-primary" />
-            <text x={x} y={yy - 1} fontSize="9" textAnchor="middle" className="fill-primary-foreground">高峰</text>
-          </g>
-        )
-      })()}
+      {/* 「高峰」徽标**去掉了** ✗✓：它和上面那张摘要卡「最高流量日 2.55 TB（9/19）」
+          说的是同一件事，而位置正好压住顶部的 y 刻度（实测刻度 289–327、徽标 314–334）。
+          一件事说两遍，还把刻度盖住了 —— 删掉徽标，两条问题一起消失。 */}
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
-          <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
             {dayLabel(r.day_ts)}
           </text>
         ) : null,
@@ -309,14 +300,18 @@ function Cumulative({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string
   if (hidden?.has("累计") || rows.length === 0) return null
   const cum = rows.map((_, i) => rows.slice(0, i + 1).reduce((n, r) => n + r.rx + r.tx, 0))
   const top = Math.max(1, ...cum)
-  const bw = CHART_W / Math.max(1, rows.length)
+  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
   const h = 42
-  const y = (v: number) => h - 4 - (v / top) * (h - 14)
+  // 底部留 6px 给基线：一条**没有上下界的折线**看起来像飘在空白里（第一版就是），
+  // 加一条基线之后它才读成"这一条是累计"。
+  const base = h - 6
+  const y = (v: number) => base - 2 - (v / top) * (h - 20)
   return (
     <svg viewBox={`0 0 ${CHART_W} ${h}`} className="mt-1 w-full" role="img"
       aria-label="累计流量：区间内逐日累加">
+      <line x1={CHART_GUT} y1={base} x2={CHART_W} y2={base} className="stroke-border" strokeWidth="1" />
       <polyline fill="none" className="stroke-warn-fg" strokeWidth="1.5"
-        points={cum.map((v, i) => `${i * bw + bw / 2},${y(v)}`).join(" ")} />
+        points={cum.map((v, i) => `${CHART_GUT + i * bw + bw / 2},${y(v)}`).join(" ")} />
       <text x={0} y={9} fontSize="9" className="fill-muted-foreground">累计</text>
       <text x={CHART_W} y={9} fontSize="9" textAnchor="end" className="fill-warn-fg">{bytes(top)}</text>
     </svg>
@@ -333,9 +328,9 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
   const top = chartTop("bandwidth", rows)
-  const bw = CHART_W / Math.max(1, rows.length)
+  const bw = (CHART_W - CHART_GUT) / Math.max(1, rows.length)
   const yOf = (v: number) => chartY(v, top)
-  const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${i * bw + bw / 2},${yOf(f(r))}`).join(" ")
+  const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${CHART_GUT + i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
@@ -349,7 +344,7 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
       <ChartAxis rows={rows} />
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
-          <text key={r.day_ts} x={i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
             {dayLabel(r.day_ts)}
           </text>
         ) : null,
@@ -367,12 +362,12 @@ function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<str
   const top = chartTop("resource", rows)
   const yOf = (v: number) => chartY(v, top)
   const line = (key: "cpu" | "mem" | "disk") =>
-    rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
+    rows.map((r, i) => `${CHART_GUT + (i + 0.5) * ((CHART_W - CHART_GUT) / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
   // 一层带就能把这件事摆出来。带跟着它那条线的图例开关走（关掉 CPU，它的带也一起关）。
   const band = (avgKey: "cpu" | "mem" | "disk", maxKey: "cpu_max" | "mem_max" | "disk_max") => {
-    const up = rows.map((r, i) => `${(i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[maxKey])}`)
-    const down = [...rows].reverse().map((r, i) => `${(rows.length - 1 - i + 0.5) * (CHART_W / Math.max(1, rows.length))},${yOf(r[avgKey])}`)
+    const up = rows.map((r, i) => `${CHART_GUT + (i + 0.5) * ((CHART_W - CHART_GUT) / Math.max(1, rows.length))},${yOf(r[maxKey])}`)
+    const down = [...rows].reverse().map((r, i) => `${CHART_GUT + (rows.length - 1 - i + 0.5) * ((CHART_W - CHART_GUT) / Math.max(1, rows.length))},${yOf(r[avgKey])}`)
     return [...up, ...down].join(" ")
   }
   return (
@@ -925,6 +920,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
     }),
   ]
+  // ⚠️ **补满整行** ✗✓：只有 `lead + 天数` 时，末行常常不满 7 格 —— 缺的那格会露出容器的
+  // `bg-border`，右下角出现一个灰色方块（截图里就是这样）。补到 7 的整数倍即可。
+  while (cells.length % 7 !== 0) cells.push(null)
   const today = new Date()
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
 
@@ -1853,10 +1851,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               逐格定位，尤其在有到期副标的日子里。 */}
           <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
             {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-              <div key={w} className="bg-background py-1.5 font-medium text-muted-foreground">{w}</div>
+              <div key={w} className="bg-card py-1.5 font-medium text-muted-foreground">{w}</div>
             ))}
             {cells.map((day, i) => {
-              if (!day) return <div key={`lead-${i}`} className="bg-background" />
+              if (!day) return <div key={`lead-${i}`} className="bg-card" />
               const list = byDay.get(day) ?? []
               const isPeak = peak > 1 && list.length === peak
               const on = pickedDay === day
@@ -1864,7 +1862,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               // 点了没反应的按钮是最糟的一种控件（我一路拒绝的就是这类），而没有事项的日子
               // 本来也不是可操作对象。所以它降级成普通格子 —— 不响应点击，也不给悬停高亮，
               // 免得暗示「这里能点」。
-              const cellClass = `flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-background p-1.5 transition-colors ${on ? "ring-2 ring-inset ring-primary" : ""}`
+              // ⚠️ 底色用 `bg-card` 而不是 `bg-background` ✗✓：后者比卡片暗一档，于是**每个格子都是
+                // 一块灰底**，整张日历读起来像表格/按钮墙；框线本来由容器的 `gap-px bg-border`
+                // 画出来（维护者要的那层），格子自己不需要再填色。
+                const cellClass = `flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-card p-1.5 transition-colors ${on ? "ring-2 ring-inset ring-primary" : ""}`
               const inner = (
                 <>
                   <span
@@ -1902,7 +1903,20 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             })}
           </div>
 
-          {peak === 0 && <p className="text-xs text-muted-foreground">这个月没有节点到期。往前后翻可以看到别的月份。</p>}
+          {/* ⚠️ 底部收口：这张卡常被左边更高的趋势卡撑高，下面留一大片空白（与用量榜同一个
+              毛病）。一句"这个月几台到期"既收口，也回答了翻月后最先想知道的那个数。 */}
+          <p className="tnum text-[11px] text-muted-foreground">
+            {(() => {
+              const monthPrefix = `${month.y}-${String(month.m + 1).padStart(2, "0")}`
+              const days = [...byDay.entries()].filter(([d]) => d.startsWith(monthPrefix))
+              const total = days.reduce((n, [, list]) => n + list.length, 0)
+              if (total === 0) return "这个月没有节点到期。往前后翻可以看到别的月份。"
+              // 只有一天到期时"最忙"是废话（那天就是它自己），所以那句话只在多天时出现。
+              if (days.length === 1) return `本月 ${days.length} 天有到期，共 ${total} 台`
+              const busy = days.reduce((a, [d, list]) => (list.length > a.n ? { d, n: list.length } : a), { d: "", n: 0 })
+              return `本月 ${days.length} 天有到期，共 ${total} 台 · 最忙 ${busy.d.slice(5)}（${busy.n} 台）`
+            })()}
+          </p>
         </CardContent>
       </Card>
       </div>
