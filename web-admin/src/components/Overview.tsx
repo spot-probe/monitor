@@ -730,6 +730,18 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       return { node: n, used, pct: used / n.traffic_limit }
     })
     .sort((a, b) => b.pct - a.pct)
+  // 卡片底部那行汇总要覆盖**全部**设了额度的节点，而不是截断后的前 5 台 —— 否则
+  // "合计"会比实际小，读者以为总额度只有这么多。
+  const quotaTotal = nodes
+    .filter((n) => n.traffic_limit > 0)
+    .reduce(
+      (acc, n) => ({
+        used: acc.used + monthUsage(n),
+        limit: acc.limit + n.traffic_limit,
+      }),
+      { used: 0, limit: 0 },
+    )
+  const topQuota = quota
     .slice(0, 5)
   const [month, setMonth] = useState(() => {
     const d = new Date()
@@ -1760,21 +1772,24 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           <CardTitle className="text-sm">用量榜</CardTitle>
           <span className="text-xs text-muted-foreground">按本月已用额度排序</span>
         </CardHeader>
-        <CardContent className="flex min-h-[9rem] flex-col space-y-1.5">
+        <CardContent className="flex min-h-[9rem] flex-col">
           {quota.length === 0 ? (
             <p className="text-sm text-muted-foreground">没有节点设置流量额度。</p>
           ) : (
-            quota.map(({ node: n, used, pct }) => {
+            <>
+            <div className="space-y-0.5">
+            {topQuota.map(({ node: n, used, pct }) => {
               const over = pct >= 1
               return (
                 // 定宽 + 不换行：百分比在最后、右对齐，永远与数字列同一行（原来会被挤到第二行）。
-                <div key={n.id} className="flex items-center gap-3 py-0.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{n.name}</span>
+                <div key={n.id} className="flex items-center gap-3 py-1 text-sm">
+                  {/* 名字**定宽**：两个 `flex-1` 会让名字与条各占一半，条就短了（上一版正是这个毛病）。 */}
+                  <span className="w-32 shrink-0 truncate font-medium">{n.name}</span>
                   <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
-                  {/* 轨道从 96px 改成弹性：宽屏下那块空白交给它，条越长越容易比较高低。 */}
-                  <span className="min-w-16 flex-1 shrink overflow-hidden rounded-full bg-muted">
+                  {/* 轨道加一圈极淡的边：0% 时纯 `bg-muted` 与卡片背景几乎同色，读起来像"没画"。 */}
+                  <span className="h-2.5 min-w-0 flex-1 overflow-hidden rounded-full border border-border bg-muted">
                     <span
-                      className={`block h-2 rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
+                      className={`block h-full rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
                       style={{ width: `${Math.min(100, pct * 100)}%` }}
                     />
                   </span>
@@ -1786,7 +1801,14 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   </span>
                 </div>
               )
-            })
+            })}
+            </div>
+            {/* ⚠️ 底部汇总：这张卡常被旁边那张更高的卡撑高，下面留一大片空白。
+                给它一句"合计"收口，空白就有了去处 —— 顺带回答"这些额度一共多少"。 */}
+            <p className="tnum mt-auto pt-3 text-[11px] text-muted-foreground">
+              合计 {bytes(quotaTotal.used)} / {bytes(quotaTotal.limit)} · 设了额度 {quotaTotal.limit > 0 ? nodes.filter((n) => n.traffic_limit > 0).length : 0} 台
+            </p>
+            </>
           )}
         </CardContent>
       </Card>

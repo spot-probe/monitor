@@ -707,6 +707,15 @@ fn check_contract(node_id: i64, metrics: &serde_json::Value) {
 /// ⚠️ 校验后没有可用内容（`None` ✓）⇒ **什么都不写** ✓ ——
 /// **绝不能**用一条空结论覆盖掉上一次的好结论 ✓✗（那是"把没读到当成没解锁"的同一类错 ✓）。
 fn probe(app: &App, node_id: i64, params: &serde_json::Value) -> Result<()> {
+    // ⭐ **同一个许可也管这里** ✓：没允许检测的节点**连一轮都不该探** ✓ ⇒ 它报上来的结果也不存 ✗。
+    // 语义与 `assess` 的门 B **完全一致** ✓：**什么都不动** ✓ —— "没允许"不是关于这台机器的结论 ✓，
+    // 把它存成一轮数据会覆盖掉它以前（允许时）测到的结论 ✓✗。
+    // ⚠️ 挡在 hub 上、而不是只挡在 agent 上：**老版本 agent 还在无条件探测** ✓，改过参数的 agent
+    // 也可能 ✓ —— 许可的最终解释权在这一层 ✓✓（与门 A / 门 B 同一条思路 ✓）。
+    if !app.db.quality_allowed(node_id) {
+        debug!("node {node_id} sent a probe report without permission; ignored");
+        return Ok(());
+    }
     let Some(clean) = sanitize_probe(params) else {
         debug!("node {node_id} sent a probe report with nothing usable in it");
         return Ok(());
@@ -1462,6 +1471,31 @@ mod tests {
         assert!(!release(&app, id, 1), "a stale session must release nothing");
         assert!(live(), "the reconnected agent stays online");
         assert!(app.agents.read().unwrap().contains_key(&id), "and keeps receiving probe pushes");
+    }
+
+    /// 探测结果也受 `--allow-ip-quality` 管 ✓ —— 不是"agent 探、hub 照收"✗。
+    #[test]
+    fn a_probe_report_from_a_node_that_did_not_allow_it_is_not_stored() {
+        let app = app();
+        let id = node(&app);
+        // 与 `sanitize_probe` 的用例同一份形状：能被存下来的那种。
+        let report = json!({"netflix": {"status": "unlocked", "region": "JP"}});
+
+        // 新节点默认没勾「允许 IP 质量检测」（`create_node` 不写这一列，列默认 0）。
+        probe(&app, id, &report).unwrap();
+        assert!(
+            app.db.node(id).unwrap().unwrap().probe.is_none(),
+            "没允许检测的节点，报上来的探测结果不该落库"
+        );
+
+        // 允许之后同一份报文就该存下来 —— 这条让上面那句"不该落库"不会因为报文本身有问题而假通过。
+        app.db.save_facts(id, &json!({"allow_ip_quality": true}), "", "ip").unwrap();
+        probe(&app, id, &report).unwrap();
+        let stored = app.db.node(id).unwrap().unwrap().probe;
+        assert!(
+            stored.as_deref().is_some_and(|s| s.contains("netflix")),
+            "允许之后同一份报文要被存下来，实际：{stored:?}"
+        );
     }
 
     #[test]
