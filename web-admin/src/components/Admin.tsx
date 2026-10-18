@@ -3597,7 +3597,7 @@ function Themes() {
             {/* 主题包里可选的 preview.png，所以后端不用告诉前端有没有这张图：
                 没有就是 404，图一直不显示。hidden 挂在 <a> 上而不是 <img> 上——
                 隐藏的是整个链接，否则卡片里留着一个高度为 0 却照样吃 gap-4 的空
-                链接。必须从 hidden 开始：带边框的 aspect-video 空盒子会在响应回
+                链接。必须从 hidden 开始：带边框的 h-[200px] 空盒子会在响应回
                 来之前就画出来，闪一下再消失。
                 缩略图被压到卡片那点宽度，比例不是 16:9 的还会被 object-cover
                 裁掉边，所以图本身要能点开看原尺寸——就地开一个对话框，不跳走。 */}
@@ -3608,18 +3608,18 @@ function Themes() {
             	onClick={() => setZoomed(theme)}
             >
             	{previewMissing.has(theme.short) ? (
-            		<span className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+            		<span className="flex h-[200px] w-full items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
             			这个主题没有预览图
             		</span>
             	) : (
             		<>
-            			{!previewLoaded.has(theme.short) && <Skeleton className="aspect-video w-full rounded-md" />}
+            			{!previewLoaded.has(theme.short) && <Skeleton className="h-[200px] w-full rounded-md" />}
             			<img
             				src={`/api/themes/${theme.short}/preview`}
             				alt={`${theme.name} 预览图`}
             				onLoad={() => setPreviewLoaded((s) => new Set(s).add(theme.short))}
             				onError={() => setPreviewMissing((s) => new Set(s).add(theme.short))}
-            				className={`${previewLoaded.has(theme.short) ? "" : "hidden"} aspect-video w-full rounded-md border object-cover object-top`}
+            				className={`${previewLoaded.has(theme.short) ? "" : "hidden"} h-[200px] w-full rounded-md border object-cover object-top`}
             			/>
             		</>
             	)}
@@ -3648,17 +3648,27 @@ function Themes() {
                 <p className="mt-1 text-sm text-muted-foreground">{theme.description}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  size="sm"
-                  variant={theme.selected ? "secondary" : "default"}
-                  disabled={theme.selected || !theme.usable}
-                  title={theme.usable ? undefined : "这个主题需要更新的 hub；升级后它会自动生效"}
-                  onClick={() => select(theme.short)}
-                >
-                  {theme.selected ? "使用中" : "使用"}
-                </Button>
+                {/* ⚠️ 当前主题**不再画一个 disabled 的「使用中」按钮** ✗✓：灰按钮在这个界面里
+                    的语义是"不可用 / 缺条件"，而"已经用它"是状态、不是禁用动作。状态由标题旁的
+                    「当前」徽标承担，这里只在**能换**的时候出现按钮。 */}
+                {!theme.selected && (
+                  <Button
+                    size="sm"
+                    disabled={!theme.usable}
+                    title={theme.usable ? undefined : "这个主题需要更新的 hub；升级后它会自动生效"}
+                    onClick={() => select(theme.short)}
+                  >
+                    使用
+                  </Button>
+                )}
                 {configFields(theme.config).length > 0 && (
-                  <Button size="icon" variant="ghost" title="主题设置" onClick={() => configure(theme)}>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="主题设置"
+                    aria-label="主题设置"
+                    onClick={() => configure(theme)}
+                  >
                     <SlidersHorizontal />
                   </Button>
                 )}
@@ -3671,6 +3681,7 @@ function Themes() {
                         ? `从 GitHub 更新到 ${updates.themes[theme.short].latest}`
                         : "从 GitHub 更新"
                     }
+                    aria-label="从 GitHub 更新"
                     disabled={!!busy}
                     onClick={() => update(theme)}
                   >
@@ -4980,12 +4991,27 @@ function Security({ site }: { site: string }) {
       <Card className="gap-4 p-5">
         <div>
           <h3 className="text-sm font-medium">GitHub 单点登录</h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            OAuth App 回调地址 <code className="rounded bg-muted px-1">{callback}</code>
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span>OAuth App 回调地址</span>
+            {/* `break-all`：这个地址是一整串没有空格的 URL，窄屏上不换行会把整页撑出横向滚动。 */}
+            <code className="rounded bg-muted px-1 break-all">{callback}</code>
+            {/* 这个地址要拿去 GitHub 后台粘贴，复制是这一步最常做的动作。 */}
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-6"
+              title="复制回调地址"
+              aria-label="复制回调地址"
+              onClick={() => copy(callback)}
+            >
+              <Copy className="size-3.5" />
+            </Button>
           </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Client ID">
+          {/* ⚠️ 两列**状态写法要对称** ✗✓：原来只有 Secret 下面写"未设置"，Client ID 下面空着，
+              看起来像是漏了一行。现在两边都写"已填 / 未填"这类状态。 */}
+          <Field label="Client ID" hint={String(s.github_client_id ?? "") ? "已填写" : "未填写"}>
             <Input value={String(s.github_client_id ?? "")} onChange={(e) => set("github_client_id", e.target.value)} />
           </Field>
           <Field label="Client Secret" hint={s.github_secret_set ? "已设置，留空不变" : "未设置"}>
@@ -5026,13 +5052,25 @@ function Security({ site }: { site: string }) {
             GitHub 不可用时的备用入口。修改后其它设备登录立即失效，当前设备不受影响。
           </p>
         </div>
-        <Field label="新密码" hint="至少 12 位">
+        <Field
+          label="新密码"
+          // 实时说差多少位：固定的"至少 12 位"配一个灰按钮，读者不知道**还差多少**、
+          // 也不知道按钮为什么不能点。
+          hint={
+            password.length === 0
+              ? "至少 12 位"
+              : password.length < 12
+                ? `已输入 ${password.length} 位，还差 ${12 - password.length} 位`
+                : `长度足够（${password.length} 位）`
+          }
+        >
           <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
         </Field>
         <div>
           <Button
             size="sm"
             disabled={password.length < 12}
+            title={password.length < 12 ? "至少 12 位" : undefined}
             onClick={() => save({ admin_password: password }).then(() => setPassword(""))}
           >
             修改密码
@@ -5133,7 +5171,14 @@ function Data() {
   return (
     <div className="space-y-4">
       <Card className="gap-4 p-5">
-        <h3 className="text-sm font-medium">数据库</h3>
+        {/* 路径挪到标题右侧：它原来自占一行，只为显示一个路径 —— 而它是"这台机器上是哪个文件"
+            这种一眼信息，跟标题同级更合适。 */}
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <h3 className="text-sm font-medium">数据库</h3>
+          <code className="min-w-0 truncate text-xs text-muted-foreground" title={info.path}>
+            {info.path}
+          </code>
+        </div>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {stat("文件大小", bytes(info.size))}
           {stat("预写日志", bytes(info.wal))}
@@ -5142,7 +5187,8 @@ function Data() {
           {/* 和保留天数并排：跨度小于保留期是还没攒够，大于保留期就是每小时
               那次 prune 没在跑。 */}
           {stat("历史跨度", info.oldest ? `${Math.floor((Date.now() / 1000 - info.oldest) / 86400)} 天` : "—")}
-          {DB_ROWS.map(([key, label]) => stat(label, (info.rows[key] ?? 0).toLocaleString()))}
+          {/* 单位：这两个数是**行数**，不加单位会被读成"个/台"之类。 */}
+          {DB_ROWS.map(([key, label]) => stat(label, `${(info.rows[key] ?? 0).toLocaleString()} 条`))}
         </div>
         {/* ⚠️ 两个数字是死的 ✗✓：`历史跨度 7 天` 与 `保留天数 90 天` 并排，读者要自己算
             "离满还有多久"。一条进度条把这件事变成一眼。 */}
@@ -5159,9 +5205,6 @@ function Data() {
             </div>
           </div>
         )}
-        <p className="truncate text-xs text-muted-foreground" title={info.path}>
-          <code>{info.path}</code>
-        </p>
       </Card>
 
       <Card className="gap-4 p-5">
