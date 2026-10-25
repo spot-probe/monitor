@@ -25,13 +25,66 @@ const LONG_POLL: u64 = 25;
 /// 一条命令最多回多少台节点 —— 再多就该去面板看了（Telegram 单条也有 4096 字上限）。
 const MAX_LINES: usize = 25;
 
-const HELP: &str = "<b>可用命令</b>
-/status —— 集群概览
-/nodes —— 节点列表（在线、版本、CPU/内存）
-/node &lt;名字&gt; —— 单台详情
-/traffic —— 今日与本月流量
-/probe —— 各节点最近一次流媒体探测
-/upgrade &lt;名字&gt; —— 远程升级（会先弹确认按钮）";
+/// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
+/// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
+const COMMANDS: [(&str, &str); 6] = [
+    ("/status", "集群概览"),
+    ("/nodes", "节点列表（在线、版本、CPU/内存）"),
+    ("/node <名字>", "单台详情，也可以 /node 3"),
+    ("/traffic", "今日与本月流量"),
+    ("/probe", "各节点最近一次流媒体探测"),
+    ("/upgrade <名字>", "远程升级（会先弹确认按钮）"),
+];
+
+/// 一行的显示宽度：CJK / 全角字符在等宽字体里占**两格** ✓。
+/// 只按 `chars().count()` 补空格，中文名与英文名就会错位。
+fn width(s: &str) -> usize {
+    s.chars().map(|c| if wide(c) { 2 } else { 1 }).sum()
+}
+
+fn wide(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+    )
+}
+
+fn blank_to(s: &str, w: usize) -> String {
+    let mut out = s.to_string();
+    for _ in width(s)..w {
+        out.push(' ');
+    }
+    out
+}
+
+/// 截到 `w` 列（含省略号）。长机器名在手机上会把整行挤到换行，换行之后对齐就废了。
+fn clip(s: &str, w: usize) -> String {
+    if width(s) <= w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let cw = if wide(c) { 2 } else { 1 };
+        if used + cw > w.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
 
 /// Telegram API 的根。生产里没有理由改它 —— 存在的意义是**能用本地假服务器把轮询、
 /// 会话过滤与回复跑一遍**：这三条只能在进程外验证，而单元测试碰不到 HTTP。
@@ -112,7 +165,13 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
     let Some((cmd, arg)) = command(text) else { return };
     let snapshot = frame(app);
     match cmd {
-        "start" | "help" => reply(app, token, chat, HELP.to_string()).await,
+        "start" | "help" => {
+            // 品牌名就是面板里配的站点名（维护者要的"SRVS TGBot"）；没配就叫 Monitor。
+            let site = setting(app, "site_name")
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Monitor".to_string());
+            reply(app, token, chat, help_text(&site)).await
+        }
         "status" => reply(app, token, chat, status_text(&snapshot)).await,
         "nodes" => reply(app, token, chat, nodes_text(&snapshot)).await,
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
@@ -274,9 +333,17 @@ fn nodes_of(frame: &Value) -> Vec<Value> {
     frame.get("nodes").and_then(Value::as_array).cloned().unwrap_or_default()
 }
 
-fn find_node(frame: &Value, wanted: &str) -> Option<Value> {
-    let needle = wanted.to_lowercase();
-    nodes_of(frame).into_iter().find(|n| n["name"].as_str().unwrap_or("").to_lowercase().contains(&needle))
+/// `/start`：品牌 + 一张等宽对齐的命令表。
+fn help_text(site: &str) -> String {
+    let w = COMMANDS.iter().map(|(c, _)| width(c)).max().unwrap_or(0);
+    let mut pre = String::new();
+    for (cmd, about) in COMMANDS {
+        pre.push_str(&blank_to(cmd, w));
+        pre.push_str("  ");
+        pre.push_str(about);
+        pre.push('\n');
+    }
+    format!("<b>{}</b> TGBot · 运维命令\n<pre>{}</pre>", esc(site), esc(pre.trim_end()))
 }
 
 fn status_text(frame: &Value) -> String {
@@ -296,59 +363,89 @@ fn status_text(frame: &Value) -> String {
     out
 }
 
+/// `/nodes`：**编号 + 对齐的三列**（名字 / 版本 / CPU·内存）。
+/// 编号是给 `/node 3` 用的 —— 名字里有中文和连字符，手打容易错。
 fn nodes_text(frame: &Value) -> String {
     let nodes = nodes_of(frame);
     if nodes.is_empty() {
-        return "还没有节点。".into();
+        return "还没有节点。发 /start 看命令。".into();
     }
-    let mut out = String::new();
-    for node in nodes.iter().take(MAX_LINES) {
-        out.push_str(&node_line(node));
-        out.push('\n');
+    let total = nodes.len();
+    let online = nodes.iter().filter(|n| n["online"] == true).count();
+    let shown: Vec<&Value> = nodes.iter().take(MAX_LINES).collect();
+    let iw = shown.len().to_string().len().max(2);
+    // 名字列**限宽**：手机上整行超过约 40 列会折行，折行之后对齐就没了。
+    let nw = shown.iter().map(|n| width(n["name"].as_str().unwrap_or("?"))).max().unwrap_or(0).clamp(8, 16);
+    let mut pre = String::new();
+    for (i, node) in shown.iter().enumerate() {
+        let online = node["online"] == true;
+        let name = node["name"].as_str().unwrap_or("?");
+        let version = node["agent_version"].as_str().unwrap_or("");
+        let metrics = node.get("metrics").filter(|m| !m.is_null());
+        let cpu = metrics.and_then(|m| m.get("cpu")).and_then(Value::as_f64);
+        let mem = metrics.and_then(|m| {
+            let used = m.get("mem_used")?.as_f64()?;
+            let total = m.get("mem_total")?.as_f64()?;
+            (total > 0.0).then(|| used / total * 100.0)
+        });
+        let usage = match (cpu, mem) {
+            (Some(c), Some(m)) => format!("{c:>3.0}% / {m:>3.0}%"),
+            _ => "—".into(),
+        };
+        pre.push_str(&format!("{:>iw$} ", i + 1, iw = iw));
+        pre.push_str(if online { "● " } else { "○ " });
+        pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
+        pre.push_str("  ");
+        pre.push_str(&blank_to(&esc(if version.is_empty() { "?" } else { version }), 6));
+        pre.push(' ');
+        pre.push_str(&usage);
+        pre.push('\n');
     }
-    if nodes.len() > MAX_LINES {
-        out.push_str(&format!("…还有 {} 台，去面板看全部。\n", nodes.len() - MAX_LINES));
+    let mut out = format!(
+        "<b>节点 {total} 台</b> · 在线 {online} · 离线 {}\n<pre>{}</pre>",
+        total - online,
+        pre.trim_end()
+    );
+    if total > MAX_LINES {
+        out.push_str(&format!("\n…还有 {} 台，去面板看全部。", total - MAX_LINES));
     }
-    out.trim_end().to_string()
+    out.push_str("\n用 <code>/node</code> 加编号看单台，例如 <code>/node 1</code>。");
+    out
 }
 
-fn node_line(node: &Value) -> String {
-    let online = node["online"] == true;
-    let name = node["name"].as_str().unwrap_or("?");
-    let version = node["agent_version"].as_str().unwrap_or("");
-    let cpu = node.pointer("/metrics/cpu").and_then(Value::as_f64);
-    let mem_used = node.pointer("/metrics/mem_used").and_then(Value::as_f64);
-    let mem_total = node.pointer("/metrics/mem_total").and_then(Value::as_f64);
-    let usage = match (mem_used, mem_total) {
-        (Some(used), Some(total)) if total > 0.0 => {
-            format!("{:.0}% / {:.0}%", cpu.unwrap_or(0.0), used / total * 100.0)
+/// 找节点：**先认编号**（`/nodes` 里那个），再认名字的一部分。
+fn find_node(frame: &Value, wanted: &str) -> Option<Value> {
+    let nodes = nodes_of(frame);
+    let t = wanted.trim();
+    if let Ok(n) = t.parse::<usize>() {
+        if n >= 1 {
+            if let Some(node) = nodes.get(n - 1) {
+                return Some(node.clone());
+            }
         }
-        _ => "—".into(),
-    };
-    format!(
-        "{} <b>{}</b> · <code>{}</code> · {usage}",
-        if online { "●" } else { "○" },
-        esc(name),
-        esc(if version.is_empty() { "?" } else { version })
-    )
+    }
+    let needle = t.to_lowercase();
+    nodes.into_iter().find(|n| n["name"].as_str().unwrap_or("").to_lowercase().contains(&needle))
 }
 
+/// `/node`：标题一行 + **标签对齐的等宽块**。
+/// 原来是一长串 `·` 分隔的行，读者要在句子里找数字；改成"标签一列、值一列"之后，
+/// 同一台机器的 CPU / 内存 / 磁盘 / 流量 / 到期可以竖着扫。
 fn node_text(frame: &Value, wanted: &str) -> String {
-    if wanted.is_empty() {
-        return "用法：/node &lt;名字&gt;（名字的一部分也行）".into();
+    if wanted.trim().is_empty() {
+        return "用法：/node &lt;名字或编号&gt;（编号就是 /nodes 里的序号）".into();
     }
     let Some(node) = find_node(frame, wanted) else {
-        return format!("没找到名字里含「{}」的节点。", esc(wanted));
+        return format!("没找到「{}」。发 /nodes 看编号。", esc(wanted.trim()));
     };
     let name = node["name"].as_str().unwrap_or("?");
     let online = node["online"] == true;
-    let mut out = format!("<b>{}</b> · {}\n", esc(name), if online { "在线" } else { "离线" });
+    let mut rows: Vec<(&str, String)> = Vec::new();
     if let Some(v) = node["agent_version"].as_str().filter(|v| !v.is_empty()) {
-        out.push_str(&format!("agent <code>{}</code>", esc(v)));
-        if let Some(os) = node["os"].as_str().filter(|v| !v.is_empty()) {
-            out.push_str(&format!(" · {}", esc(os)));
-        }
-        out.push('\n');
+        rows.push(("agent", v.to_string()));
+    }
+    if let Some(os) = node["os"].as_str().filter(|v| !v.is_empty()) {
+        rows.push(("系统", clip(os, 30)));
     }
     if let Some(m) = node.get("metrics").filter(|m| !m.is_null()) {
         let pct = |key: &str, total: &str| {
@@ -356,37 +453,36 @@ fn node_text(frame: &Value, wanted: &str) -> String {
             let total = m.get(total).and_then(Value::as_f64)?;
             (total > 0.0).then(|| format!("{:.0}%", used / total * 100.0))
         };
-        let mut parts = Vec::new();
         if let Some(cpu) = m.get("cpu").and_then(Value::as_f64) {
-            parts.push(format!("CPU {cpu:.0}%"));
+            rows.push(("CPU", format!("{cpu:.0}%")));
         }
         if let Some(v) = pct("mem_used", "mem_total") {
-            parts.push(format!("内存 {v}"));
+            rows.push(("内存", v));
         }
         if let Some(v) = pct("disk_used", "disk_total") {
-            parts.push(format!("磁盘 {v}"));
-        }
-        if !parts.is_empty() {
-            out.push_str(&parts.join(" · "));
-            out.push('\n');
+            rows.push(("磁盘", v));
         }
     }
-    let (day_down, day_up) = (num(&node, "day_rx"), num(&node, "day_tx"));
-    let (month_down, month_up) = (num(&node, "month_rx"), num(&node, "month_tx"));
-    out.push_str(&format!(
-        "今日 <code>↓{} ↑{}</code> · 本月 <code>↓{} ↑{}</code>\n",
-        bytes(day_down),
-        bytes(day_up),
-        bytes(month_down),
-        bytes(month_up)
-    ));
+    rows.push(("今日", format!("↓{} ↑{}", bytes(num(&node, "day_rx")), bytes(num(&node, "day_tx")))));
+    rows.push(("本月", format!("↓{} ↑{}", bytes(num(&node, "month_rx")), bytes(num(&node, "month_tx")))));
     if let Some(at) = node["expires_at"].as_str().filter(|v| !v.is_empty()) {
-        match node.get("expires_in").and_then(Value::as_f64) {
-            Some(days) => out.push_str(&format!("到期 <code>{}</code>（{days:.0} 天）", esc(at))),
-            None => out.push_str(&format!("到期 <code>{}</code>", esc(at))),
-        }
+        rows.push((
+            "到期",
+            match node.get("expires_in").and_then(Value::as_f64) {
+                Some(days) => format!("{}（{days:.0} 天）", at),
+                None => at.to_string(),
+            },
+        ));
     }
-    out.trim_end().to_string()
+    let w = rows.iter().map(|(k, _)| width(k)).max().unwrap_or(0);
+    let mut pre = String::new();
+    for (label, value) in &rows {
+        pre.push_str(&blank_to(label, w));
+        pre.push_str("  ");
+        pre.push_str(&esc(value));
+        pre.push('\n');
+    }
+    format!("<b>{}</b> · {}\n<pre>{}</pre>", esc(name), if online { "在线" } else { "离线" }, pre.trim_end())
 }
 
 fn traffic_text(frame: &Value) -> String {
@@ -523,25 +619,64 @@ mod tests {
     }
 
     #[test]
-    fn the_list_shows_a_dot_a_bold_name_and_a_version() {
+    fn the_list_is_numbered_aligned_and_carries_cpu_and_memory() {
         let text = nodes_text(&frame());
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "{text}");
-        assert!(lines[0].starts_with("● <b>hk-1</b>"), "{}", lines[0]);
-        assert!(lines[0].contains("<code>1.1.17</code>"), "{}", lines[0]);
-        assert!(lines[0].contains("2% / 50%"), "CPU 与内存百分比：{}", lines[0]);
-        assert!(lines[1].starts_with("○ <b>la-2</b>"), "离线用空心点：{}", lines[1]);
-        assert!(lines[1].contains('—'), "没有指标就写破折号：{}", lines[1]);
+        // 编号 + 圆点 + 名字 + 版本 + 用量，一列都不许糊在一起
+        assert!(text.contains("<b>节点 2 台</b> · 在线 1 · 离线 1"), "{text}");
+        assert!(text.contains("<pre>"), "整块要用等宽字体才对得齐：{text}");
+        assert!(text.contains(" 1 ● hk-1"), "第 1 台：{text}");
+        assert!(text.contains(" 2 ○ la-2"), "离线用空心点：{text}");
+        assert!(text.contains("1.1.17"), "{text}");
+        assert!(text.contains("  2% /  50%"), "CPU/内存右对齐：{text}");
+        assert!(text.contains('—'), "没有指标就写破折号：{text}");
+        assert!(text.contains("/node"), "页脚要告诉读者怎么按编号看单台：{text}");
+    }
+
+    /// 编号能直接喂给 `/node`（维护者要的"用序号代替名字"）。
+    #[test]
+    fn a_node_can_be_found_by_its_number() {
+        assert!(node_text(&frame(), "1").contains("<b>hk-1</b>"));
+        assert!(node_text(&frame(), " 2 ").contains("<b>la-2</b>"));
+        // 超出范围就退回按名字找，而不是 panic
+        assert!(node_text(&frame(), "9").contains("没找到"));
+    }
+
+    /// 中文 / 全角在等宽字体里占两格 —— 只按字符数补空格会让中文名错位。
+    #[test]
+    fn wide_characters_take_two_columns() {
+        assert_eq!(width("hk-1"), 4);
+        assert_eq!(width("阿里云"), 6);
+        assert_eq!(width("（x）"), 5);
+        assert_eq!(blank_to("云", 4), "云  ");
+        assert_eq!(clip("腾讯云硅谷-PPANEL", 8), "腾讯云…");
+    }
+
+    /// `/start`：品牌名 + 等宽对齐的命令表（品牌取站点名）。
+    #[test]
+    fn the_help_is_branded_and_its_columns_line_up() {
+        let text = help_text("SRVS");
+        assert!(text.contains("<b>SRVS</b> TGBot · 运维命令"), "{text}");
+        let body = text.split("<pre>").nth(1).unwrap().split("</pre>").next().unwrap();
+        let w = COMMANDS.iter().map(|(c, _)| width(c)).max().unwrap();
+        for (cmd, _) in COMMANDS {
+            // 帮助文本整体过了 HTML 转义（`/node <名字>` → `/node &lt;名字&gt;`），断言也要转一次。
+            let want = esc(&blank_to(cmd, w));
+            assert!(body.lines().any(|l| l.starts_with(&want)), "「{cmd}」没补齐：{body}");
+        }
     }
 
     #[test]
     fn a_node_is_found_by_part_of_its_name() {
         let text = node_text(&frame(), "HK");
         assert!(text.contains("<b>hk-1</b> · 在线"), "{text}");
-        assert!(text.contains("agent <code>1.1.17</code> · Debian 12"), "{text}");
-        assert!(text.contains("CPU 2% · 内存 50% · 磁盘 40%"), "{text}");
-        assert!(text.contains("今日 <code>↓1.20 GB ↑300 MB</code>"), "{text}");
-        assert!(text.contains("到期 <code>2027-03-14</code>（147 天）"), "{text}");
+        assert!(text.contains("<pre>"), "标签与值要在等宽块里：{text}");
+        assert!(text.contains("agent  1.1.17"), "{text}");
+        assert!(text.contains("系统   Debian 12"), "{text}");
+        assert!(text.contains("CPU    2%"), "{text}");
+        assert!(text.contains("内存   50%"), "{text}");
+        assert!(text.contains("磁盘   40%"), "{text}");
+        assert!(text.contains("今日   ↓1.20 GB ↑300 MB"), "{text}");
+        assert!(text.contains("到期   2027-03-14（147 天）"), "{text}");
         assert!(node_text(&frame(), "没有这台").contains("没找到"));
         assert!(node_text(&frame(), "").contains("用法"));
     }
