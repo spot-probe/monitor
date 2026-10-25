@@ -37,6 +37,9 @@ pub struct Note {
     /// Unix seconds, stamped when queued: delivery can trail the event by minutes
     /// while a channel is retried.
     pub time: i64,
+    /// 这条通知涉及哪些节点（id）。**只用来挂按钮**（静音 / 看详情）：
+    /// 文字里带的是名字，而按钮的 `callback_data` 需要 id。0 表示"没有具体节点"。
+    pub ids: Vec<i64>,
 }
 
 /// Alerts awaiting delivery. A channel that stays down holds each alert for
@@ -309,6 +312,9 @@ fn channels(app: &App) -> Vec<Channel> {
 struct Failure {
     retry: bool,
     reason: String,
+    /// Telegram 限流（429）会给 `retry_after` 秒。**必须按它等**：按我们自己的 10 秒退避去撞，
+    /// 只会一路 429 到三次用完、把这条通知丢掉。
+    wait: Option<Duration>,
 }
 
 /// The client alerts are sent with, separate from `App::http` because it must not
@@ -343,21 +349,52 @@ async fn post(app: &App, channel: &Channel, note: &Note) -> Result<(), Failure> 
     outcome
 }
 
+/// Telegram 单条上限 4096 字符，超了**整条拒收**（不是截断）。留一点余量。
+pub fn clip_message(text: &str) -> String {
+    const MAX: usize = 4_000;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(MAX).collect();
+    format!("{cut}\n…（已截断）")
+}
+
+/// 告警下面那两颗按钮。只在**单台**通知上挂，且只给离线/恢复这类"现在能动手"的事件。
+pub fn alert_buttons(note: &Note) -> Option<Value> {
+    let [id] = note.ids.as_slice() else { return None };
+    if !matches!(note.event, "offline" | "online") {
+        return None;
+    }
+    Some(json!({ "inline_keyboard": [[
+        { "text": "静音 1 小时", "callback_data": format!("mute:60:{id}") },
+        { "text": "详情", "callback_data": format!("node:{id}") },
+    ]] }))
+}
+
 async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Failure> {
     let site = site_name(app);
     let request = match channel {
         // Plain text: under a parse mode Telegram rejects a message whose node
         // name happens to contain markup.
-        Channel::Telegram { token, chat, text } => client()
-            .post(format!("https://api.telegram.org/bot{token}/sendMessage"))
-            .json(&json!({"chat_id": chat, "text": render(text, note, &site, false)})),
+        Channel::Telegram { token, chat, text } => {
+            let mut body = json!({"chat_id": chat, "text": clip_message(&render(text, note, &site, false))});
+            // 单台节点上的告警挂两颗按钮：一眼能做的两件事（先静音、再看详情）。
+            // ⚠️ 多台合并的那条不挂：`callback_data` 只有 64 字节，装不下 N 个 id，
+            // 而"静音全部"与"只想静音这一台"是两种意图，不该由一次点击去猜。
+            if let Some(keyboard) = alert_buttons(note) {
+                body["reply_markup"] = keyboard;
+            }
+            client().post(format!("https://api.telegram.org/bot{token}/sendMessage")).json(&body)
+        }
         Channel::Webhook { url, headers, body } => {
             // `insert` into one map: `RequestBuilder::header` and `HeaderMap::extend`
             // both append, which would send a configured Content-Type alongside the
             // default instead of in its place.
             let mut map = HeaderMap::new();
             map.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            for (name, value) in parse_headers(headers).map_err(|reason| Failure { retry: false, reason })? {
+            for (name, value) in
+                parse_headers(headers).map_err(|reason| Failure { retry: false, reason, wait: None })?
+            {
                 map.insert(name, value);
             }
             client().post(url).headers(map).body(render(body, note, &site, true))
@@ -367,6 +404,7 @@ async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Fail
     // webhook's is often the credential, and the error reaches both the journal
     // and the panel.
     let mut response = request.send().await.map_err(|e| Failure {
+        wait: None,
         retry: true,
         reason: format!("{:#}", anyhow::Error::from(e.without_url())),
     })?;
@@ -376,17 +414,26 @@ async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Fail
     }
     if status.is_redirection() {
         let reason = format!("{status}: the URL redirects; enter the address it redirects to");
-        return Err(Failure { retry: false, reason });
+        return Err(Failure { retry: false, reason, wait: None });
     }
     // The first chunk carries the reason (Telegram's `description`, Discord's
     // `message`) without reading an error page of arbitrary length.
     let head = response.chunk().await.ok().flatten().unwrap_or_default();
+    let body = String::from_utf8_lossy(&head);
+    // 429 的 `parameters.retry_after` 是**唯一**该信的数字：按自己的 10 秒去撞，只会一直 429。
+    let wait = if status == StatusCode::TOO_MANY_REQUESTS {
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.pointer("/parameters/retry_after").and_then(Value::as_f64))
+            .filter(|s| *s > 0.0)
+            .map(Duration::from_secs_f64)
+    } else {
+        None
+    };
     Err(Failure {
         retry: status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS,
-        reason: format!(
-            "{status}: {}",
-            String::from_utf8_lossy(&head).chars().take(300).collect::<String>().trim()
-        ),
+        wait,
+        reason: format!("{status}: {}", body.chars().take(300).collect::<String>().trim()),
     })
 }
 
@@ -424,7 +471,7 @@ pub async fn deliver(app: Shared, mut inbox: mpsc::Receiver<Note>) {
                     }
                     Err(f) => {
                         debug!("{} alert {:?}, attempt {attempt}: {}", channel.name(), note.title, f.reason);
-                        tokio::time::sleep(RETRY).await;
+                        tokio::time::sleep(f.wait.unwrap_or(RETRY)).await;
                     }
                 }
             }
@@ -467,7 +514,7 @@ pub fn signed_in(app: &App, how: &str, ip: IpAddr) {
 }
 
 /// Expiry dates that housekeeping rolled forward, as `(name, "old → new")`.
-pub fn renewed(app: &App, items: Vec<(&str, String)>) {
+pub fn renewed(app: &App, items: Vec<(i64, &str, String)>) {
     if number(app, "notify_expiry") > 0 {
         if let Some(note) = batch("renew", "🔁", "已自动续期", items) {
             send(app, note);
@@ -507,7 +554,7 @@ pub fn expiry_digest(app: &App, now: DateTime<Local>) -> Result<Option<Note>> {
                 0 => "今天到期".into(),
                 d => format!("还剩 {d} 天"),
             };
-            (name.as_str(), format!("{date} {left}"))
+            (0, name.as_str(), format!("{date} {left}"))
         })
         .collect();
     Ok(batch("expiry", "⏳", "即将到期", items))
@@ -515,21 +562,22 @@ pub fn expiry_digest(app: &App, now: DateTime<Local>) -> Result<Option<Note>> {
 
 /// One alert for any number of nodes: a list in the message, the names in
 /// `node`. `None` when there is nothing to say.
-fn batch(event: &'static str, mark: &str, what: &str, items: Vec<(&str, String)>) -> Option<Note> {
+fn batch(event: &'static str, mark: &str, what: &str, items: Vec<(i64, &str, String)>) -> Option<Note> {
     let (title, message) = match items.as_slice() {
         [] => return None,
-        [(name, detail)] => (format!("{mark} {name} {what}"), detail.clone()),
+        [(_, name, detail)] => (format!("{mark} {name} {what}"), detail.clone()),
         _ => {
             let mut lines: Vec<String> =
-                items.iter().take(LISTED).map(|(name, detail)| format!("{name} · {detail}")).collect();
+                items.iter().take(LISTED).map(|(_, name, detail)| format!("{name} · {detail}")).collect();
             if items.len() > LISTED {
                 lines.push(format!("……另外 {} 台", items.len() - LISTED));
             }
             (format!("{mark} {} 台节点{what}", items.len()), lines.join("\n"))
         }
     };
-    let node = items.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
-    Some(Note { event, node, title, message, ..Default::default() })
+    let node = items.iter().map(|(_, name, _)| *name).collect::<Vec<_>>().join(", ");
+    let ids: Vec<i64> = items.iter().map(|(id, _, _)| *id).filter(|id| *id > 0).collect();
+    Some(Note { event, node, title, message, ids, ..Default::default() })
 }
 
 /// The two tags the update alert is stamped with, either of which may be unread.
@@ -662,13 +710,17 @@ fn sweep(app: &App, watch: &mut Watch, now: i64) -> Result<Vec<Note>> {
     let armed = !channels(app).is_empty();
     let (mut down, mut up) = (Vec::new(), Vec::new());
     for node in &nodes {
+        // 静音期内**照常更新状态**，只是不往外发 —— 否则解除静音时"欠"了一堆旧告警。
+        let muted = node.muted_until > now;
         if online.contains(&node.id) {
             if watch.absent.remove(&node.id).is_some_and(|since| now - since >= grace) {
                 watch.returned.insert(node.id, now);
             }
             if node.down_since > 0 {
                 app.db.set_down_since(node.id, 0)?;
-                up.push((node.name.as_str(), format!("离线 {}", span(now - node.down_since))));
+                if !muted {
+                    up.push((node.id, node.name.as_str(), format!("离线 {}", span(now - node.down_since))));
+                }
             }
             continue;
         }
@@ -682,7 +734,9 @@ fn sweep(app: &App, watch: &mut Watch, now: i64) -> Result<Vec<Note>> {
         let wait = if flapping { FLAP_GRACE } else { grace };
         if armed && node.notify && node.down_since == 0 && now - since >= wait {
             app.db.set_down_since(node.id, node.last_seen)?;
-            down.push((node.name.as_str(), format!("最后上报 {}", clock(node.last_seen))));
+            if !muted {
+                down.push((node.id, node.name.as_str(), format!("最后上报 {}", clock(node.last_seen))));
+            }
         }
     }
     let mut notes: Vec<Note> = [batch("offline", "🔴", "离线", down), batch("online", "🟢", "恢复在线", up)]
@@ -742,7 +796,7 @@ fn sweep(app: &App, watch: &mut Watch, now: i64) -> Result<Vec<Note>> {
             gib(node.traffic_limit),
             t.month_start
         );
-        metered.push((node.name.as_str(), detail));
+        metered.push((node.id, node.name.as_str(), detail));
     }
     notes.extend(batch("traffic", "⚠️", "流量提醒", metered));
     watch.primed = true;
@@ -776,6 +830,15 @@ fn gib(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_notification_is_clipped_not_rejected() {
+        let long = "x".repeat(5_000);
+        let out = clip_message(&long);
+        assert!(out.chars().count() <= 4_020, "长度 {}", out.chars().count());
+        assert!(out.ends_with("已截断）"));
+        assert_eq!(clip_message("短"), "短");
+    }
     use crate::agent_ws::Agent;
     use crate::db::{Db, Node, NodePatch, TrafficPatch};
 
@@ -843,8 +906,13 @@ mod tests {
 
         // A long list is cut to what Discord and WeCom accept; `node` stays whole.
         let names: Vec<String> = (0..60).map(|i| format!("n{i}")).collect();
-        let note =
-            batch("offline", "🔴", "离线", names.iter().map(|n| (n.as_str(), "d".into())).collect()).unwrap();
+        let note = batch(
+            "offline",
+            "🔴",
+            "离线",
+            names.iter().enumerate().map(|(i, n)| (i as i64 + 1, n.as_str(), "d".into())).collect(),
+        )
+        .unwrap();
         assert_eq!(note.title, "🔴 60 台节点离线");
         assert_eq!(note.message.lines().count(), LISTED + 1);
         assert!(note.message.ends_with("……另外 40 台"));

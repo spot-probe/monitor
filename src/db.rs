@@ -180,7 +180,9 @@ CREATE TABLE IF NOT EXISTS node (
   upgrade_at      INTEGER NOT NULL DEFAULT 0,
   upgrade_ok      INTEGER NOT NULL DEFAULT 0,
   upgrade_version TEXT    NOT NULL DEFAULT '',
-  upgrade_reason  TEXT    NOT NULL DEFAULT ''
+  upgrade_reason  TEXT    NOT NULL DEFAULT '',
+  -- 静音到这个时刻（unix 秒，0 = 没静音）✓。计划内重启/换内核时，"现在别吵"是运维最常做的动作。
+  muted_until     INTEGER NOT NULL DEFAULT 0
 );
 
 -- Monotonic byte counters that survive both agent reboots and hub restarts.
@@ -392,7 +394,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 /// 探测历史保留多少天 ✓ —— 30 天 ✓（按 6 小时一次算 = 120 个点 ✓，
 /// 足够看出"从什么时候开始不对劲" ✓，而那是这个功能唯一的用途 ✓）。
@@ -613,6 +615,11 @@ fn migrate_to_26(conn: &Connection) -> Result<()> {
 ) WITHOUT ROWID;",
     )?;
     Ok(())
+}
+
+/// 28：节点静音到期时刻。只加一列，`0` 表示没静音 ✓。
+fn migrate_to_28(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", "muted_until INTEGER NOT NULL DEFAULT 0")
 }
 
 fn migrate_to_27(conn: &Connection) -> Result<()> {
@@ -844,6 +851,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 27 {
         migrate_to_27(&tx)?;
     }
+    if from < 28 {
+        migrate_to_28(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -937,6 +947,9 @@ pub struct Node {
     pub upgrade_version: String,
     #[serde(default)]
     pub upgrade_reason: String,
+    /// 静音到这个时刻（unix 秒）；0 = 没静音。这段时间里它的离线/恢复都不发通知。
+    #[serde(default)]
+    pub muted_until: i64,
     /// Monthly allowance in bytes; 0 means unmetered.
     #[serde(default)]
     pub traffic_limit: i64,
@@ -1912,6 +1925,13 @@ impl Db {
 
     pub fn set_down_since(&self, id: i64, ts: i64) -> Result<()> {
         self.conn().execute("UPDATE node SET down_since=?2 WHERE id=?1", params![id, ts])?;
+        Ok(())
+    }
+
+    /// 静音到 `until`（unix 秒，0 = 取消）。节点不存在就当没发生 —— 调用方（机器人）已经报过错了。
+    pub fn set_muted(&self, id: i64, until: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("UPDATE node SET muted_until = ?1 WHERE id = ?2", params![until, id])?;
         Ok(())
     }
 
@@ -4324,6 +4344,7 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         upgrade_ok: r.get::<_, Option<i64>>("upgrade_ok").ok().flatten().unwrap_or(0) != 0,
         upgrade_version: r.get::<_, Option<String>>("upgrade_version").ok().flatten().unwrap_or_default(),
         upgrade_reason: r.get::<_, Option<String>>("upgrade_reason").ok().flatten().unwrap_or_default(),
+        muted_until: r.get::<_, Option<i64>>("muted_until").ok().flatten().unwrap_or(0),
         traffic_limit: n("traffic_limit"),
         traffic_mode: s("traffic_mode"),
         traffic_reset_day: n("traffic_reset_day") as u32,

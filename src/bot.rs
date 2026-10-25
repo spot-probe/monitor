@@ -27,12 +27,14 @@ const MAX_LINES: usize = 25;
 
 /// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
 /// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
-const COMMANDS: [(&str, &str); 5] = [
+const COMMANDS: [(&str, &str); 7] = [
     ("/nodes", "集群概览 + 节点列表（在线、版本、CPU/内存）"),
     ("/node <名字>", "单台详情，也可以 /node 3"),
     ("/traffic", "今日与本月流量"),
     ("/probe", "各节点最近一次流媒体探测"),
     ("/upgrade <名字>", "远程升级（会先弹确认按钮）"),
+    ("/mute <名字> [2h]", "静音（默认 1 小时）"),
+    ("/muted", "现在静音了哪些"),
 ];
 
 /// 一行的显示宽度：CJK / 全角字符在等宽字体里占**两格** ✓。
@@ -215,6 +217,8 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
         }
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
         "upgrade" => ask_upgrade(app, token, chat, &snapshot, arg).await,
+        "mute" | "unmute" => mute_cmd(app, token, chat, &snapshot, arg, cmd == "mute").await,
+        "muted" => reply(app, token, chat, muted_text(&snapshot)).await,
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
         other => {
             if let Some(text) = render(other, &snapshot) {
@@ -232,6 +236,32 @@ async fn reply(app: &App, token: &str, chat: &str, text: String) {
 async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: Option<Value>) {
     if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
+    }
+}
+
+/// `/mute <编号|名字> [2h]` / `/unmute <编号|名字>`。
+async fn mute_cmd(app: &Shared, token: &str, chat: &str, snapshot: &Value, arg: &str, on: bool) {
+    // 名字里可能有空格（"mkcloud 深港"），所以**从右边**试一次时长；不像时长就整段当名字。
+    let (target, span) = match arg.rsplit_once(char::is_whitespace) {
+        Some((t, s)) if parse_span(s).is_some() => (t.trim(), parse_span(s).unwrap_or(3600)),
+        _ => (arg.trim(), 3600),
+    };
+    if target.is_empty() {
+        return reply(app, token, chat, "用法：/mute &lt;编号或名字&gt; [10m|2h|1d]（默认 1 小时）".into())
+            .await;
+    }
+    let Some(node) = find_node(snapshot, target) else {
+        return reply(app, token, chat, format!("没找到「{}」。发 /nodes 看编号。", esc(target))).await;
+    };
+    let name = node["name"].as_str().unwrap_or("?").to_string();
+    let id = node["id"].as_i64().unwrap_or(0);
+    let until = if on { chrono::Utc::now().timestamp() + span } else { 0 };
+    match app.db.set_muted(id, until) {
+        Ok(()) if on => {
+            reply(app, token, chat, format!("已静音 <b>{}</b> 到 {}。", esc(&name), clock(until))).await
+        }
+        Ok(()) => reply(app, token, chat, format!("已取消 <b>{}</b> 的静音。", esc(&name))).await,
+        Err(e) => reply(app, token, chat, format!("没能改静音：{}", esc(&e.to_string()))).await,
     }
 }
 
@@ -287,6 +317,50 @@ async fn callback(app: &Shared, token: &str, chat: &str, query: &Value) {
         }
         return;
     }
+    // 告警下面那颗「静音 1 小时」：`mute:<分钟>:<节点 id>`。
+    if let Some(rest) = data.strip_prefix("mute:") {
+        if let Some((mins, node)) = rest.split_once(':') {
+            if let (Ok(mins), Ok(node_id)) = (mins.parse::<i64>(), node.parse::<i64>()) {
+                let until = chrono::Utc::now().timestamp() + mins * 60;
+                // ⚠️ `answer` 要的是**回调 id**（上面那个 `id`），不是节点 id —— 这里别把名字覆盖掉。
+                let _ = answer(app, token, id, "已静音").await;
+                match app.db.set_muted(node_id, until) {
+                    Ok(()) => {
+                        let name = nodes_of(&frame(app))
+                            .into_iter()
+                            .find(|n| n["id"].as_i64() == Some(node_id))
+                            .and_then(|n| n["name"].as_str().map(str::to_string))
+                            .unwrap_or_else(|| format!("#{node_id}"));
+                        reply(
+                            app,
+                            token,
+                            chat,
+                            format!("已静音 <b>{}</b> 到 {}。", esc(&name), clock(until)),
+                        )
+                        .await;
+                    }
+                    Err(e) => reply(app, token, chat, format!("没能改静音：{}", esc(&e.to_string()))).await,
+                }
+                return;
+            }
+        }
+    }
+    // 「详情」：`node:<id>` —— 把 `/node` 的输出直接发过来。
+    if let Some(rest) = data.strip_prefix("node:") {
+        if let Ok(node_id) = rest.parse::<i64>() {
+            let snapshot = frame(app);
+            if let Some(name) = nodes_of(&snapshot)
+                .into_iter()
+                .find(|n| n["id"].as_i64() == Some(node_id))
+                .and_then(|n| n["name"].as_str().map(str::to_string))
+            {
+                let _ = answer(app, token, id, "").await;
+                let text = node_text(&snapshot, &name);
+                reply(app, token, chat, text).await;
+            }
+        }
+        return;
+    }
     if data == "no" {
         let _ = answer(app, token, id, "已取消").await;
         return;
@@ -330,9 +404,35 @@ async fn answer(app: &App, token: &str, callback_id: &str, text: &str) -> Result
     Ok(())
 }
 
+/// 把超长消息**按行**截到 4000 字符以内，并补齐可能被截断的 `<pre>`。
+/// 整条超过 4096 时 Telegram 是**整条拒收**，命令看起来像"没反应" —— 那比截断糟得多。
+fn fit(text: &str) -> String {
+    const MAX: usize = 4_000;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for line in text.lines() {
+        let w = line.chars().count() + 1;
+        // 给 `</pre>` 与那句截断提示留出预算，否则补完尾巴又超了。
+        if used + w > MAX - 40 {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        used += w;
+    }
+    if out.matches("<pre>").count() > out.matches("</pre>").count() {
+        out.push_str("</pre>\n");
+    }
+    out.push_str("…（太长了，已截断）");
+    out
+}
+
 async fn post_message(app: &App, token: &str, chat: &str, text: &str, keyboard: Option<Value>) -> Result<()> {
     let url = format!("{}/bot{token}/sendMessage", api_base());
-    let mut body = json!({ "chat_id": chat, "text": text, "parse_mode": "HTML" });
+    let mut body = json!({ "chat_id": chat, "text": fit(text), "parse_mode": "HTML" });
     if let Some(markup) = keyboard {
         body["reply_markup"] = markup;
     }
@@ -535,6 +635,56 @@ fn node_text(frame: &Value, wanted: &str) -> String {
         pre.push('\n');
     }
     format!("<b>{}</b> · {}\n<pre>{}</pre>", esc(name), if online { "在线" } else { "离线" }, pre.trim_end())
+}
+
+/// `2h` / `30m` / `1d` / 裸数字（分钟）→ 秒。上限 30 天：静音到"永久"等于把告警关掉，
+/// 那件事应该去面板里做，而不是在聊天窗口里手滑。
+fn parse_span(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (num, mul) = match s.strip_suffix(['m', 'h', 'd']) {
+        Some(_) => {
+            let unit = s.chars().last()?;
+            let mul = match unit {
+                'm' => 60,
+                'h' => 3600,
+                _ => 86400,
+            };
+            (&s[..s.len() - 1], mul)
+        }
+        None => (s, 60),
+    };
+    let n: i64 = num.parse().ok()?;
+    (n > 0).then(|| (n * mul).min(30 * 86_400))
+}
+
+fn clock(at: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(at, 0)
+        .single()
+        .map(|t| t.format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| at.to_string())
+}
+
+/// 现在的静音名单。
+fn muted_text(frame: &Value) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let all = nodes_of(frame);
+    let muted: Vec<&Value> = all.iter().filter(|n| n["muted_until"].as_i64().unwrap_or(0) > now).collect();
+    if muted.is_empty() {
+        return "现在没有静音的节点。静音：<code>/mute 3 2h</code>".into();
+    }
+    let nw = muted.iter().map(|n| width(n["name"].as_str().unwrap_or("?"))).max().unwrap_or(0).clamp(8, 16);
+    let mut pre = String::new();
+    for (i, node) in muted.iter().enumerate() {
+        let until = node["muted_until"].as_i64().unwrap_or(0);
+        pre.push_str(&format!("{:>2} ", i + 1));
+        pre.push_str(&blank_to(&esc(&clip(node["name"].as_str().unwrap_or("?"), nw)), nw));
+        pre.push_str("  到 ");
+        pre.push_str(&clock(until));
+        pre.push('\n');
+    }
+    format!("<b>静音中 {} 台</b>\n<pre>{}</pre>", muted.len(), pre.trim_end())
 }
 
 /// 一台待升级节点的处置方式，**短标签**（表格里放不下 `upgrade_blocker` 的长句）。
@@ -887,6 +1037,61 @@ mod tests {
         let text = upgrade_list(&f);
         assert!(!text.contains("都是最新的"), "没拿到最新版本就不该下这个结论：{text}");
         assert!(text.contains("还没拿到最新版本号"), "{text}");
+    }
+
+    /// 超长消息要**截断**而不是让 Telegram 整条拒收；被截在 `<pre>` 里时要把标签补上。
+    #[test]
+    fn an_overlong_message_is_cut_at_a_line_and_keeps_its_tags_balanced() {
+        let long = format!("<pre>{}</pre>", "行\n".repeat(3000));
+        let fitted = fit(&long);
+        assert!(fitted.chars().count() <= 4000, "长度 {}", fitted.chars().count());
+        assert_eq!(fitted.matches("<pre>").count(), fitted.matches("</pre>").count());
+        assert!(fitted.ends_with("已截断）"), "{fitted}");
+        assert_eq!(fit("短"), "短", "没超长就原样返回");
+    }
+
+    /// 时长写法：`2h` / `30m` / `1d` / 裸数字（分钟）；上限 30 天。
+    #[test]
+    fn mute_spans_are_read_in_minutes_hours_and_days() {
+        assert_eq!(parse_span("30m"), Some(1800));
+        assert_eq!(parse_span("2h"), Some(7200));
+        assert_eq!(parse_span("1d"), Some(86_400));
+        assert_eq!(parse_span("90"), Some(5400), "裸数字 = 分钟");
+        assert_eq!(parse_span("0h"), None, "0 不是时长");
+        assert_eq!(parse_span("abc"), None);
+        assert_eq!(parse_span("999d"), Some(30 * 86_400), "封顶 30 天");
+    }
+
+    /// `/muted` 只列静音中的，且带到期时刻。
+    #[test]
+    fn the_mute_list_only_shows_nodes_still_muted() {
+        let now = chrono::Utc::now().timestamp();
+        let f = json!({ "nodes": [
+            { "id": 1, "name": "静音中的", "muted_until": now + 3600 },
+            { "id": 2, "name": "已过期", "muted_until": now - 60 },
+            { "id": 3, "name": "没静音", "muted_until": 0 }
+        ]});
+        let text = muted_text(&f);
+        assert!(text.contains("静音中的"), "{text}");
+        assert!(!text.contains("已过期") && !text.contains("没静音"), "只列还在静音的：{text}");
+        assert!(muted_text(&json!({ "nodes": [] })).contains("没有静音"));
+    }
+
+    /// 静音与详情按钮：只挂在**单台**的离线/恢复通知上。
+    #[test]
+    fn alert_buttons_only_ride_on_single_node_offline_alerts() {
+        use crate::notify::Note;
+        let one = Note { event: "offline", ids: vec![7], ..Default::default() };
+        let kb = crate::notify::alert_buttons(&one).expect("单台离线应当有按钮");
+        let rows = kb["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["callback_data"], "mute:60:7");
+        assert_eq!(rows[0][1]["callback_data"], "node:7");
+
+        let many = Note { event: "offline", ids: vec![1, 2, 3], ..Default::default() };
+        assert!(crate::notify::alert_buttons(&many).is_none(), "多台合并的那条不挂按钮");
+        let other = Note { event: "traffic", ids: vec![7], ..Default::default() };
+        assert!(crate::notify::alert_buttons(&other).is_none(), "流量告警不挂");
     }
 
     /// 菜单按钮：每个 `callback_data` 都必须能被 `render` 接住 —— 否则是个死按钮。

@@ -153,6 +153,8 @@ export type Node = {
    * 最近一次远程升级的**结论**（落库的那份，节点重连后仍在）。
    * `null` = 从没升过 —— 不是失败。
    */
+  /** 静音到什么时候（unix 秒）；0 / 缺省 = 没静音。 */
+  muted_until?: number
   upgrade_last?: {
     at: number
     ok: boolean

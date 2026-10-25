@@ -480,6 +480,9 @@ fn node_view(
         };
         view["token"] = json!(node.token);
         view["notify"] = json!(node.notify);
+        // 静音到什么时候（0 = 没静音）。面板要显示"已静音"，机器人要用它回答 `/muted` ——
+        // **不放进视图，两边都看不到**（我第一版就漏在这里：库里写了、界面和 `/muted` 都说没有）。
+        view["muted_until"] = json!(node.muted_until);
     }
     view
 }

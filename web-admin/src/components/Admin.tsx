@@ -1850,6 +1850,17 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
                     <span className={n.online ? "text-ok-fg" : "text-muted-foreground"}>{n.online ? "在线" : "离线"}</span>
                   </span>
                   {!n.public && <Badge variant="outline" className="ml-1 font-normal">不公开</Badge>}
+                  {/* 静音可以从 Telegram 的告警按钮点出来 —— 面板上必须看得见，
+                      否则"为什么这台没告警"在面板里找不到答案。 */}
+                  {(n.muted_until ?? 0) * 1000 > Date.now() && (
+                    <Badge
+                      variant="outline"
+                      className="ml-1 font-normal"
+                      title={`静音到 ${new Date((n.muted_until ?? 0) * 1000).toLocaleString("zh-CN", { hour12: false })}`}
+                    >
+                      已静音
+                    </Badge>
+                  )}
                   {/* **只在打开时**标出来：默认关，所以"没有这个牌子"就等于"仅手动升级"。
                       用**字**而不是像上面 agent 旧版那样用一个点（1387 行）—— 那个点是"扫一眼数字"，
                       而这是一个**安全姿态**，必须能一眼审计；点要悬停才能读懂，太弱。 */}

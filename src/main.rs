@@ -963,7 +963,7 @@ fn renew_online_nodes(app: &App) -> Result<()> {
         let Some(next) = renewed(expires, &node.billing_cycle, today) else { continue };
         app.db.set_expiry(node.id, &next.to_string())?;
         info!("node {} is still up past {expires}, expiry rolled to {next}", node.name);
-        rolled.push((node.name.as_str(), format!("{expires} → {next}")));
+        rolled.push((node.id, node.name.as_str(), format!("{expires} → {next}")));
     }
     notify::renewed(app, rolled);
     Ok(())
