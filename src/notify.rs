@@ -919,6 +919,27 @@ mod tests {
         assert_eq!(note.node.split(", ").count(), 60);
     }
 
+    /// 静音期内**不发**离线，也不发恢复；解除之后再说。这是 `/mute` 的全部意义。
+    #[test]
+    fn a_muted_node_is_not_announced_in_either_direction() {
+        let app = app();
+        let now = 1_000_000;
+        let a = node(&app, "a", true, now - 600);
+        with_channel(&app);
+        let mut watch = Watch { primed: true, ..Default::default() };
+        // 先跑一轮把"第一次看见"消化掉
+        sweep(&app, &mut watch, now).unwrap();
+        app.db.set_muted(a, now + 3600).unwrap();
+        assert!(sweep(&app, &mut watch, now + 600).unwrap().is_empty(), "静音期内掉线不该发");
+        assert!(app.db.nodes().unwrap()[0].down_since > 0, "但状态照常记（否则解除后会补发一堆）");
+        connect(&app, a);
+        assert!(sweep(&app, &mut watch, now + 700).unwrap().is_empty(), "静音期内回来也不该发");
+        // 解除静音**不补发**：静音期内状态照常更新，所以"已经告诉过自己了"。
+        // 补发才是坑：静音两小时，解除那一刻会一次性收到一堆旧告警。
+        app.db.set_muted(a, 0).unwrap();
+        assert!(sweep(&app, &mut watch, now + 800).unwrap().is_empty(), "解除静音不该补发旧告警");
+    }
+
     #[test]
     fn offline_is_announced_once_after_the_grace_period_and_paired_with_the_return() {
         let app = app();

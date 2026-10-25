@@ -3248,6 +3248,24 @@ mod tests {
         App::for_test(Db::open(":memory:").unwrap())
     }
 
+    /// 静音截止时刻必须出现在**节点视图**里 —— 我第一版只写了库、忘了这里，
+    /// 结果面板和机器人的 `/muted` 都说"没有静音的节点"。
+    #[test]
+    fn the_node_view_carries_the_mute_deadline() {
+        let app = app();
+        let id = app
+            .db
+            .create_node(
+                &crate::db::Node { name: "a".into(), traffic_reset_day: 1, ..Default::default() },
+                "token-a",
+            )
+            .unwrap();
+        app.db.set_muted(id, 4_242).unwrap();
+        let view = visible_nodes(&app, true).unwrap();
+        assert_eq!(view[0]["muted_until"], json!(4_242), "节点视图要带上静音截止时刻");
+        assert_eq!(view[0]["name"], json!("a"));
+    }
+
     /// The peer the hub sees for a request from the network, and one for a request
     /// from the machine it runs on.
     fn far_ip() -> IpAddr {

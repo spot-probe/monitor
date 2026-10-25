@@ -7798,6 +7798,39 @@ mod heatmap_tests {
     fn band_edges_handle_no_samples() {
         assert_eq!(Db::band_edges(&[]), vec![0, 1]);
     }
+    /// **升级路径的闸**：一个"27 版"的库迁移后必须有 `muted_until`、默认 0、不为 NULL。
+    #[test]
+    fn migrating_from_27_adds_the_mute_column() {
+        let db = Db::open(":memory:").unwrap();
+        let conn = db.conn();
+        conn.execute("ALTER TABLE node DROP COLUMN muted_until", []).unwrap();
+        conn.execute("PRAGMA user_version = 27", []).unwrap();
+        let cols = |c: &rusqlite::Connection| -> Vec<String> {
+            c.prepare("PRAGMA table_info(node)")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!cols(&conn).contains(&"muted_until".to_string()), "前提：列已删掉");
+        migrate(&conn, 27).unwrap();
+        assert!(cols(&conn).contains(&"muted_until".to_string()));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
+        let (notnull, dflt): (i64, String) = conn
+            .query_row(
+                "SELECT [notnull], COALESCE(dflt_value,'') FROM pragma_table_info('node') WHERE name='muted_until'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(notnull, 1, "NOT NULL");
+        assert_eq!(dflt, "0", "默认 0 = 没静音");
+    }
+
     /// **升级路径的闸**：一个"21 版"的库迁移后必须有 stream_probe、且戳到 22 ✓。
     /// ⚠️ 与 `allow_ip_quality` 那条**形状相同、断言相反** ✓✓：
     /// 这一列是 `NOT NULL DEFAULT 0` ✓，而"缺席按 0"描述的是**事实** ✓
