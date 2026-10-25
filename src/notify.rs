@@ -359,6 +359,15 @@ pub fn clip_message(text: &str) -> String {
     format!("{cut}\n…（已截断）")
 }
 
+/// Telegram API 的根。生产里没有理由改它 —— 存在的意义是**能用本地假服务器把投递、
+/// 限流重试跑一遍**：这些只能在进程外验证，而单元测试碰不到 HTTP。
+///
+/// ⚠️ 机器人和通知**必须走同一个根** ✗✓：原来机器人认这个环境变量、通知不认，
+/// 于是"离线验 429"根本验不到 —— 请求直连了真 Telegram，拿着假 token 吃了 404。
+pub fn telegram_api() -> String {
+    std::env::var("MONITOR_TELEGRAM_API").unwrap_or_else(|_| "https://api.telegram.org".to_string())
+}
+
 /// 告警下面那两颗按钮。只在**单台**通知上挂，且只给离线/恢复这类"现在能动手"的事件。
 pub fn alert_buttons(note: &Note) -> Option<Value> {
     let [id] = note.ids.as_slice() else { return None };
@@ -384,7 +393,7 @@ async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Fail
             if let Some(keyboard) = alert_buttons(note) {
                 body["reply_markup"] = keyboard;
             }
-            client().post(format!("https://api.telegram.org/bot{token}/sendMessage")).json(&body)
+            client().post(format!("{}/bot{token}/sendMessage", telegram_api())).json(&body)
         }
         Channel::Webhook { url, headers, body } => {
             // `insert` into one map: `RequestBuilder::header` and `HeaderMap::extend`

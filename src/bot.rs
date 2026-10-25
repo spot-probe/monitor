@@ -97,10 +97,9 @@ fn clip(s: &str, w: usize) -> String {
     out
 }
 
-/// Telegram API 的根。生产里没有理由改它 —— 存在的意义是**能用本地假服务器把轮询、
-/// 会话过滤与回复跑一遍**：这三条只能在进程外验证，而单元测试碰不到 HTTP。
+/// Telegram API 的根（与通知共用一个，见 `notify::telegram_api`）。
 fn api_base() -> String {
-    std::env::var("MONITOR_TELEGRAM_API").unwrap_or_else(|_| "https://api.telegram.org".to_string())
+    crate::notify::telegram_api()
 }
 
 /// 轮询循环。设置里没有 token 或 chat 时什么都不做（连日志都不打，免得每 5 秒刷屏）。
