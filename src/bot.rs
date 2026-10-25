@@ -27,9 +27,8 @@ const MAX_LINES: usize = 25;
 
 /// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
 /// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
-const COMMANDS: [(&str, &str); 6] = [
-    ("/status", "集群概览"),
-    ("/nodes", "节点列表（在线、版本、CPU/内存）"),
+const COMMANDS: [(&str, &str); 5] = [
+    ("/nodes", "集群概览 + 节点列表（在线、版本、CPU/内存）"),
     ("/node <名字>", "单台详情，也可以 /node 3"),
     ("/traffic", "今日与本月流量"),
     ("/probe", "各节点最近一次流媒体探测"),
@@ -408,22 +407,6 @@ fn help_text(site: &str) -> String {
     format!("<b>{}</b> TGBot · 运维命令\n<pre>{}</pre>", esc(site), esc(pre.trim_end()))
 }
 
-fn status_text(frame: &Value) -> String {
-    let nodes = nodes_of(frame);
-    let total = nodes.len();
-    let online = nodes.iter().filter(|n| n["online"] == true).count();
-    let outdated = nodes.iter().filter(|n| n["agent_old"] == true).count();
-    let mut out = format!("集群 <b>{total}</b> 台 · 在线 <b>{online}</b> · 离线 <b>{}</b>", total - online);
-    if outdated > 0 {
-        // 指个路：只说"待升级 N 台"，读者还得自己翻 /nodes 去比对版本号。
-        out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 发 <code>/upgrade</code> 看是哪几台"));
-        if let Some(latest) = frame.get("agent_latest").and_then(Value::as_str).filter(|v| !v.is_empty()) {
-            out.push_str(&format!(" · 最新 <code>{}</code>", esc(latest)));
-        }
-    }
-    out
-}
-
 /// `/nodes`：**编号 + 对齐的三列**（名字 / 版本 / CPU·内存）。
 /// 编号是给 `/node 3` 用的 —— 名字里有中文和连字符，手打容易错。
 fn nodes_text(frame: &Value) -> String {
@@ -462,11 +445,19 @@ fn nodes_text(frame: &Value) -> String {
         pre.push_str(&usage);
         pre.push('\n');
     }
-    let mut out = format!(
-        "<b>节点 {total} 台</b> · 在线 {online} · 离线 {}\n<pre>{}</pre>",
-        total - online,
-        pre.trim_end()
-    );
+    // 表头就是「集群概览」：数量 + 待升级 + 最新版本。
+    // ⚠️ 原来 `/status` 是单独一条命令，而它说的三件事里有**两件**这个表头已经说了 ——
+    // 两处维护同一句话，早晚会说成两样。现在合成一处，`/status` 留作别名。
+    let outdated = nodes.iter().filter(|n| n["agent_old"] == true).count();
+    let latest = frame.get("agent_latest").and_then(Value::as_str).unwrap_or("");
+    let mut out = format!("<b>集群 {total} 台</b> · 在线 <b>{online}</b> · 离线 <b>{}</b>", total - online);
+    if outdated > 0 {
+        out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 发 <code>/upgrade</code> 看是哪几台"));
+        if !latest.is_empty() {
+            out.push_str(&format!(" · 最新 <code>{}</code>", esc(latest)));
+        }
+    }
+    out.push_str(&format!("\n<pre>{}</pre>", pre.trim_end()));
     if total > MAX_LINES {
         out.push_str(&format!("\n…还有 {} 台，去面板看全部。", total - MAX_LINES));
     }
@@ -607,8 +598,8 @@ fn upgrade_list(frame: &Value) -> String {
 /// 命令 → 文本。文字命令和按钮回调**共用这一张表**，免得两边各写一遍、慢慢长歪。
 fn render(cmd: &str, frame: &Value) -> Option<String> {
     match cmd {
-        "status" => Some(status_text(frame)),
-        "nodes" => Some(nodes_text(frame)),
+        // `/status` 保留为**别名**：老习惯还在，但不单独维护一份内容。
+        "status" | "nodes" => Some(nodes_text(frame)),
         "traffic" => Some(traffic_text(frame)),
         "probe" => Some(probe_text(frame)),
         "upgrade" => Some(upgrade_list(frame)),
@@ -620,8 +611,8 @@ fn render(cmd: &str, frame: &Value) -> Option<String> {
 fn menu_keyboard() -> Value {
     let button = |label: &str, cmd: &str| json!({ "text": label, "callback_data": format!("cmd:{cmd}") });
     json!({ "inline_keyboard": [
-        [button("集群概览", "status"), button("节点列表", "nodes")],
-        [button("今日流量", "traffic"), button("流媒体", "probe"), button("待升级", "upgrade")],
+        [button("节点", "nodes"), button("流量", "traffic")],
+        [button("流媒体", "probe"), button("待升级", "upgrade")],
     ] })
 }
 
@@ -652,8 +643,8 @@ fn traffic_text(frame: &Value) -> String {
         pre.push_str(&blank_left(up, uw));
         pre.push('\n');
     }
-    let mut out = format!("<b>流量</b> · {} 台\n<pre>{}</pre>", nodes.len(), pre.trim_end());
-
+    // ⚠️ 两段数据并进**一个** `<pre>`：Telegram 给每个代码块都画一条「复制」栏，
+    // 两个块就是两条 —— 并起来只留一条，中间用一个空行分隔。
     let mut top: Vec<(&str, f64)> = nodes
         .iter()
         .map(|n| (n["name"].as_str().unwrap_or("?"), num(n, "month_rx") + num(n, "month_tx")))
@@ -661,19 +652,19 @@ fn traffic_text(frame: &Value) -> String {
     top.sort_by(|a, b| b.1.total_cmp(&a.1));
     let top: Vec<(&str, f64)> = top.into_iter().filter(|(_, total)| *total > 0.0).take(3).collect();
     if !top.is_empty() {
+        pre.push('\n');
+        pre.push_str("本月用量前三\n");
         let nw = top.iter().map(|(name, _)| width(name)).max().unwrap_or(0).clamp(8, 16);
         let vw = top.iter().map(|(_, total)| width(&bytes(*total))).max().unwrap_or(0);
-        let mut block = String::new();
         for (i, (name, total)) in top.iter().enumerate() {
-            block.push_str(&format!("{:>2} ", i + 1));
-            block.push_str(&blank_to(&esc(&clip(name, nw)), nw));
-            block.push_str("  ");
-            block.push_str(&blank_left(&bytes(*total), vw));
-            block.push('\n');
+            pre.push_str(&format!("{:>2} ", i + 1));
+            pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
+            pre.push_str("  ");
+            pre.push_str(&blank_left(&bytes(*total), vw));
+            pre.push('\n');
         }
-        out.push_str(&format!("\n\n本月用量前三\n<pre>{}</pre>", block.trim_end()));
     }
-    out
+    format!("<b>流量</b> · {} 台\n<pre>{}</pre>", nodes.len(), pre.trim_end())
 }
 
 /// 服务的**正式写法** —— 上报里是 `netflix` 这种键名，直接摆出来是"程序里的名字"。
@@ -813,24 +804,27 @@ mod tests {
         assert_eq!(command("hello"), None, "不是命令就不处理");
     }
 
+    /// `/status` 已并进 `/nodes` 的表头（两处维护同一句话早晚会说成两样）。
+    /// 这条测试同时盯两件事：数量对，且 `/status` 仍能拿到同样的内容。
     #[test]
-    fn the_overview_counts_what_is_actually_there() {
-        let text = status_text(&frame());
-        assert!(text.contains("集群 <b>2</b> 台 · 在线 <b>1</b> · 离线 <b>1</b>"), "{text}");
-        // 指个路：光说"待升级 N 台"，读者还得自己翻 /nodes 比版本
+    fn the_header_is_the_fleet_overview_and_status_is_an_alias() {
+        let text = nodes_text(&frame());
+        assert!(text.contains("<b>集群 2 台</b> · 在线 <b>1</b> · 离线 <b>1</b>"), "{text}");
+        // 指个路：光说"待升级 N 台"，读者还得自己翻列表比版本
         assert!(
             text.contains(
                 "待升级 <b>1</b> 台 · 发 <code>/upgrade</code> 看是哪几台 · 最新 <code>1.1.17</code>"
             ),
             "{text}"
         );
+        assert_eq!(render("status", &frame()), Some(text), "/status 应当等于 /nodes");
     }
 
     #[test]
     fn the_list_is_numbered_aligned_and_carries_cpu_and_memory() {
         let text = nodes_text(&frame());
         // 编号 + 圆点 + 名字 + 版本 + 用量，一列都不许糊在一起
-        assert!(text.contains("<b>节点 2 台</b> · 在线 1 · 离线 1"), "{text}");
+        assert!(text.contains("<b>集群 2 台</b> · 在线 <b>1</b> · 离线 <b>1</b>"), "{text}");
         assert!(text.contains("<pre>"), "整块要用等宽字体才对得齐：{text}");
         assert!(text.contains(" 1 ● hk-1"), "第 1 台：{text}");
         assert!(text.contains(" 2 ○ la-2"), "离线用空心点：{text}");
@@ -909,7 +903,7 @@ mod tests {
                 seen += 1;
             }
         }
-        assert_eq!(seen, 5, "菜单按钮数量");
+        assert_eq!(seen, 4, "菜单按钮数量");
     }
 
     #[test]
