@@ -103,10 +103,36 @@ fn api_base() -> String {
 }
 
 /// 轮询循环。设置里没有 token 或 chat 时什么都不做（连日志都不打，免得每 5 秒刷屏）。
+/// 向左下角那个「菜单」按钮注册命令（Telegram 的 `setMyCommands`）。
+/// ⚠️ 不注册的话，客户端只认得 `/start` —— 别的命令得靠用户自己记。
+/// 幂等，失败只记日志：注册不上不影响**收**命令。
+async fn register_commands(app: &App, token: &str) {
+    let commands: Vec<Value> = COMMANDS
+        .iter()
+        .map(|(cmd, about)| {
+            let name = cmd.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+            json!({ "command": name, "description": about })
+        })
+        .collect();
+    let url = format!("{}/bot{token}/setMyCommands", api_base());
+    let sent = app
+        .http
+        .post(&url)
+        .json(&json!({ "commands": commands }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status);
+    if let Err(e) = sent {
+        debug!("setMyCommands: {:#}", strip(e));
+    }
+}
+
 pub async fn watch(app: Shared) {
     let mut offset: i64 = 0;
     // 第一次成功轮询只推进 offset、不执行命令：hub 重启不该重放积压的旧消息。
     let mut drained = false;
+    let mut registered = false;
     loop {
         let (Some(token), Some(chat)) =
             (setting(&app, "notify_telegram_token"), setting(&app, "notify_telegram_chat"))
@@ -114,6 +140,11 @@ pub async fn watch(app: Shared) {
             tokio::time::sleep(IDLE).await;
             continue;
         };
+        // 第一次拿到 token 就注册一次命令菜单（幂等，失败不影响收命令）。
+        if !registered {
+            register_commands(&app, &token).await;
+            registered = true;
+        }
         let timeout = if drained { LONG_POLL } else { 0 };
         match updates(&app, &token, offset, timeout).await {
             Ok(list) => {
@@ -180,29 +211,36 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
             let site = setting(app, "site_name")
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "Monitor".to_string());
-            reply(app, token, chat, help_text(&site)).await
+            // 文字之外再挂一排按钮：常用命令不必记、也不必打字。
+            reply_with(app, token, chat, help_text(&site), Some(menu_keyboard())).await
         }
-        "status" => reply(app, token, chat, status_text(&snapshot)).await,
-        "nodes" => reply(app, token, chat, nodes_text(&snapshot)).await,
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
-        "traffic" => reply(app, token, chat, traffic_text(&snapshot)).await,
-        "probe" => reply(app, token, chat, probe_text(&snapshot)).await,
         "upgrade" => ask_upgrade(app, token, chat, &snapshot, arg).await,
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
-        _ => {}
+        other => {
+            if let Some(text) = render(other, &snapshot) {
+                reply(app, token, chat, text).await;
+            }
+        }
     }
 }
 
 async fn reply(app: &App, token: &str, chat: &str, text: String) {
-    if let Err(e) = post_message(app, token, chat, &text, None).await {
+    reply_with(app, token, chat, text, None).await
+}
+
+/// 带按钮的回复（按钮就是 `reply_markup.inline_keyboard`）。
+async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: Option<Value>) {
+    if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
     }
 }
 
 /// 找到节点、检查它能不能升，然后**只发一条带确认按钮的消息** —— 不直接动手。
 async fn ask_upgrade(app: &Shared, token: &str, chat: &str, snapshot: &Value, wanted: &str) {
-    if wanted.is_empty() {
-        return reply(app, token, chat, "用法：/upgrade &lt;名字&gt;（名字的一部分也行）".into()).await;
+    if wanted.trim().is_empty() {
+        // 不带参数 = "谁该升级"（维护者要的那条入口）；带参数才是"升这一台"。
+        return reply(app, token, chat, upgrade_list(snapshot)).await;
     }
     let Some(node) = find_node(snapshot, wanted) else {
         return reply(app, token, chat, format!("没找到名字里含「{}」的节点。", esc(wanted))).await;
@@ -236,6 +274,20 @@ async fn callback(app: &Shared, token: &str, chat: &str, query: &Value) {
     }
     let Some(data) = query.get("data").and_then(Value::as_str) else { return };
     let id = query.get("id").and_then(Value::as_str).unwrap_or("");
+    // 菜单按钮：`cmd:<命令>` —— 与文字命令走同一个 `render`，不会两套。
+    if let Some(cmd) = data.strip_prefix("cmd:") {
+        let snapshot = frame(app);
+        match render(cmd, &snapshot) {
+            Some(text) => {
+                let _ = answer(app, token, id, "").await;
+                reply(app, token, chat, text).await;
+            }
+            None => {
+                let _ = answer(app, token, id, "这个按钮没有对应的命令").await;
+            }
+        }
+        return;
+    }
     if data == "no" {
         let _ = answer(app, token, id, "已取消").await;
         return;
@@ -363,11 +415,10 @@ fn status_text(frame: &Value) -> String {
     let outdated = nodes.iter().filter(|n| n["agent_old"] == true).count();
     let mut out = format!("集群 <b>{total}</b> 台 · 在线 <b>{online}</b> · 离线 <b>{}</b>", total - online);
     if outdated > 0 {
-        match frame.get("agent_latest").and_then(Value::as_str) {
-            Some(latest) if !latest.is_empty() => {
-                out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 最新 <code>{}</code>", esc(latest)))
-            }
-            _ => out.push_str(&format!("\n待升级 <b>{outdated}</b> 台")),
+        // 指个路：只说"待升级 N 台"，读者还得自己翻 /nodes 去比对版本号。
+        out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 发 <code>/upgrade</code> 看是哪几台"));
+        if let Some(latest) = frame.get("agent_latest").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            out.push_str(&format!(" · 最新 <code>{}</code>", esc(latest)));
         }
     }
     out
@@ -493,6 +544,85 @@ fn node_text(frame: &Value, wanted: &str) -> String {
         pre.push('\n');
     }
     format!("<b>{}</b> · {}\n<pre>{}</pre>", esc(name), if online { "在线" } else { "离线" }, pre.trim_end())
+}
+
+/// 一台待升级节点的处置方式，**短标签**（表格里放不下 `upgrade_blocker` 的长句）。
+fn upgrade_tag(node: &Value) -> &'static str {
+    if node["online"] != true {
+        "离线"
+    } else if node["allow_remote_upgrade"] != true {
+        "仅手动"
+    } else {
+        "可升级"
+    }
+}
+
+/// `/upgrade` 不带参数：**哪些节点的 agent 需要更新**。
+/// 原来只有 `/upgrade <名字>`，而"谁该升"只能自己拿 `/nodes` 的版本号去比 —— 这条补上缺口。
+/// 顺序按"能动手的排前面"：可升级 → 仅手动 → 离线。
+fn upgrade_list(frame: &Value) -> String {
+    let nodes = nodes_of(frame);
+    let latest = frame.get("agent_latest").and_then(Value::as_str).unwrap_or("");
+    let mut stale: Vec<&Value> = nodes.iter().filter(|n| n["agent_old"] == true).collect();
+    if stale.is_empty() {
+        // ⚠️ `agent_latest` 为空 = **hub 还没查过**（更新页没点过"检查"）。
+        // 这时说"都是最新的"是句无法验证的话 —— 与"沉默的省略 = 假信息"是同一类错。
+        return if latest.is_empty() {
+            "没有待升级的节点。\n不过 hub 还没拿到最新版本号 —— 去面板的「更新」页点一次检查。".into()
+        } else {
+            format!("所有节点的 agent 都是最新的（<code>{}</code>）。", esc(latest))
+        };
+    }
+    stale.sort_by_key(|n| match upgrade_tag(n) {
+        "可升级" => 0,
+        "仅手动" => 1,
+        _ => 2,
+    });
+    let iw = stale.len().to_string().len().max(2);
+    let nw = stale.iter().map(|n| width(n["name"].as_str().unwrap_or("?"))).max().unwrap_or(0).clamp(8, 16);
+    let mut pre = String::new();
+    for (i, node) in stale.iter().enumerate() {
+        let name = node["name"].as_str().unwrap_or("?");
+        let version = node["agent_version"].as_str().filter(|v| !v.is_empty()).unwrap_or("?");
+        pre.push_str(&format!("{:>iw$} ", i + 1, iw = iw));
+        pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
+        pre.push_str("  ");
+        pre.push_str(&blank_to(&esc(version), 6));
+        pre.push(' ');
+        pre.push_str(upgrade_tag(node));
+        pre.push('\n');
+    }
+    let mut out = format!(
+        "<b>待升级 {} 台</b>{}",
+        stale.len(),
+        if latest.is_empty() { String::new() } else { format!(" · 最新 <code>{}</code>", esc(latest)) }
+    );
+    out.push_str(&format!("\n<pre>{}</pre>", pre.trim_end()));
+    out.push_str(
+        "\n发 <code>/upgrade 编号</code> 升级（会先弹确认）。「仅手动」要去那台机器上重跑安装命令。",
+    );
+    out
+}
+
+/// 命令 → 文本。文字命令和按钮回调**共用这一张表**，免得两边各写一遍、慢慢长歪。
+fn render(cmd: &str, frame: &Value) -> Option<String> {
+    match cmd {
+        "status" => Some(status_text(frame)),
+        "nodes" => Some(nodes_text(frame)),
+        "traffic" => Some(traffic_text(frame)),
+        "probe" => Some(probe_text(frame)),
+        "upgrade" => Some(upgrade_list(frame)),
+        _ => None,
+    }
+}
+
+/// `/start` 底部那排按钮。`callback_data` 用 `cmd:<命令>` —— 与文字命令走同一个 `render`。
+fn menu_keyboard() -> Value {
+    let button = |label: &str, cmd: &str| json!({ "text": label, "callback_data": format!("cmd:{cmd}") });
+    json!({ "inline_keyboard": [
+        [button("集群概览", "status"), button("节点列表", "nodes")],
+        [button("今日流量", "traffic"), button("流媒体", "probe"), button("待升级", "upgrade")],
+    ] })
 }
 
 /// `/traffic`：**一张对齐的两列表**（今日 / 本月 × 下行 / 上行），后面跟本月前三。
@@ -687,7 +817,13 @@ mod tests {
     fn the_overview_counts_what_is_actually_there() {
         let text = status_text(&frame());
         assert!(text.contains("集群 <b>2</b> 台 · 在线 <b>1</b> · 离线 <b>1</b>"), "{text}");
-        assert!(text.contains("待升级 <b>1</b> 台 · 最新 <code>1.1.17</code>"), "{text}");
+        // 指个路：光说"待升级 N 台"，读者还得自己翻 /nodes 比版本
+        assert!(
+            text.contains(
+                "待升级 <b>1</b> 台 · 发 <code>/upgrade</code> 看是哪几台 · 最新 <code>1.1.17</code>"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -735,6 +871,45 @@ mod tests {
             let want = esc(&blank_to(cmd, w));
             assert!(body.lines().any(|l| l.starts_with(&want)), "「{cmd}」没补齐：{body}");
         }
+    }
+
+    /// `/upgrade` 不带参数 = "谁该升级"：只列落后的那台，并标出处置方式。
+    #[test]
+    fn upgrade_without_a_name_lists_who_is_behind() {
+        let text = upgrade_list(&frame());
+        assert!(text.contains("<b>待升级 1 台</b>"), "{text}");
+        assert!(text.contains("la-2"), "落后的那台要点名：{text}");
+        assert!(!text.contains("hk-1"), "已经最新的一台不该出现：{text}");
+        assert!(text.contains("1.1.15"), "要显示它现在是什么版本：{text}");
+        // 这台离线且没开远程升级 —— 先报"离线"（最要紧的那条）
+        assert!(text.contains("离线"), "{text}");
+        assert!(text.contains("/upgrade 编号"), "要告诉读者怎么升级：{text}");
+    }
+
+    /// 没有待升级节点、但 hub 也没查过最新版本时，**不能**声称"都是最新的"。
+    #[test]
+    fn without_a_known_latest_it_does_not_claim_everyone_is_current() {
+        let f = json!({ "nodes": [ { "id": 1, "name": "a", "online": true, "agent_old": false } ] });
+        let text = upgrade_list(&f);
+        assert!(!text.contains("都是最新的"), "没拿到最新版本就不该下这个结论：{text}");
+        assert!(text.contains("还没拿到最新版本号"), "{text}");
+    }
+
+    /// 菜单按钮：每个 `callback_data` 都必须能被 `render` 接住 —— 否则是个死按钮。
+    #[test]
+    fn every_menu_button_maps_to_a_real_command() {
+        let kb = menu_keyboard();
+        let rows = kb["inline_keyboard"].as_array().expect("inline_keyboard");
+        let mut seen = 0;
+        for row in rows {
+            for button in row.as_array().expect("row") {
+                let data = button["callback_data"].as_str().expect("callback_data");
+                let cmd = data.strip_prefix("cmd:").expect("cmd: 前缀");
+                assert!(render(cmd, &frame()).is_some(), "按钮 {cmd} 没有对应的 render");
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 5, "菜单按钮数量");
     }
 
     #[test]
