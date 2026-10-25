@@ -59,6 +59,16 @@ fn wide(c: char) -> bool {
     )
 }
 
+/// 左补空格：数字按显示宽度**右对齐**，一列数字才会对齐小数点前的位。
+fn blank_left(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    for _ in width(s)..w {
+        out.push(' ');
+    }
+    out.push_str(s);
+    out
+}
+
 fn blank_to(s: &str, w: usize) -> String {
     let mut out = s.to_string();
     for _ in width(s)..w {
@@ -485,42 +495,90 @@ fn node_text(frame: &Value, wanted: &str) -> String {
     format!("<b>{}</b> · {}\n<pre>{}</pre>", esc(name), if online { "在线" } else { "离线" }, pre.trim_end())
 }
 
+/// `/traffic`：**一张对齐的两列表**（今日 / 本月 × 下行 / 上行），后面跟本月前三。
+/// 原来是一行 `今日 ↓x ↑y`，四个数字挤在一起，看不出哪个是哪个量级。
 fn traffic_text(frame: &Value) -> String {
     let nodes = nodes_of(frame);
     let sum = |key: &str| nodes.iter().filter_map(|n| n.get(key).and_then(Value::as_f64)).sum::<f64>();
-    let mut out = format!(
-        "今日 <code>↓{} ↑{}</code>\n本月 <code>↓{} ↑{}</code>",
-        bytes(sum("day_rx")),
-        bytes(sum("day_tx")),
-        bytes(sum("month_rx")),
-        bytes(sum("month_tx"))
-    );
+    let rows = [
+        ("今日", bytes(sum("day_rx")), bytes(sum("day_tx"))),
+        ("本月", bytes(sum("month_rx")), bytes(sum("month_tx"))),
+    ];
+    let dw = rows.iter().map(|(_, d, _)| width(d)).max().unwrap_or(0);
+    let uw = rows.iter().map(|(_, _, u)| width(u)).max().unwrap_or(0);
+    let lw = 4; // 「今日」「本月」都是 4 列
+    let mut pre = String::new();
+    pre.push_str(&blank_to("", lw));
+    pre.push_str("  ");
+    pre.push_str(&blank_left("↓ 下行", dw));
+    pre.push_str("  ");
+    pre.push_str(&blank_left("↑ 上行", uw));
+    pre.push('\n');
+    for (label, down, up) in &rows {
+        pre.push_str(&blank_to(label, lw));
+        pre.push_str("  ");
+        pre.push_str(&blank_left(down, dw));
+        pre.push_str("  ");
+        pre.push_str(&blank_left(up, uw));
+        pre.push('\n');
+    }
+    let mut out = format!("<b>流量</b> · {} 台\n<pre>{}</pre>", nodes.len(), pre.trim_end());
+
     let mut top: Vec<(&str, f64)> = nodes
         .iter()
         .map(|n| (n["name"].as_str().unwrap_or("?"), num(n, "month_rx") + num(n, "month_tx")))
         .collect();
     top.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let lines: Vec<String> = top
-        .iter()
-        .filter(|(_, total)| *total > 0.0)
-        .take(3)
-        .map(|(name, total)| format!("{} <code>{}</code>", esc(name), bytes(*total)))
-        .collect();
-    if !lines.is_empty() {
-        out.push_str("\n\n本月前三：");
-        out.push_str(&lines.join(" · "));
+    let top: Vec<(&str, f64)> = top.into_iter().filter(|(_, total)| *total > 0.0).take(3).collect();
+    if !top.is_empty() {
+        let nw = top.iter().map(|(name, _)| width(name)).max().unwrap_or(0).clamp(8, 16);
+        let vw = top.iter().map(|(_, total)| width(&bytes(*total))).max().unwrap_or(0);
+        let mut block = String::new();
+        for (i, (name, total)) in top.iter().enumerate() {
+            block.push_str(&format!("{:>2} ", i + 1));
+            block.push_str(&blank_to(&esc(&clip(name, nw)), nw));
+            block.push_str("  ");
+            block.push_str(&blank_left(&bytes(*total), vw));
+            block.push('\n');
+        }
+        out.push_str(&format!("\n\n本月用量前三\n<pre>{}</pre>", block.trim_end()));
     }
     out
 }
 
+/// 服务的**正式写法** —— 上报里是 `netflix` 这种键名，直接摆出来是"程序里的名字"。
+fn service_name(key: &str) -> &str {
+    match key {
+        "netflix" => "Netflix",
+        "youtube" => "YouTube",
+        "chatgpt" => "ChatGPT",
+        "tiktok" => "TikTok",
+        "disney" => "Disney+",
+        "prime" => "Prime Video",
+        other => other,
+    }
+}
+
+/// 固定顺序：同一台机器在两次 /probe 之间，服务顺序不该跟着 JSON 键序变。
+fn service_rank(key: &str) -> u8 {
+    match key {
+        "netflix" => 0,
+        "youtube" => 1,
+        "chatgpt" => 2,
+        "tiktok" => 3,
+        _ => 9,
+    }
+}
+
+/// `/probe`：编号 + 名字 + 服务结论。服务集合各台不同，所以**名字列对齐**、结论跟在后面，
+/// 不强行做成矩阵（那会有一半是空格）。
 fn probe_text(frame: &Value) -> String {
     let nodes = nodes_of(frame);
-    let mut lines = Vec::new();
-    for node in nodes.iter().take(MAX_LINES) {
+    let mut rows: Vec<(usize, String, String)> = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
         let Some(probe) = node.get("probe").filter(|p| !p.is_null()) else { continue };
         let Some(services) = probe.as_object() else { continue };
-        let name = esc(node["name"].as_str().unwrap_or("?"));
-        let mut parts = Vec::new();
+        let mut parts: Vec<(u8, String)> = Vec::new();
         for (service, v) in services {
             let status = v.get("status").and_then(Value::as_str).unwrap_or("");
             let region = v.get("region").and_then(Value::as_str).unwrap_or("");
@@ -535,18 +593,32 @@ fn probe_text(frame: &Value) -> String {
                 "org" => "组织",
                 _ => continue,
             };
-            let region = if region.is_empty() { String::new() } else { format!("/{}", esc(region)) };
-            parts.push(format!("{service}:{label}{region}"));
+            let region = if region.is_empty() { String::new() } else { format!("/{region}") };
+            parts.push((service_rank(service), format!("{} {label}{region}", service_name(service))));
         }
         if !parts.is_empty() {
-            lines.push(format!("<b>{name}</b>  {}", parts.join(" · ")));
+            parts.sort_by_key(|(rank, _)| *rank);
+            let about = parts.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(" · ");
+            rows.push((i + 1, node["name"].as_str().unwrap_or("?").to_string(), about));
+        }
+        if rows.len() >= MAX_LINES {
+            break;
         }
     }
-    if lines.is_empty() {
-        "还没有节点报过流媒体探测结果。".into()
-    } else {
-        lines.join("\n")
+    if rows.is_empty() {
+        return "还没有节点报过流媒体探测结果。".into();
     }
+    let iw = rows.iter().map(|(i, _, _)| i.to_string().len()).max().unwrap_or(2).max(2);
+    let nw = rows.iter().map(|(_, name, _)| width(name)).max().unwrap_or(0).clamp(8, 16);
+    let mut pre = String::new();
+    for (i, name, about) in &rows {
+        pre.push_str(&format!("{:>iw$} ", i, iw = iw));
+        pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
+        pre.push_str("  ");
+        pre.push_str(&esc(about));
+        pre.push('\n');
+    }
+    format!("<b>流媒体探测</b> · 最近一次\n<pre>{}</pre>", pre.trim_end())
 }
 
 fn num(node: &Value, key: &str) -> f64 {
@@ -682,19 +754,26 @@ mod tests {
     }
 
     #[test]
-    fn traffic_sums_both_directions_and_names_the_top() {
+    fn traffic_is_a_two_column_table_with_the_top_three_under_it() {
         let text = traffic_text(&frame());
-        assert!(text.contains("今日 <code>↓1.20 GB ↑300 MB</code>"), "{text}");
-        assert!(text.contains("本月 <code>↓30.0 GB ↑8.00 GB</code>"), "{text}");
-        assert!(text.contains("本月前三：hk-1 <code>38.0 GB</code>"), "{text}");
+        assert!(text.contains("<pre>"), "两列数字要在等宽块里：{text}");
+        assert!(text.contains("今日"), "{text}");
+        assert!(text.contains("1.20 GB") && text.contains("300 MB"), "{text}");
+        assert!(text.contains("本月"), "{text}");
+        assert!(text.contains("30.0 GB") && text.contains("8.00 GB"), "{text}");
+        assert!(text.contains("本月用量前三"), "{text}");
+        assert!(text.contains("hk-1") && text.contains("38.0 GB"), "{text}");
+        // 数字**右对齐**：两行同一个数量级时，"GB" 落在同一列
+        let rows: Vec<&str> = text.lines().filter(|l| l.contains("GB")).collect();
+        assert!(rows.len() >= 2, "{text}");
     }
 
     #[test]
     fn probes_are_translated_into_words() {
         let text = probe_text(&frame());
-        assert!(text.contains("<b>hk-1</b>  "), "{text}");
-        assert!(text.contains("netflix:解锁/US"), "{text}");
-        assert!(text.contains("chatgpt:仅网页"), "{text}");
+        // 服务名用**正式写法**（上报里是 netflix 这样的键名），且顺序固定
+        assert!(text.contains("Netflix 解锁/US"), "{text}");
+        assert!(text.contains("ChatGPT 仅网页"), "{text}");
         assert!(!text.contains("la-2"), "没报过的节点不该出现：{text}");
     }
 
