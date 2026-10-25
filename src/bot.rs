@@ -206,14 +206,8 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
     let Some((cmd, arg)) = command(text) else { return };
     let snapshot = frame(app);
     match cmd {
-        "start" | "help" => {
-            // 品牌名就是面板里配的站点名（维护者要的"SRVS TGBot"）；没配就叫 Monitor。
-            let site = setting(app, "site_name")
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "Monitor".to_string());
-            // 文字之外再挂一排按钮：常用命令不必记、也不必打字。
-            reply_with(app, token, chat, help_text(&site), Some(menu_keyboard())).await
-        }
+        // 文字之外再挂一排按钮：常用命令不必记、也不必打字。
+        "start" | "help" => menu(app, token, chat, None).await,
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
         "upgrade" => ask_upgrade(app, token, chat, &snapshot, arg).await,
         "mute" | "unmute" => mute_cmd(app, token, chat, &snapshot, arg, cmd == "mute").await,
@@ -221,11 +215,10 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
         other => {
             if let Some(text) = render(other, &snapshot) {
-                if is_snapshot(other) {
-                    reply_snapshot(app, token, chat, text).await;
-                } else {
-                    reply(app, token, chat, text).await;
-                }
+                // ⚠️ **打字命令一律新回复** ✗✓：改上一条会让回复出现在几分钟前的旧消息位置
+                // （用户刚发的那条在底部），看起来就是"这条命令没反应"。
+                // 原地刷新只用于菜单按钮 —— 见 `menu_result`。
+                reply(app, token, chat, text).await;
             }
         }
     }
@@ -240,11 +233,6 @@ async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: 
     if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
     }
-}
-
-/// 这些命令的输出是"当前状态的快照" —— 再查一次应当**原地更新**，而不是又发一条。
-fn is_snapshot(cmd: &str) -> bool {
-    matches!(cmd, "status" | "nodes" | "traffic" | "probe" | "upgrade" | "muted")
 }
 
 /// `/mute <编号|名字> [2h]` / `/unmute <编号|名字>`。
@@ -312,16 +300,17 @@ async fn callback(app: &Shared, token: &str, chat: &str, query: &Value) {
     let Some(data) = query.get("data").and_then(Value::as_str) else { return };
     let id = query.get("id").and_then(Value::as_str).unwrap_or("");
     // 菜单按钮：`cmd:<命令>` —— 与文字命令走同一个 `render`，不会两套。
+    if data == "cmd:menu" {
+        let _ = answer(app, token, id, "").await;
+        menu(app, token, chat, Some(query)).await;
+        return;
+    }
     if let Some(cmd) = data.strip_prefix("cmd:") {
         let snapshot = frame(app);
         match render(cmd, &snapshot) {
             Some(text) => {
                 let _ = answer(app, token, id, "").await;
-                if is_snapshot(cmd) {
-                    reply_snapshot(app, token, chat, text).await;
-                } else {
-                    reply(app, token, chat, text).await;
-                }
+                menu_result(app, token, chat, query, text, back_keyboard()).await;
             }
             None => {
                 let _ = answer(app, token, id, "这个按钮没有对应的命令").await;
@@ -470,37 +459,61 @@ async fn post_message(
     Ok(value.pointer("/result/message_id").and_then(Value::as_i64).unwrap_or(0) as i32)
 }
 
-/// 上一条**快照类**消息的 id（`/nodes`、`/traffic`…）。再查一次就改这一条，不在群里刷屏。
-static LAST_SNAPSHOT: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
-
 /// 改一条已发出的消息。`message is not modified` 当成功 —— 内容一样时 Telegram 会这么回。
-async fn edit_message(app: &App, token: &str, chat: &str, id: i32, text: &str) -> Result<bool> {
+async fn edit_message(
+    app: &App,
+    token: &str,
+    chat: &str,
+    id: i32,
+    text: &str,
+    keyboard: Option<Value>,
+) -> Result<bool> {
     let url = format!("{}/bot{token}/editMessageText", api_base());
-    let body = json!({
+    let mut body = json!({
         "chat_id": chat, "message_id": id, "text": fit(text), "parse_mode": "HTML"
     });
+    if let Some(markup) = keyboard {
+        body["reply_markup"] = markup;
+    }
     let response =
         app.http.post(&url).json(&body).timeout(Duration::from_secs(15)).send().await.map_err(strip)?;
     if response.status().is_success() {
         return Ok(true);
     }
-    let body = response.text().await.unwrap_or_default();
-    // 内容一字未变：对读者来说就是成功了。
-    Ok(body.contains("message is not modified"))
+    let _ = response.text().await;
+    // 改不动（含"内容一字未变"）都返回 false —— "屏幕上什么都没变"无法与"命令没被处理"区分。
+    Ok(false)
 }
 
-/// 快照类命令的回复：**改上一条**，改不动才新发一条。
-async fn reply_snapshot(app: &Shared, token: &str, chat: &str, text: String) {
-    let last = *LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(id) = last {
-        // 改得动就结束；消息被删了 / 超过 48 小时就落到"新发一条"。
-        if matches!(edit_message(app, token, chat, id, &text).await, Ok(true)) {
-            return;
-        }
+/// 菜单按钮点出来的结果：**编辑被点的那条消息**，并挂一颗「返回菜单」。
+/// 一次点击只占一条消息的位置，不会在群里堆一串列表；点「返回菜单」再改回来。
+async fn menu_result(app: &Shared, token: &str, chat: &str, query: &Value, text: String, keyboard: Value) {
+    let id = query.pointer("/message/message_id").and_then(Value::as_i64).unwrap_or(0) as i32;
+    if id != 0 && matches!(edit_message(app, token, chat, id, &text, Some(keyboard.clone())).await, Ok(true))
+    {
+        return;
     }
-    match post_message(app, token, chat, &text, None).await {
-        Ok(id) => *LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(id),
-        Err(e) => debug!("telegram sendMessage: {e:#}"),
+    if let Err(e) = post_message(app, token, chat, &text, Some(keyboard)).await {
+        debug!("telegram sendMessage: {e:#}");
+    }
+}
+
+/// 结果页那排按钮：只有一颗「返回菜单」。
+fn back_keyboard() -> Value {
+    json!({ "inline_keyboard": [[
+        { "text": "← 返回菜单", "callback_data": "cmd:menu" }
+    ]] })
+}
+
+/// `/start` 那条：品牌 + 命令表 + 菜单按钮。`/菜单` 回来时也用它。
+async fn menu(app: &Shared, token: &str, chat: &str, query: Option<&Value>) {
+    let site =
+        setting(app, "site_name").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "Monitor".to_string());
+    let text = help_text(&site);
+    match query {
+        // 回来时把**菜单那排按钮**装回去，而不是又一个「返回菜单」。
+        Some(q) => menu_result(app, token, chat, q, text, menu_keyboard()).await,
+        None => reply_with(app, token, chat, text, Some(menu_keyboard())).await,
     }
 }
 
@@ -606,7 +619,11 @@ fn nodes_text(frame: &Value) -> String {
     // 两处维护同一句话，早晚会说成两样。现在合成一处，`/status` 留作别名。
     let outdated = nodes.iter().filter(|n| n["agent_old"] == true).count();
     let latest = frame.get("agent_latest").and_then(Value::as_str).unwrap_or("");
-    let mut out = format!("<b>集群 {total} 台</b> · 在线 <b>{online}</b> · 离线 <b>{}</b>", total - online);
+    let mut out = format!(
+        "<b>集群 {total} 台</b> · 在线 <b>{online}</b> · 离线 <b>{}</b> · {}",
+        total - online,
+        fetched()
+    );
     if outdated > 0 {
         out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 发 <code>/upgrade</code> 看是哪几台"));
         if !latest.is_empty() {
@@ -713,6 +730,12 @@ fn parse_span(s: &str) -> Option<i64> {
     (n > 0).then(|| (n * mul).min(30 * 86_400))
 }
 
+/// 快照类回复的"取数时间"。既是信息（这份数据多新），也保证同一个按钮再点一次时
+/// 编辑**真的会有变化** —— 否则 Telegram 回 `message is not modified`。
+fn fetched() -> String {
+    format!("{} 的数据", chrono::Local::now().format("%H:%M"))
+}
+
 fn clock(at: i64) -> String {
     use chrono::TimeZone;
     chrono::Local
@@ -740,7 +763,7 @@ fn muted_text(frame: &Value) -> String {
         pre.push_str(&clock(until));
         pre.push('\n');
     }
-    format!("<b>静音中 {} 台</b>\n<pre>{}</pre>", muted.len(), pre.trim_end())
+    format!("<b>静音中 {} 台</b> · {}\n<pre>{}</pre>", muted.len(), fetched(), pre.trim_end())
 }
 
 /// 一台待升级节点的处置方式，**短标签**（表格里放不下 `upgrade_blocker` 的长句）。
@@ -790,9 +813,10 @@ fn upgrade_list(frame: &Value) -> String {
         pre.push('\n');
     }
     let mut out = format!(
-        "<b>待升级 {} 台</b>{}",
+        "<b>待升级 {} 台</b>{} · {}",
         stale.len(),
-        if latest.is_empty() { String::new() } else { format!(" · 最新 <code>{}</code>", esc(latest)) }
+        if latest.is_empty() { String::new() } else { format!(" · 最新 <code>{}</code>", esc(latest)) },
+        fetched()
     );
     out.push_str(&format!("\n<pre>{}</pre>", pre.trim_end()));
     out.push_str(
@@ -870,7 +894,7 @@ fn traffic_text(frame: &Value) -> String {
             pre.push('\n');
         }
     }
-    format!("<b>流量</b> · {} 台\n<pre>{}</pre>", nodes.len(), pre.trim_end())
+    format!("<b>流量</b> · {} 台 · {}\n<pre>{}</pre>", nodes.len(), fetched(), pre.trim_end())
 }
 
 /// 服务的**正式写法** —— 上报里是 `netflix` 这种键名，直接摆出来是"程序里的名字"。
@@ -945,7 +969,7 @@ fn probe_text(frame: &Value) -> String {
         pre.push_str(&esc(about));
         pre.push('\n');
     }
-    format!("<b>流媒体探测</b> · 最近一次\n<pre>{}</pre>", pre.trim_end())
+    format!("<b>流媒体探测</b> · 最近一次 · {}\n<pre>{}</pre>", fetched(), pre.trim_end())
 }
 
 fn num(node: &Value, key: &str) -> f64 {
