@@ -222,7 +222,11 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
         other => {
             if let Some(text) = render(other, &snapshot) {
-                reply(app, token, chat, text).await;
+                if is_snapshot(other) {
+                    reply_snapshot(app, token, chat, text).await;
+                } else {
+                    reply(app, token, chat, text).await;
+                }
             }
         }
     }
@@ -237,6 +241,11 @@ async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: 
     if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
     }
+}
+
+/// 这些命令的输出是"当前状态的快照" —— 再查一次应当**原地更新**，而不是又发一条。
+fn is_snapshot(cmd: &str) -> bool {
+    matches!(cmd, "status" | "nodes" | "traffic" | "probe" | "upgrade" | "muted")
 }
 
 /// `/mute <编号|名字> [2h]` / `/unmute <编号|名字>`。
@@ -309,7 +318,11 @@ async fn callback(app: &Shared, token: &str, chat: &str, query: &Value) {
         match render(cmd, &snapshot) {
             Some(text) => {
                 let _ = answer(app, token, id, "").await;
-                reply(app, token, chat, text).await;
+                if is_snapshot(cmd) {
+                    reply_snapshot(app, token, chat, text).await;
+                } else {
+                    reply(app, token, chat, text).await;
+                }
             }
             None => {
                 let _ = answer(app, token, id, "这个按钮没有对应的命令").await;
@@ -430,13 +443,20 @@ fn fit(text: &str) -> String {
     out
 }
 
-async fn post_message(app: &App, token: &str, chat: &str, text: &str, keyboard: Option<Value>) -> Result<()> {
+async fn post_message(
+    app: &App,
+    token: &str,
+    chat: &str,
+    text: &str,
+    keyboard: Option<Value>,
+) -> Result<i32> {
     let url = format!("{}/bot{token}/sendMessage", api_base());
     let mut body = json!({ "chat_id": chat, "text": fit(text), "parse_mode": "HTML" });
     if let Some(markup) = keyboard {
         body["reply_markup"] = markup;
     }
-    app.http
+    let value: Value = app
+        .http
         .post(&url)
         .json(&body)
         .timeout(Duration::from_secs(15))
@@ -444,8 +464,45 @@ async fn post_message(app: &App, token: &str, chat: &str, text: &str, keyboard: 
         .await
         .map_err(strip)?
         .error_for_status()
+        .map_err(strip)?
+        .json()
+        .await
         .map_err(strip)?;
-    Ok(())
+    Ok(value.pointer("/result/message_id").and_then(Value::as_i64).unwrap_or(0) as i32)
+}
+
+/// 上一条**快照类**消息的 id（`/nodes`、`/traffic`…）。再查一次就改这一条，不在群里刷屏。
+static LAST_SNAPSHOT: std::sync::Mutex<Option<i32>> = std::sync::Mutex::new(None);
+
+/// 改一条已发出的消息。`message is not modified` 当成功 —— 内容一样时 Telegram 会这么回。
+async fn edit_message(app: &App, token: &str, chat: &str, id: i32, text: &str) -> Result<bool> {
+    let url = format!("{}/bot{token}/editMessageText", api_base());
+    let body = json!({
+        "chat_id": chat, "message_id": id, "text": fit(text), "parse_mode": "HTML"
+    });
+    let response =
+        app.http.post(&url).json(&body).timeout(Duration::from_secs(15)).send().await.map_err(strip)?;
+    if response.status().is_success() {
+        return Ok(true);
+    }
+    let body = response.text().await.unwrap_or_default();
+    // 内容一字未变：对读者来说就是成功了。
+    Ok(body.contains("message is not modified"))
+}
+
+/// 快照类命令的回复：**改上一条**，改不动才新发一条。
+async fn reply_snapshot(app: &Shared, token: &str, chat: &str, text: String) {
+    let last = *LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = last {
+        // 改得动就结束；消息被删了 / 超过 48 小时就落到"新发一条"。
+        if matches!(edit_message(app, token, chat, id, &text).await, Ok(true)) {
+            return;
+        }
+    }
+    match post_message(app, token, chat, &text, None).await {
+        Ok(id) => *LAST_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(id),
+        Err(e) => debug!("telegram sendMessage: {e:#}"),
+    }
 }
 
 /// `/nodes`、`/node hk-1`、`/nodes@MyBot`。参数里允许有空格。

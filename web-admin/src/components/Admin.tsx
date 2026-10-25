@@ -4430,6 +4430,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
       				</span>
       				<Switch className="shrink-0" aria-labelledby="notify-update-label" checked={s.notify_update !== "off"} onCheckedChange={(v) => set("notify_update", v ? "on" : "off")} />
       			</div>
+				
       		</div>
       	</section>
 
