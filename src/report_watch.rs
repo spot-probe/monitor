@@ -1,9 +1,10 @@
 //! 流量报告的定时投递。
 //!
-//! 一条"到点该发哪些周期"的判断 + 组文本 + **交给现有 notify 队列** ✓ ——
+//! 一条"到点该发哪些周期"的判断（**先看今天是不是它的上报日** ✓）+ 组文本 +
+//! **交给现有 notify 队列** ✓ ——
 //! 报告不是新通道 ✓，它就是一条 `Note` ✓（退避、重试、渠道、日志全部现成 ✓）。
 
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Duration, NaiveDate, Timelike, Utc};
 
 use crate::db::Period;
 use crate::notify::{self, Note};
@@ -13,8 +14,16 @@ use crate::{App, Shared};
 pub const K_PERIODS: &str = "report_periods";
 pub const K_TIME: &str = "report_time";
 pub const K_TZ: &str = "report_tz";
-/// 最近一次已入队的 `"<日期> <周期>"` ✓ —— **重启也不重发** ✓。
-pub const K_LAST: &str = "report_last_sent";
+/// 最近一次已入队的 `"<日期> <周期>"`，**每个周期一个键** ✓。
+/// ⚠️ 原来只有一个 `report_last_sent` ✗：同一天里发完周报再发季报，槽位就被季报覆盖了，
+/// 30 秒后下一拍发现"周报今天还没发过" ⇒ **再发一遍**（多周期同时开启时必然发生）。
+pub fn sent_key(p: Period) -> String {
+    format!("report_last_{}", key(p))
+}
+
+/// 到点之后还能补多久（分钟）。重启或短暂停机不会因此丢掉一整周的报告；
+/// 过了这个窗口就等下一个周期 —— 否则"下午才打开开关"会立刻收到一份日报，看着像又一个 bug。
+const GRACE_MINUTES: i64 = 120;
 
 /// 30 秒看一次表 ✓：报告只要**分钟级**精度 ✓，而"是否已发"由 [`K_LAST`] 记住 ✓
 ///（不靠"恰好那一秒只跑一次"这种脆弱假设 ✗）。
@@ -96,6 +105,33 @@ fn parse_periods(s: &str) -> Vec<Period> {
     out
 }
 
+/// **今天是不是这个周期的上报日** ✗✓。这是原来缺的那一块：界面写的是「周报 每周一 /
+/// 月报 每月 1 号」，而调度只判断"今天这个周期发过没有" —— 每天日期都不同，于是**天天发**。
+fn due(p: Period, today: NaiveDate) -> bool {
+    use chrono::{Datelike, Weekday};
+    match p {
+        Period::Day => true,
+        Period::Week => today.weekday() == Weekday::Mon,
+        Period::Month => today.day() == 1,
+        Period::Quarter => today.day() == 1 && matches!(today.month(), 1 | 4 | 7 | 10),
+        Period::Half => today.day() == 1 && matches!(today.month(), 1 | 7),
+        Period::Year => today.day() == 1 && today.month() == 1,
+    }
+}
+
+/// `"09:00"` → 540。认不出来返回 `None`（设置被手改坏时不发，也不 panic ✓）。
+fn slot_minutes(at: &str) -> Option<i64> {
+    let (h, m) = at.trim().split_once(':')?;
+    let h: i64 = h.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    (h <= 23 && m < 60).then_some(h * 60 + m)
+}
+
+/// 现在这一分钟是否落在"到点之后、补发窗口之内"。
+fn in_window(now_min: i64, slot: i64) -> bool {
+    now_min >= slot && now_min < slot + GRACE_MINUTES
+}
+
 fn key(p: Period) -> &'static str {
     match p {
         Period::Day => "day",
@@ -121,7 +157,11 @@ fn tick(app: &App) -> anyhow::Result<()> {
     let offset = offset_minutes(&app.db.get(K_TZ).unwrap_or_default());
     let now = Utc::now() + Duration::minutes(offset as i64);
     let want = app.db.get(K_TIME).unwrap_or_else(|| "09:00".to_string());
-    if now.format("%H:%M").to_string() != want.trim() {
+    let Some(slot) = slot_minutes(&want) else { return Ok(()) };
+    // ⚠️ 原来是**精确等于那一分钟** ✗（`%H:%M` == 设置值）：hub 在那 60 秒里重启一次，
+    // 这一整个周期的报告就没了。换成"到点之后两小时内都算"，代价是下午才打开开关不会立刻发。
+    let now_min = i64::from(now.hour()) * 60 + i64::from(now.minute());
+    if !in_window(now_min, slot) {
         return Ok(());
     }
     let today: NaiveDate = now.date_naive();
@@ -129,10 +169,13 @@ fn tick(app: &App) -> anyhow::Result<()> {
     if periods.is_empty() {
         return Ok(()); // 一个周期都没勾 ⇒ 什么都不发 ✓（不是"默认全发" ✗）
     }
-    let sent = app.db.get(K_LAST).unwrap_or_default();
     for p in periods {
+        // **今天不是它的上报日就跳过** —— 这一行是"周报每天发"的修复。
+        if !due(p, today) {
+            continue;
+        }
         let stamp = format!("{} {}", today, key(p));
-        if sent == stamp {
+        if app.db.get(&sent_key(p)).unwrap_or_default() == stamp {
             continue; // 这个周期今天已经发过 ✓（重启也不会重发 ✓）
         }
         let (from, to, prev_from, prev_to) = p.last_full(today);
@@ -152,7 +195,7 @@ fn tick(app: &App) -> anyhow::Result<()> {
             app,
             Note { event: "traffic", node: String::new(), title, message, ..Default::default() },
         );
-        app.db.set(K_LAST, &stamp)?;
+        app.db.set(&sent_key(p), &stamp)?;
     }
     Ok(())
 }
@@ -184,6 +227,72 @@ fn report_rows(app: &App, from: &str, to: &str) -> anyhow::Result<Vec<crate::rep
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ **这一条是线上报的 bug 的回归测试** ✗✓：维护者的原话是"周报、季报、半年报好像是
+    /// 每天都会通知一次"。根因是调度只判断"今天这个周期发过没有"，而每天的日期都不同 ⇒
+    /// 每个周期天天发。`due()` 之前**根本不存在**。
+    #[test]
+    fn weekly_is_due_only_on_monday() {
+        let mon = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let tue = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        assert!(due(Period::Week, mon));
+        assert!(!due(Period::Week, tue));
+    }
+
+    #[test]
+    fn monthly_quarterly_half_and_year_land_on_their_own_first_day() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // 10 月 1 日：月报 + 季报（Q4 起），不是半年报、不是年报
+        assert!(due(Period::Month, d(2026, 10, 1)));
+        assert!(due(Period::Quarter, d(2026, 10, 1)));
+        assert!(!due(Period::Half, d(2026, 10, 1)));
+        assert!(!due(Period::Year, d(2026, 10, 1)));
+        // 7 月 1 日：半年报 + 季报，月报也到；不是年报
+        assert!(due(Period::Half, d(2026, 7, 1)));
+        assert!(due(Period::Quarter, d(2026, 7, 1)));
+        assert!(!due(Period::Year, d(2026, 7, 1)));
+        // 1 月 1 日：四个都到
+        for p in [Period::Month, Period::Quarter, Period::Half, Period::Year] {
+            assert!(due(p, d(2026, 1, 1)), "{p:?} 应在 1 月 1 日发");
+        }
+        // 2 月 1 日：只有月报
+        assert!(due(Period::Month, d(2026, 2, 1)));
+        assert!(!due(Period::Quarter, d(2026, 2, 1)));
+        // 不是 1 号就一个都不发（日报除外）
+        let mid = d(2026, 10, 15);
+        for p in [Period::Week, Period::Month, Period::Quarter, Period::Half, Period::Year] {
+            assert!(!due(p, mid), "{p:?} 不该在月中发");
+        }
+        assert!(due(Period::Day, mid));
+    }
+
+    #[test]
+    fn a_missed_minute_is_recovered_inside_the_window_only() {
+        assert_eq!(slot_minutes("09:00"), Some(540));
+        assert_eq!(slot_minutes("14:00"), Some(840));
+        assert_eq!(slot_minutes("oops"), None);
+        // 正好那一分钟 ✓
+        assert!(in_window(540, 540));
+        // 停机 90 分钟后回来 ✓（原来会整周期丢掉）
+        assert!(in_window(540 + 90, 540));
+        // 窗口之外不发 —— 否则"下午才打开开关"会立刻收到一份日报
+        assert!(!in_window(540 + GRACE_MINUTES, 540));
+        // 还没到点 ✓
+        assert!(!in_window(539, 540));
+    }
+
+    /// 每个周期各记各的：同一天发了周报再发季报，不会把周报的"已发"覆盖掉。
+    #[test]
+    fn every_period_has_its_own_dedupe_slot() {
+        let keys: Vec<String> =
+            [Period::Day, Period::Week, Period::Month, Period::Quarter, Period::Half, Period::Year]
+                .into_iter()
+                .map(sent_key)
+                .collect();
+        assert_eq!(keys.len(), 6);
+        assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), 6);
+        assert!(keys.contains(&"report_last_week".to_string()));
+    }
 
     /// ⚠️ 这个模块此前是**全仓唯一零测试的模块** ✗，而 `valid_periods` / `valid_time` /
     /// `valid_tz` 是报告设置**唯一**的写入校验（`api.rs` 的 `save_settings` 直接调它们）。
