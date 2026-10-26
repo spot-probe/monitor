@@ -58,7 +58,8 @@ pub fn title(period: Period, from: &str, to: &str, tz: &str) -> String {
         Period::Year => "年报",
     };
     // 区间含首不含尾 ✓，所以"覆盖到哪天"要把 `to` 退一天 ✓，否则读起来像多算了一天 ✗。
-    format!("【流量{name}】{from} ~ {to} · {tz}")
+    // 首行加粗：一条报告在聊天里最先被扫到的就是它。
+    format!("<b>【流量{name}】</b>{from} ~ {to} · {tz}")
 }
 
 /// **覆盖说明**：快照从哪天开始，这一段里实际覆盖了多少天 ✓。
@@ -85,40 +86,51 @@ pub fn coverage_note(from: &str, to: &str, earliest: Option<&str>) -> Option<Str
     Some(format!("本期覆盖 {days} 天（快照自 {e} 起 —— 更早的用量没有留存，总量偏小）"))
 }
 
+/// HTML 里只有这三个字符要转义；节点名来自那台机器，必须过这一道。
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 /// 正文 ✓。`rows` 与 `prev` 由调用方按总量降序传进来 ✓（顺序在这里不再排 ✓ —— 排一次就够 ✓）。
+///
+/// 排版：**表格放进 `<pre>`**（等宽字体才对得齐），名字列按**显示宽度**补齐（中文占两格）。
+/// 原来用 `{:<16}` 按字符数补，中文名与英文名的列头就错开了 —— 在比例字体里再怎么补也没用。
 pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
     let sum = |v: &[(String, i64, i64)]| v.iter().fold((0i64, 0i64), |a, r| (a.0 + r.1, a.1 + r.2));
     let (rx, tx) = sum(&rows.iter().map(|r| (r.name.clone(), r.rx, r.tx)).collect::<Vec<_>>());
     let (prx, ptx) = sum(prev);
-    let mut out = String::new();
-    out.push_str(&format!("合计  上行 {} · 下行 {} · 总计 {}\n", human(rx), human(tx), human(rx + tx)));
-    match delta(rx + tx, prx + ptx) {
-        Some(d) => out.push_str(&format!(
-            "较上期  {}  {}{:.1}%\n",
-            human(prx + ptx),
-            if d >= 0.0 { "↑" } else { "↓" },
-            d.abs()
-        )),
-        None if !prev.is_empty() => {
-            out.push_str(&format!("较上期  {}（上期为 0，不显示百分比）\n", human(prx + ptx)))
+    let mut pre = String::new();
+    // 合计：三个数字对齐成一列，不挤在一句话里。
+    pre.push_str(&format!("合计    上行 {}   下行 {}   总计 {}\n", human(rx), human(tx), human(rx + tx)));
+    pre.push_str(&match delta(rx + tx, prx + ptx) {
+        Some(d) => {
+            format!("较上期  {}  {}{:.1}%\n", human(prx + ptx), if d >= 0.0 { "↑" } else { "↓" }, d.abs())
         }
-        None => out.push_str("较上期  没有可比的上期数据\n"),
-    }
-    out.push_str("\n逐节点（按总量）\n");
+        None if !prev.is_empty() => {
+            format!("较上期  {}（上期为 0，不显示百分比）\n", human(prx + ptx))
+        }
+        None => "较上期  没有可比的上期数据\n".to_string(),
+    });
+    pre.push('\n');
+    pre.push_str("逐节点（按总量）\n");
     if rows.is_empty() {
-        out.push_str("  这个周期没有任何节点的上报。\n");
-        return out;
+        pre.push_str("  这个周期没有任何节点的上报。\n");
+        return format!("<pre>{pre}</pre>");
     }
     let prev_of = |name: &str| prev.iter().find(|p| p.0 == name).map(|p| p.1 + p.2);
     // 明细只列前 `TOP_N` 台 ✓（`rows` 已按总量降序 ✓，所以这就是 Top N ✓）。
     // 注意**上面那段合计仍然按全部 rows 算** ✓ —— 明细被截断不该让总量变小 ✗。
     let shown = rows.len().min(TOP_N);
+    // 名字列：按**显示宽度**取最大，限 8–18 列（再长会挤掉后面的数字）。
+    let name_w = rows[..shown].iter().map(|r| crate::text::width(&r.name)).max().unwrap_or(0).clamp(8, 18);
+    // 用量列：右对齐，宽度取这一批里最长的那个（"957.4 MB" 比 "2.4 GB" 宽）。
+    let size_w = rows[..shown].iter().map(|r| crate::text::width(&human(r.rx + r.tx))).max().unwrap_or(0);
     for r in &rows[..shown] {
         let total = r.rx + r.tx;
         let cmp = match prev_of(&r.name) {
             Some(p) => match delta(total, p) {
-                Some(d) => format!("  {}{:.1}%", if d >= 0.0 { "↑" } else { "↓" }, d.abs()),
-                None => "  新增".to_string(),
+                Some(d) => format!("{}{:.1}%", if d >= 0.0 { "↑" } else { "↓" }, d.abs()),
+                None => "新增".to_string(),
             },
             None => String::new(),
         };
@@ -126,24 +138,33 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
         let warn = if r.limit > 0 {
             let pct = r.month_used as f64 * 100.0 / r.limit as f64;
             if pct >= 100.0 {
-                format!("  ⚠ 本月已超出额度（{:.0}%）", pct)
+                format!("⚠ 本月已超（{pct:.0}%）")
             } else if pct >= 90.0 {
-                format!("  ⚠ 本月已用 {:.0}% 额度", pct)
+                format!("⚠ 本月已用 {pct:.0}%")
             } else {
-                format!("  本月已用 {:.0}%", pct)
+                format!("本月已用 {pct:.0}%")
             }
         } else {
             String::new()
         };
-        out.push_str(&format!("  {:<16} {:>9}{}{}\n", r.name, human(total), cmp, warn));
+        let mut line = format!(
+            "  {}  {}  ",
+            crate::text::blank_to(&esc(&crate::text::clip(&r.name, name_w)), name_w),
+            crate::text::blank_left(&human(total), size_w)
+        );
+        // 涨跌对齐成一列（空的时候也留位，后面的"本月已用"才不会错开）。
+        line.push_str(&format!("{cmp:<9}"));
+        line.push_str(&warn);
+        // 行尾空格要剪掉：`<pre>` 会原样保留，看起来像"这行没写完"。
+        pre.push_str(line.trim_end());
+        pre.push('\n');
     }
     if rows.len() > shown {
-        // 被截掉的那些**必须报出数量与合计** ✓ —— 否则报告看起来像"整个周期只有这 20 台在跑" ✗，
-        // 而那种误解比少几行明细严重得多 ✓。
+        // 被截掉的那些**必须报出数量与合计** ✓ —— 否则报告看起来像"整个周期只有这 20 台在跑" ✗。
         let rest: i64 = rows[shown..].iter().map(|r| r.rx + r.tx).sum();
-        out.push_str(&format!("  …还有 {} 台 · 合计 {}\n", rows.len() - shown, human(rest)));
+        pre.push_str(&format!("  …还有 {} 台 · 合计 {}\n", rows.len() - shown, human(rest)));
     }
-    out
+    format!("<pre>{}</pre>", pre.trim_end())
 }
 
 #[cfg(test)]
@@ -165,9 +186,9 @@ mod tests {
         ];
         let prev = vec![("ucloud_usa".to_string(), gb, 4 * gb), ("backwaves_hk".to_string(), 2 * gb, 2 * gb)];
         let t = body(&rows, &prev);
-        assert!(t.contains("合计  上行 6.0 GB · 下行 12.0 GB · 总计 18.0 GB"), "总量：{}", t);
+        assert!(t.contains("合计    上行 6.0 GB   下行 12.0 GB   总计 18.0 GB"), "总量：{}", t);
         assert!(t.contains("较上期"), "要有上期对比：{}", t);
-        assert!(t.contains("⚠ 本月已用 95% 额度"), "将超限要标出来：{}", t);
+        assert!(t.contains("⚠ 本月已用 95%"), "将超限要标出来：{}", t);
         assert!(t.contains("ucloud_usa") && t.contains("50%"), "普通额度也报：{}", t);
         assert!(
             !t.contains("tiny") || !t.contains("tiny                    1 B  本月"),
@@ -195,7 +216,11 @@ mod tests {
         assert!(many.contains("node019"), "第 20 台要在：{}", many);
         assert!(!many.contains("node020"), "第 21 台不该在：{}", many);
         assert!(many.contains("…还有 10 台 · 合计 20.0 GB"), "汇总行：{}", many);
-        assert!(many.contains("合计  上行 30.0 GB · 下行 30.0 GB · 总计 60.0 GB"), "总量按全部算：{}", many);
+        assert!(
+            many.contains("合计    上行 30.0 GB   下行 30.0 GB   总计 60.0 GB"),
+            "总量按全部算：{}",
+            many
+        );
     }
 
     /// 覆盖说明：**完整时不说话** ✓、不全时说清从哪天起 ✓ —— 这一句就是"别让第一份年报在说谎" ✓。
@@ -236,6 +261,6 @@ mod tests {
         // 周期内只用了 1GB，但本月已用 120GB / 100GB ⇒ 超限 ✓。
         let rows = vec![row("heavy", gb / 2, gb / 2, 100 * gb, 120 * gb)];
         let t = body(&rows, &[]);
-        assert!(t.contains("⚠ 本月已超出额度（120%）"), "{}", t);
+        assert!(t.contains("⚠ 本月已超（120%）"), "{}", t);
     }
 }

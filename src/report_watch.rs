@@ -193,7 +193,8 @@ fn tick(app: &App) -> anyhow::Result<()> {
         };
         notify::send(
             app,
-            Note { event: "traffic", node: String::new(), title, message, ..Default::default() },
+            // 报告正文自带 HTML（加粗的标题 + `<pre>` 表格），见 `report::body`。
+            Note { event: "traffic", node: String::new(), title, message, html: true, ..Default::default() },
         );
         app.db.set(&sent_key(p), &stamp)?;
     }

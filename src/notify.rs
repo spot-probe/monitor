@@ -37,6 +37,9 @@ pub struct Note {
     /// Unix seconds, stamped when queued: delivery can trail the event by minutes
     /// while a channel is retried.
     pub time: i64,
+    /// 正文**已经是 HTML**（报告用它加粗、用 `<pre>` 对齐）。
+    /// ⚠️ 默认 **false**：节点名里出现 `<` 时，纯文本才不会被解析坏 —— 这是既定取舍。
+    pub html: bool,
     /// 这条通知涉及哪些节点（id）。**只用来挂按钮**（静音 / 看详情）：
     /// 文字里带的是名字，而按钮的 `callback_data` 需要 id。0 表示"没有具体节点"。
     pub ids: Vec<i64>,
@@ -350,6 +353,16 @@ async fn post(app: &App, channel: &Channel, note: &Note) -> Result<(), Failure> 
 }
 
 /// Telegram 单条上限 4096 字符，超了**整条拒收**（不是截断）。留一点余量。
+/// 去掉报告自带的那几个标记（给 Webhook 用：下游要的是纯文本）。
+/// 只认我们自己写的那四个标签 —— 正文里其他尖括号是**数据**，不能碰。
+pub fn strip_markup(text: &str) -> String {
+    let mut out = text.to_string();
+    for tag in ["<b>", "</b>", "<pre>", "</pre>"] {
+        out = out.replace(tag, "");
+    }
+    out
+}
+
 pub fn clip_message(text: &str) -> String {
     const MAX: usize = 4_000;
     if text.chars().count() <= MAX {
@@ -387,6 +400,10 @@ async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Fail
         // name happens to contain markup.
         Channel::Telegram { token, chat, text } => {
             let mut body = json!({"chat_id": chat, "text": clip_message(&render(text, note, &site, false))});
+            // 报告是唯一自带标记的通知：它的正文由我们构造并转义过。
+            if note.html {
+                body["parse_mode"] = json!("HTML");
+            };
             // 单台节点上的告警挂两颗按钮：一眼能做的两件事（先静音、再看详情）。
             // ⚠️ 多台合并的那条不挂：`callback_data` 只有 64 字节，装不下 N 个 id，
             // 而"静音全部"与"只想静音这一台"是两种意图，不该由一次点击去猜。
@@ -406,7 +423,13 @@ async fn post_once(app: &App, channel: &Channel, note: &Note) -> Result<(), Fail
             {
                 map.insert(name, value);
             }
-            client().post(url).headers(map).body(render(body, note, &site, true))
+            // 报告正文带 HTML 标记（给 Telegram 用的）。Webhook 收到的是**纯文本** ——
+            // 让下游看到一个 `<b>【流量日报】</b>` 只会让人来问"这是 bug 吗"。
+            let mut text = render(body, note, &site, true);
+            if note.html {
+                text = strip_markup(&text);
+            }
+            client().post(url).headers(map).body(text)
         }
     };
     // The URL is stripped from the error: Telegram's carries the bot token and a
@@ -839,6 +862,16 @@ fn gib(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Webhook 收到的是纯文本：报告那四个标记要去掉，但正文里的尖括号是**数据**，不能碰。
+    #[test]
+    fn a_report_loses_its_markup_on_the_way_to_a_webhook() {
+        let text = "<b>【流量日报】</b>今天\n<pre>总 1 GB</pre>\n覆盖 3 天 <3 台>";
+        let plain = strip_markup(text);
+        assert!(!plain.contains("<b>") && !plain.contains("<pre>"), "{plain}");
+        assert!(plain.contains("【流量日报】"), "{plain}");
+        assert!(plain.contains("<3 台>"), "数据里的尖括号不该被当成标记：{plain}");
+    }
 
     #[test]
     fn a_long_notification_is_clipped_not_rejected() {
