@@ -28,7 +28,7 @@ const MAX_LINES: usize = 25;
 
 /// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
 /// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
-const COMMANDS: [(&str, &str); 7] = [
+const COMMANDS: [(&str, &str); 9] = [
     ("/nodes", "集群概览 + 节点列表（在线、版本、CPU/内存）"),
     ("/node <名字>", "单台详情，也可以 /node 3"),
     ("/traffic", "今日与本月流量"),
@@ -36,6 +36,8 @@ const COMMANDS: [(&str, &str); 7] = [
     ("/upgrade <名字>", "远程升级（会先弹确认按钮）"),
     ("/mute <名字> [2h]", "静音（默认 1 小时）"),
     ("/muted", "现在静音了哪些"),
+    ("/report [周期]", "立刻出一份报告（默认日报）"),
+    ("/whoami", "这个机器人连的是谁"),
 ];
 
 /// Telegram API 的根（与通知共用一个，见 `notify::telegram_api`）。
@@ -152,6 +154,8 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
         "upgrade" => ask_upgrade(app, token, chat, &snapshot, arg).await,
         "mute" | "unmute" => mute_cmd(app, token, chat, &snapshot, arg, cmd == "mute").await,
+        "report" => report_cmd(app, token, chat, arg).await,
+        "whoami" => reply(app, token, chat, whoami_text(app, chat, &snapshot)).await,
         "muted" => reply(app, token, chat, muted_text(&snapshot)).await,
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
         other => {
@@ -174,6 +178,79 @@ async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: 
     if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
     }
+}
+
+/// `/report [day|week|month|quarter|half|year]` —— 立刻出一份报告。
+/// 与定时报告**同一套取数与排版**（`report_watch::report_rows` + `report::body`），
+/// 只是不走通知队列：它是"我现在就要看"，不该推给所有渠道、也不该占掉当天的自动报告。
+async fn report_cmd(app: &Shared, token: &str, chat: &str, arg: &str) {
+    use crate::db::Period;
+    let period = match arg.trim().to_lowercase().as_str() {
+        "" | "day" | "日" | "日报" => Period::Day,
+        "week" | "周" | "周报" => Period::Week,
+        "month" | "月" | "月报" => Period::Month,
+        "quarter" | "季" | "季报" => Period::Quarter,
+        "half" | "半年" | "半年报" => Period::Half,
+        "year" | "年" | "年报" => Period::Year,
+        other => {
+            return reply(
+                app,
+                token,
+                chat,
+                format!(
+                    "不认识的周期「{}」。用法：<code>/report day|week|month|quarter|half|year</code>",
+                    esc(other)
+                ),
+            )
+            .await
+        }
+    };
+    let today = chrono::Local::now().date_naive();
+    let (from, to, prev_from, prev_to) = period.last_full(today);
+    let rows = match crate::report_watch::report_rows(app, &from, &to) {
+        Ok(rows) => rows,
+        Err(e) => return reply(app, token, chat, format!("取不到数据：{}", esc(&e.to_string()))).await,
+    };
+    let prev: Vec<(String, i64, i64)> = crate::report_watch::report_rows(app, &prev_from, &prev_to)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r.name, r.rx, r.tx))
+        .collect();
+    let offset = crate::report_watch::offset_minutes(&setting(app, "report_tz").unwrap_or_default());
+    let title = crate::report::title(period, &from, &to, &crate::report_watch::label(offset));
+    let mut message = crate::report::body(&rows, &prev);
+    if let Some(note) = crate::report::coverage_note(&from, &to, app.db.earliest_traffic_day().as_deref()) {
+        message.push_str(&format!("\n\n{}", esc(&note)));
+    }
+    reply(app, token, chat, format!("{title}\n{message}")).await;
+}
+
+/// `/whoami`：机器人认的是哪个会话、连的是哪台 hub —— 群里不回话时第一个要确认的东西。
+fn whoami_text(app: &App, chat: &str, frame: &Value) -> String {
+    let site =
+        setting(app, "site_name").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "Monitor".to_string());
+    let now = chrono::Utc::now().timestamp();
+    let muted = nodes_of(frame).iter().filter(|n| n["muted_until"].as_i64().unwrap_or(0) > now).count();
+    whoami_body(
+        &site,
+        env!("CARGO_PKG_VERSION"),
+        chat,
+        &setting(app, "report_periods").unwrap_or_default(),
+        muted,
+    )
+}
+
+/// 纯排版部分（单测不搭数据库）。
+fn whoami_body(site: &str, version: &str, chat: &str, periods: &str, muted: usize) -> String {
+    let periods = if periods.trim().is_empty() { "未开".to_string() } else { esc(periods) };
+    format!(
+        "<b>{}</b> · hub <code>{}</code>\n会话 <code>{}</code>\n报告 <code>{}</code> · 静音 {} 台",
+        esc(site),
+        esc(version),
+        esc(chat),
+        periods,
+        muted
+    )
 }
 
 /// `/mute <编号|名字> [2h]` / `/unmute <编号|名字>`。
@@ -584,6 +661,20 @@ fn nodes_text(frame: &Value) -> String {
     out.push_str(&format!("\n<pre>{}</pre>", pre.trim_end()));
     if total > MAX_LINES {
         out.push_str(&format!("\n…还有 {} 台，去面板看全部。", total - MAX_LINES));
+    }
+    // 分组名**列出来**：不然读者不知道该拿什么去筛（维护者的原话："从哪里知道有哪些组"）。
+    let mut groups: Vec<(&str, usize)> = Vec::new();
+    for node in &nodes {
+        let Some(g) = node["group"].as_str().filter(|g| !g.is_empty()) else { continue };
+        match groups.iter_mut().find(|(name, _)| *name == g) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((g, 1)),
+        }
+    }
+    groups.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    if !groups.is_empty() {
+        let list: Vec<String> = groups.iter().map(|(g, n)| format!("{} {}", esc(g), n)).collect();
+        out.push_str(&format!("\n分组：{}", list.join(" · ")));
     }
     out.push_str("\n用 <code>/node</code> 加编号看单台，例如 <code>/node 1</code>。");
     out
@@ -1123,6 +1214,17 @@ mod tests {
         assert!(crate::notify::alert_buttons(&many).is_none(), "多台合并的那条不挂按钮");
         let other = Note { event: "traffic", ids: vec![7], ..Default::default() };
         assert!(crate::notify::alert_buttons(&other).is_none(), "流量告警不挂");
+    }
+
+    /// `/whoami`：站点名、hub 版本、会话 id、静音数 —— 排障时先看这个。
+    #[test]
+    fn whoami_names_the_site_the_version_and_the_chat() {
+        let text = whoami_body("SRVS", env!("CARGO_PKG_VERSION"), "424242", "day,week", 1);
+        assert!(text.contains("SRVS"), "{text}");
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+        assert!(text.contains("424242"), "{text}");
+        assert!(text.contains("静音 1 台"), "{text}");
+        assert!(whoami_body("X", "1.0", "1", "", 0).contains("未开"), "没开报告要说清楚");
     }
 
     /// 菜单按钮：每个 `callback_data` 都必须能被 `render` 接住 —— 否则是个死按钮。

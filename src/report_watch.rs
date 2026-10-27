@@ -30,7 +30,7 @@ const GRACE_MINUTES: i64 = 120;
 const TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `+08:00` / `-05:30` → 分钟数 ✓。认不出来就用 **+08:00**（维护者定的默认 ✓）。
-fn offset_minutes(tz: &str) -> i32 {
+pub fn offset_minutes(tz: &str) -> i32 {
     let t = tz.trim();
     let (sign, rest) = match t.strip_prefix('-') {
         Some(r) => (-1, r),
@@ -79,7 +79,7 @@ pub fn valid_periods(v: &str) -> bool {
     v.split(',').all(|p| matches!(p.trim(), "" | "day" | "week" | "month" | "quarter" | "half" | "year"))
 }
 
-fn label(minutes: i32) -> String {
+pub fn label(minutes: i32) -> String {
     let (s, m) = if minutes < 0 { ('-', -minutes) } else { ('+', minutes) };
     format!("UTC{s}{:02}:{:02}", m / 60, m % 60)
 }
@@ -203,7 +203,7 @@ fn tick(app: &App) -> anyhow::Result<()> {
 
 /// 取一个区间的逐节点用量 ✓，并补齐报告需要的两样：**月度额度** ✓ 与**本月已用** ✓
 ///（超限提醒按月算 ✓ —— 见 `report::body` 的说明 ✓）。
-fn report_rows(app: &App, from: &str, to: &str) -> anyhow::Result<Vec<crate::report::Row>> {
+pub fn report_rows(app: &App, from: &str, to: &str) -> anyhow::Result<Vec<crate::report::Row>> {
     // 额度由 `Db::traffic_limits` 提供 ✓ —— 走 `Db` 的用途明确的方法 ✓，
     // 而不是在这里直接拿连接 ✗（`conn` 是私有的 ✓，而且那样会把"表长什么样"漏到报告这一层 ✓）。
     let limits: std::collections::HashMap<i64, i64> = app.db.traffic_limits();
