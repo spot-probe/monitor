@@ -531,6 +531,15 @@ fn nodes_text(frame: &Value) -> String {
     // 名字列**限宽**：手机上整行超过约 40 列会折行，折行之后对齐就没了。
     let nw = shown.iter().map(|n| width(n["name"].as_str().unwrap_or("?"))).max().unwrap_or(0).clamp(8, 16);
     let mut pre = String::new();
+    // 列名。Telegram 没有表格，只有等宽块 —— 没有表头就只能靠猜（维护者的原话）。
+    pre.push_str(&format!(
+        "{:>iw$}   {}  {} {}\n",
+        "#",
+        blank_to("节点", nw),
+        blank_to("版本", 6),
+        "CPU / 内存",
+        iw = iw
+    ));
     for (i, node) in shown.iter().enumerate() {
         let online = node["online"] == true;
         let name = node["name"].as_str().unwrap_or("?");
@@ -543,8 +552,9 @@ fn nodes_text(frame: &Value) -> String {
             (total > 0.0).then(|| used / total * 100.0)
         });
         let usage = match (cpu, mem) {
+            // 11 列 = "  0% /  15%"。离线那行的「—」右对齐到同一列，看起来才像一张表。
             (Some(c), Some(m)) => format!("{c:>3.0}% / {m:>3.0}%"),
-            _ => "—".into(),
+            _ => blank_left("—", 11),
         };
         pre.push_str(&format!("{:>iw$} ", i + 1, iw = iw));
         pre.push_str(if online { "● " } else { "○ " });

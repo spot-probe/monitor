@@ -125,6 +125,14 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
     let name_w = rows[..shown].iter().map(|r| crate::text::width(&r.name)).max().unwrap_or(0).clamp(8, 18);
     // 用量列：右对齐，宽度取这一批里最长的那个（"957.4 MB" 比 "2.4 GB" 宽）。
     let size_w = rows[..shown].iter().map(|r| crate::text::width(&human(r.rx + r.tx))).max().unwrap_or(0);
+    // 列名：Telegram 没有表格，没有表头就只能靠猜（维护者的原话）。
+    pre.push_str(&format!(
+        "  {}  {}  {}{}\n",
+        crate::text::blank_to("节点", name_w),
+        crate::text::blank_left("用量", size_w),
+        crate::text::blank_to("环比", 9),
+        crate::text::blank_left("本月已用", 8)
+    ));
     for r in &rows[..shown] {
         let total = r.rx + r.tx;
         let cmp = match prev_of(&r.name) {
@@ -137,12 +145,11 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
         // 超限提醒：额度是**按月**的 ✓，所以看 `month_used` 而不是这个周期的量 ✓。
         let warn = if r.limit > 0 {
             let pct = r.month_used as f64 * 100.0 / r.limit as f64;
-            if pct >= 100.0 {
-                format!("⚠ 本月已超（{pct:.0}%）")
-            } else if pct >= 90.0 {
-                format!("⚠ 本月已用 {pct:.0}%")
+            // 90% 起加警示符 —— 列头已经写着"本月已用"，数字不必再重复一遍。
+            if pct >= 90.0 {
+                format!("⚠ {pct:.0}%")
             } else {
-                format!("本月已用 {pct:.0}%")
+                format!("{pct:.0}%")
             }
         } else {
             String::new()
@@ -154,7 +161,7 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
         );
         // 涨跌对齐成一列（空的时候也留位，后面的"本月已用"才不会错开）。
         line.push_str(&format!("{cmp:<9}"));
-        line.push_str(&warn);
+        line.push_str(&crate::text::blank_left(&warn, 8));
         // 行尾空格要剪掉：`<pre>` 会原样保留，看起来像"这行没写完"。
         pre.push_str(line.trim_end());
         pre.push('\n');
@@ -188,7 +195,7 @@ mod tests {
         let t = body(&rows, &prev);
         assert!(t.contains("合计    上行 6.0 GB   下行 12.0 GB   总计 18.0 GB"), "总量：{}", t);
         assert!(t.contains("较上期"), "要有上期对比：{}", t);
-        assert!(t.contains("⚠ 本月已用 95%"), "将超限要标出来：{}", t);
+        assert!(t.contains("⚠ 95%"), "将超限要标出来：{}", t);
         assert!(t.contains("ucloud_usa") && t.contains("50%"), "普通额度也报：{}", t);
         assert!(
             !t.contains("tiny") || !t.contains("tiny                    1 B  本月"),
@@ -261,6 +268,6 @@ mod tests {
         // 周期内只用了 1GB，但本月已用 120GB / 100GB ⇒ 超限 ✓。
         let rows = vec![row("heavy", gb / 2, gb / 2, 100 * gb, 120 * gb)];
         let t = body(&rows, &[]);
-        assert!(t.contains("⚠ 本月已超（120%）"), "{}", t);
+        assert!(t.contains("⚠ 120%"), "{}", t);
     }
 }
