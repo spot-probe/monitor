@@ -69,6 +69,8 @@ const UPGRADE_PROGRESS_TTL: i64 = 600;
 
 pub struct App {
     pub db: Db,
+    /// 这个进程是什么时候起来的（unix 秒）。`/uptime` 用 —— "机器人还活着吗"的最短答案。
+    pub started_at: i64,
     /// IP 库（MaxMind / Tor 列表 …）放在哪 ✓ —— 与数据库同目录 ✓（推导见 `geo::data_dir` ✓）。
     pub data_dir: std::path::PathBuf,
     /// Every connected agent: its outbound channel, the session that opened it,
@@ -183,6 +185,7 @@ impl App {
     ) -> Self {
         Self {
             data_dir,
+            started_at: chrono::Utc::now().timestamp(),
             db,
             agents: RwLock::default(),
             // ⚠️ 不能写成 [(...); 2]：`HeaderValue` 既不是 `Copy` 也不是 `Default`。
@@ -920,7 +923,7 @@ const NAMED_CYCLES: [(&str, u32); 6] = [
 const MAX_CYCLE: u32 = 1_200;
 
 /// Billing cycles as whole months. `once` has none, so it never rolls over.
-fn cycle_months(cycle: &str) -> Option<u32> {
+pub(crate) fn cycle_months(cycle: &str) -> Option<u32> {
     match NAMED_CYCLES.iter().find(|(name, _)| *name == cycle) {
         Some(&(_, months)) => Some(months),
         None => cycle.strip_suffix('m')?.parse().ok().filter(|m| (1..=MAX_CYCLE).contains(m)),

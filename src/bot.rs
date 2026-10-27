@@ -28,7 +28,7 @@ const MAX_LINES: usize = 25;
 
 /// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
 /// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
-const COMMANDS: [(&str, &str); 9] = [
+const COMMANDS: [(&str, &str); 12] = [
     ("/nodes", "集群概览 + 节点列表（在线、版本、CPU/内存）"),
     ("/node <名字>", "单台详情，也可以 /node 3"),
     ("/traffic", "今日与本月流量"),
@@ -38,6 +38,9 @@ const COMMANDS: [(&str, &str); 9] = [
     ("/muted", "现在静音了哪些"),
     ("/report [周期]", "立刻出一份报告（默认日报）"),
     ("/whoami", "这个机器人连的是谁"),
+    ("/expiry [天]", "多久内到期（默认 30 天）"),
+    ("/cost", "每月/每年成本，最贵三台"),
+    ("/uptime", "hub 运行了多久"),
 ];
 
 /// Telegram API 的根（与通知共用一个，见 `notify::telegram_api`）。
@@ -150,11 +153,21 @@ async fn handle(app: &Shared, token: &str, chat: &str, update: &Value) {
     let snapshot = frame(app);
     match cmd {
         // 文字之外再挂一排按钮：常用命令不必记、也不必打字。
-        "start" | "help" => menu(app, token, chat, None).await,
+        "start" => menu(app, token, chat, None).await,
+        // `/help` 只打文字：在群里 `/start` 会留一条带按钮的消息，而多数时候只想扫一眼命令表。
+        "help" => {
+            let site = setting(app, "site_name")
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Monitor".to_string());
+            reply(app, token, chat, help_text(&site)).await
+        }
         "node" => reply(app, token, chat, node_text(&snapshot, arg)).await,
         "upgrade" => ask_upgrade(app, token, chat, &snapshot, arg).await,
         "mute" | "unmute" => mute_cmd(app, token, chat, &snapshot, arg, cmd == "mute").await,
         "report" => report_cmd(app, token, chat, arg).await,
+        "expiry" => reply(app, token, chat, expiry_text(&snapshot, arg)).await,
+        "cost" => reply(app, token, chat, cost_text(app, &snapshot)).await,
+        "uptime" => reply(app, token, chat, uptime_text(app)).await,
         "whoami" => reply(app, token, chat, whoami_text(app, chat, &snapshot)).await,
         "muted" => reply(app, token, chat, muted_text(&snapshot)).await,
         // 不认识的命令**不回**：两个 bot 在同一个群里时，互相回"不认识"会打起来。
@@ -178,6 +191,107 @@ async fn reply_with(app: &App, token: &str, chat: &str, text: String, keyboard: 
     if let Err(e) = post_message(app, token, chat, &text, keyboard).await {
         debug!("telegram sendMessage: {e:#}");
     }
+}
+
+/// 一台节点的月成本（人民币）。缺价格 / 缺汇率 ⇒ `None`（不是 0 ✗ —— "不知道"与"免费"不同）。
+fn monthly_cny(node: &Value, rates: &std::collections::HashMap<String, f64>) -> Option<f64> {
+    let price = node["price"].as_f64().filter(|p| *p > 0.0)?;
+    let months = crate::cycle_months(node["billing_cycle"].as_str().unwrap_or("monthly"))? as f64;
+    let per = crate::fx::cny_per_unit(rates, node["currency"].as_str().unwrap_or("CNY"))?;
+    Some(price / months * per)
+}
+
+fn yuan(v: f64) -> String {
+    format!("¥{:.2}", v)
+}
+
+/// `/cost`：每月/每年合计 + 最贵三台。与面板的"成本"页同一套口径（按周期摊平）。
+fn cost_text(app: &App, frame: &Value) -> String {
+    let nodes = nodes_of(frame);
+    let Some((rates, _, manual)) = crate::fx::rates(app) else {
+        return "还没拿到汇率 —— 去面板的「成本」页看一次，或配一个手动汇率。".into();
+    };
+    let mut priced: Vec<(&str, f64)> = Vec::new();
+    let mut missing = 0;
+    for node in &nodes {
+        match monthly_cny(node, &rates) {
+            Some(v) => priced.push((node["name"].as_str().unwrap_or("?"), v)),
+            // 没填价格、或币种不在汇率表里 —— 两种都**不计入合计**，但要数出来。
+            None => missing += 1,
+        }
+    }
+    let total: f64 = priced.iter().map(|(_, v)| v).sum();
+    priced.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut out = format!("<b>每月 {}</b> · 折合每年 {}\n<pre>", yuan(total), yuan(total * 12.0));
+    if let Some(rate) = crate::fx::cny_per_unit(&rates, "USD") {
+        out.push_str(&format!("汇率 1 USD = {rate:.4} CNY{}\n", if manual { "（手动）" } else { "" }));
+    }
+    if missing > 0 {
+        out.push_str(&format!("未填价格或缺汇率 {missing} 台（未计入合计）\n"));
+    }
+    if !priced.is_empty() {
+        out.push('\n');
+        let nw = priced.iter().map(|(n, _)| width(n)).max().unwrap_or(0).clamp(8, 16);
+        for (i, (name, v)) in priced.iter().take(3).enumerate() {
+            out.push_str(&format!(
+                "{:>2} {}  {}\n",
+                i + 1,
+                blank_to(&esc(&clip(name, nw)), nw),
+                blank_left(&yuan(*v), 9)
+            ));
+        }
+    } else {
+        out.push_str("\n还没有一台填了价格。\n");
+    }
+    format!("{}</pre>", out.trim_end())
+}
+
+/// `/expiry [天数]`：多久内到期（默认 30 天），按天数升序。
+fn expiry_text(frame: &Value, arg: &str) -> String {
+    let days: i64 = arg.trim().parse().ok().filter(|d| *d > 0 && *d <= 365).unwrap_or(30);
+    let mut due: Vec<(&str, &str, i64)> = Vec::new();
+    let all = nodes_of(frame);
+    for node in all.iter() {
+        let Some(at) = node["expires_at"].as_str().filter(|s| !s.is_empty()) else { continue };
+        let Some(left) = node["expires_in"].as_f64() else { continue };
+        let left = left as i64;
+        if left <= days {
+            due.push((node["name"].as_str().unwrap_or("?"), at, left));
+        }
+    }
+    if due.is_empty() {
+        return format!("{days} 天内没有到期的节点。");
+    }
+    due.sort_by_key(|(_, _, left)| *left);
+    let nw = due.iter().map(|(n, _, _)| width(n)).max().unwrap_or(0).clamp(8, 16);
+    let mut pre = String::new();
+    for (i, (name, at, left)) in due.iter().enumerate() {
+        pre.push_str(&format!(
+            "{:>2} {}  {}  {:>4} 天后\n",
+            i + 1,
+            blank_to(&esc(&clip(name, nw)), nw),
+            at,
+            left
+        ));
+    }
+    format!("<b>{} 天内到期 {} 台</b>\n<pre>{}</pre>", days, due.len(), pre.trim_end())
+}
+
+/// 人类读的时长：`3 天 7 小时` / `42 分钟` / `刚刚`。
+fn span(secs: i64) -> String {
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+    match (d, h, m) {
+        (0, 0, 0) => "刚刚".into(),
+        (0, 0, m) => format!("{m} 分钟"),
+        (0, h, _) => format!("{h} 小时"),
+        (d, h, _) => format!("{d} 天 {h} 小时"),
+    }
+}
+
+/// `/uptime`：hub 运行了多久 —— "机器人还活着吗"的最短答案。
+fn uptime_text(app: &App) -> String {
+    let secs = (chrono::Utc::now().timestamp() - app.started_at).max(0);
+    format!("已运行 {} · hub <code>{}</code>", span(secs), env!("CARGO_PKG_VERSION"))
 }
 
 /// `/report [day|week|month|quarter|half|year]` —— 立刻出一份报告。
@@ -1214,6 +1328,49 @@ mod tests {
         assert!(crate::notify::alert_buttons(&many).is_none(), "多台合并的那条不挂按钮");
         let other = Note { event: "traffic", ids: vec![7], ..Default::default() };
         assert!(crate::notify::alert_buttons(&other).is_none(), "流量告警不挂");
+    }
+
+    /// 时长的三种量级。
+    #[test]
+    fn spans_read_as_days_hours_or_minutes() {
+        assert_eq!(span(0), "刚刚");
+        assert_eq!(span(90), "1 分钟");
+        assert_eq!(span(3 * 3600), "3 小时");
+        assert_eq!(span(3 * 86_400 + 7 * 3600), "3 天 7 小时");
+    }
+
+    /// 月成本：按周期摊平再折成人民币；缺价格或缺汇率是 `None`，不是 0。
+    #[test]
+    fn monthly_cost_flattens_the_cycle_and_converts_the_currency() {
+        let mut rates = std::collections::HashMap::new();
+        rates.insert("CNY".to_string(), 6.68_f64);
+        rates.insert("EUR".to_string(), 0.92_f64);
+        let usd = json!({ "price": 12.5, "currency": "USD", "billing_cycle": "monthly" });
+        assert!((monthly_cny(&usd, &rates).unwrap() - 12.5 * 6.68).abs() < 0.001);
+        let yearly = json!({ "price": 340.0, "currency": "CNY", "billing_cycle": "yearly" });
+        assert!((monthly_cny(&yearly, &rates).unwrap() - 340.0 / 12.0).abs() < 0.001);
+        let eur = json!({ "price": 4.5, "currency": "EUR", "billing_cycle": "monthly" });
+        assert!((monthly_cny(&eur, &rates).unwrap() - 4.5 * 6.68 / 0.92).abs() < 0.001);
+        // 没填价格 / 币种不在汇率表里 ⇒ 不知道，不是 0
+        assert!(monthly_cny(&json!({ "price": 0.0 }), &rates).is_none());
+        assert!(monthly_cny(&json!({ "price": 5.0, "currency": "XYZ" }), &rates).is_none());
+    }
+
+    /// 到期列表：默认 30 天，按天数升序，超出窗口的不列。
+    #[test]
+    fn expiry_lists_only_what_falls_inside_the_window() {
+        let f = json!({ "nodes": [
+            { "name": "far", "expires_at": "2027-08-19", "expires_in": 298.0 },
+            { "name": "soon", "expires_at": "2026-10-30", "expires_in": 3.0 },
+            { "name": "mid", "expires_at": "2026-11-17", "expires_in": 21.0 }
+        ]});
+        let text = expiry_text(&f, "");
+        assert!(text.contains("30 天内到期 2 台"), "{text}");
+        assert!(text.contains("soon") && text.contains("mid"), "{text}");
+        assert!(!text.contains("far"), "298 天的别列出来：{text}");
+        // 天数升序：soon 在 mid 前面
+        assert!(text.find("soon") < text.find("mid"), "{text}");
+        assert!(expiry_text(&f, "365").contains("3 台"), "窗口可以放宽");
     }
 
     /// `/whoami`：站点名、hub 版本、会话 id、静音数 —— 排障时先看这个。
