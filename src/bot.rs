@@ -708,8 +708,11 @@ fn help_text(site: &str) -> String {
     format!("<b>{}</b> TGBot · 运维命令\n<pre>{}</pre>", esc(site), esc(pre.trim_end()))
 }
 
-/// `/nodes`：**编号 + 对齐的三列**（名字 / 版本 / CPU·内存）。
-/// 编号是给 `/node 3` 用的 —— 名字里有中文和连字符，手打容易错。
+/// `/nodes`：**编号 + 版本 + CPU·内存 + 名字**。
+///
+/// ⚠️ 对齐区里**只放数字**，名字放最后 ✗✓：Telegram 代码块里的中文不是正好两字符宽，
+/// 只要"要对的列"里出现中文（名字、或中文表头），整行就会漂 —— 移动端尤其明显。
+/// 所以表头是**一行列顺序说明**（不参与对齐），数据行是：编号 / 版本 / CPU·内存 / 节点。
 fn nodes_text(frame: &Value) -> String {
     let nodes = nodes_of(frame);
     if nodes.is_empty() {
@@ -719,18 +722,8 @@ fn nodes_text(frame: &Value) -> String {
     let online = nodes.iter().filter(|n| n["online"] == true).count();
     let shown: Vec<&Value> = nodes.iter().take(MAX_LINES).collect();
     let iw = shown.len().to_string().len().max(2);
-    // 名字列**限宽**：手机上整行超过约 40 列会折行，折行之后对齐就没了。
-    let nw = shown.iter().map(|n| width(n["name"].as_str().unwrap_or("?"))).max().unwrap_or(0).clamp(8, 16);
     let mut pre = String::new();
-    // 列名。Telegram 没有表格，只有等宽块 —— 没有表头就只能靠猜（维护者的原话）。
-    pre.push_str(&format!(
-        "{:>iw$}   {}  {} {}\n",
-        "#",
-        blank_to("节点", nw),
-        blank_to("版本", 6),
-        "CPU / 内存",
-        iw = iw
-    ));
+    pre.push_str("  # · 版本 · CPU/内存 · 节点\n");
     for (i, node) in shown.iter().enumerate() {
         let online = node["online"] == true;
         let name = node["name"].as_str().unwrap_or("?");
@@ -742,40 +735,35 @@ fn nodes_text(frame: &Value) -> String {
             let total = m.get("mem_total")?.as_f64()?;
             (total > 0.0).then(|| used / total * 100.0)
         });
+        // 11 列 = "  0% /  15%"。离线那行的「—」右对齐到同一列，看起来才像一张表。
         let usage = match (cpu, mem) {
-            // 11 列 = "  0% /  15%"。离线那行的「—」右对齐到同一列，看起来才像一张表。
             (Some(c), Some(m)) => format!("{c:>3.0}% / {m:>3.0}%"),
             _ => blank_left("—", 11),
         };
-        pre.push_str(&format!("{:>iw$} ", i + 1, iw = iw));
-        pre.push_str(if online { "● " } else { "○ " });
-        pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
-        pre.push_str("  ");
+        pre.push_str(&format!("{:>iw$}  ", i + 1, iw = iw));
         pre.push_str(&blank_to(&esc(if version.is_empty() { "?" } else { version }), 6));
         pre.push(' ');
         pre.push_str(&usage);
+        pre.push_str("  ");
+        // 圆点**每行都画**（在线 ●、离线 ○）：只有离线才画的话，名字的起点会错开。
+        // 它落在"名字"这一列里，即使两个字形宽度略有差别，也不会影响前面的数字列。
+        pre.push_str(if online { "● " } else { "○ " });
+        pre.push_str(&esc(&clip(name, 20)));
         pre.push('\n');
     }
-    // 表头就是「集群概览」：数量 + 待升级 + 最新版本。
-    // ⚠️ 原来 `/status` 是单独一条命令，而它说的三件事里有**两件**这个表头已经说了 ——
-    // 两处维护同一句话，早晚会说成两样。现在合成一处，`/status` 留作别名。
-    let outdated = nodes.iter().filter(|n| n["agent_old"] == true).count();
-    let latest = frame.get("agent_latest").and_then(Value::as_str).unwrap_or("");
     let mut out = format!(
         "<b>集群 {total} 台</b> · 在线 <b>{online}</b> · 离线 <b>{}</b> · {}",
         total - online,
         fetched()
     );
-    if outdated > 0 {
+    if let Some(outdated) = Some(nodes.iter().filter(|n| n["agent_old"] == true).count()).filter(|n| *n > 0) {
+        let latest = frame.get("agent_latest").and_then(Value::as_str).unwrap_or("");
         out.push_str(&format!("\n待升级 <b>{outdated}</b> 台 · 发 <code>/upgrade</code> 看是哪几台"));
         if !latest.is_empty() {
             out.push_str(&format!(" · 最新 <code>{}</code>", esc(latest)));
         }
     }
     out.push_str(&format!("\n<pre>{}</pre>", pre.trim_end()));
-    if total > MAX_LINES {
-        out.push_str(&format!("\n…还有 {} 台，去面板看全部。", total - MAX_LINES));
-    }
     // 分组名**列出来**：不然读者不知道该拿什么去筛（维护者的原话："从哪里知道有哪些组"）。
     let mut groups: Vec<(&str, usize)> = Vec::new();
     for node in &nodes {
@@ -1212,8 +1200,11 @@ mod tests {
         // 编号 + 圆点 + 名字 + 版本 + 用量，一列都不许糊在一起
         assert!(text.contains("<b>集群 2 台</b> · 在线 <b>1</b> · 离线 <b>1</b>"), "{text}");
         assert!(text.contains("<pre>"), "整块要用等宽字体才对得齐：{text}");
-        assert!(text.contains(" 1 ● hk-1"), "第 1 台：{text}");
-        assert!(text.contains(" 2 ○ la-2"), "离线用空心点：{text}");
+        // 数字在前、名字在后 —— 中文名挪到行尾，靠不靠右都不影响前面的列。
+        assert!(text.contains(" 1  1.1.17"), "第 1 台：{text}");
+        assert!(text.contains("hk-1"), "{text}");
+        assert!(text.contains("● hk-1"), "在线用实心点：{text}");
+        assert!(text.contains("○ la-2"), "离线用空心点：{text}");
         assert!(text.contains("1.1.17"), "{text}");
         assert!(text.contains("  2% /  50%"), "CPU/内存右对齐：{text}");
         assert!(text.contains('—'), "没有指标就写破折号：{text}");
