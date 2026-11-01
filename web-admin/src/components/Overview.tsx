@@ -280,7 +280,7 @@ function TrafficChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hidd
   // 30/90 天时每格都标会糊在一起，按数量抽稀。
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="absolute inset-0 h-full w-full" role="img" aria-label="每日入出站流量与周期累计">
       <ChartTicks left={top} right={cumTop} format={bytes} h={h} />
       {rows.map((r, i) => {
         const x = CHART_GUT + i * bw + (bw - bar) / 2
@@ -333,7 +333,7 @@ function BandwidthChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hi
   const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${CHART_GUT + i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="absolute inset-0 h-full w-full" role="img" aria-label="每日入站与出站带宽速率">
       <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} h={h} />
       {!hidden?.has("入站") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />}
       {/* 出站用**虚线**：两条速率相等时（预览夹具就是）实线会完全重合，看不出是两条。
@@ -371,7 +371,7 @@ function ResourceChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hid
     return [...up, ...down].join(" ")
   }
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="absolute inset-0 h-full w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
       <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} h={h} />
       {/* 80% 阈值线**有条件地画**：轴上限低于 80 时它根本不在画面里，画了只会让人以为没数据。
           动态轴之后这条才有意义 —— 它出现的那一刻，正是负载真的接近危险区的时候。 */}
@@ -611,7 +611,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
         ) : (
           <div
             ref={plot}
-            className="relative min-h-[110px] flex-1"
+            className="relative min-h-[110px] flex-1 overflow-hidden"
             onMouseMove={onMove}
             onMouseLeave={() => setHover(null)}
           >
