@@ -89,15 +89,18 @@ function chartTop(tab: "traffic" | "bandwidth" | "resource", rows: SeriesPoint[]
 }
 
 /// 值 → viewBox 里的 y。**唯一**的一份映射。
-function chartY(v: number, top: number): number {
+function chartY(v: number, top: number, h = CHART_H): number {
   const t = Math.min(top, Math.max(0, v)) / top
-  return CHART_H - CHART_PAD - t * (CHART_H - CHART_PAD * 2)
+  return h - CHART_PAD - t * (h - CHART_PAD * 2)
 }
 
 const CHART_W = 640
 /// 柱子上限。**三张图共用**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
 /// 上一轮我把它只写进流量图，带宽图就漏了 —— 所以提到这里，谁画柱子谁用它。
 const CHART_BAR_MAX = 16
+/// 图表的**设计高度**（viewBox 里的 px）。也是没量到卡片高度时的兜底。
+/// 卡片比内容高时（总览页右列是续费日历，行高由它决定），由 `TrendCard` 量出实际高度后传入 ——
+/// 图按 `viewBox` 等比缩放，所以传进来的也是"设计像素"，不是 CSS 像素。
 const CHART_H = 150
 const CHART_PAD = 18
 /// 左侧刻度槽。**必须有**：刻度原来画在 x=0，而第一根柱也从 x≈0 起 —— 于是"2.55 TB"
@@ -167,13 +170,15 @@ const pill = (on: boolean) =>
 ///
 /// 用 **HTML** 而不是 SVG 文本有两个好处：token 与 Tailwind 直接可用；贴边时不会像 SVG 那样被
 /// viewBox 裁掉（`left` 夹在 12%–88% 之间，卡片永远完整）。
-function HoverOverlay({ rows, index, series, top, single }: {
+function HoverOverlay({ rows, index, series, top, single, h = CHART_H }: {
   rows: SeriesPoint[]
   index: number
   series: { c: string; t: string; v: string; raw: number }[]
   top: number
   /** 这张图是不是单轴（双轴时 Y 胶囊会让人分不清指向哪根轴）。 */
   single: boolean
+  /** 图表的设计高度（viewBox 里的 px）—— 卡片变高时由 TrendCard 传入。 */
+  h?: number
 }) {
   const pct = ((index + 0.5) / rows.length) * 100
   return (
@@ -186,7 +191,7 @@ function HoverOverlay({ rows, index, series, top, single }: {
       {single && series[0] && (
         <span
           className="tnum absolute -translate-y-1/2 rounded-md bg-foreground px-1.5 py-0.5 text-[11px] leading-tight font-medium text-background"
-          style={{ top: `${(chartY(series[0].raw, top) / CHART_H) * 100}%` }}
+          style={{ top: `${(chartY(series[0].raw, top, h) / h) * 100}%` }}
         >
           {series[0].v}
         </span>
@@ -220,8 +225,18 @@ function HoverOverlay({ rows, index, series, top, single }: {
 
 /// 三档刻度（0 / 一半 / 满）与左右轴数值。**三张图共用**：
 /// 上一轮我只在流量图里画了刻度，带宽图与资源图就漏了 —— 根因是每张图各写了一遍。
-function ChartTicks({ left, right, format }: { left: number; right?: number; format: (v: number) => string }) {
-  const y = (t: number) => CHART_H - CHART_PAD - t * (CHART_H - CHART_PAD * 2)
+function ChartTicks({
+  left,
+  right,
+  format,
+  h = CHART_H,
+}: {
+  left: number
+  right?: number
+  format: (v: number) => string
+  h?: number
+}) {
+  const y = (t: number) => h - CHART_PAD - t * (h - CHART_PAD * 2)
   return (
     <>
       {[0, 0.5, 1].map((t) => (
@@ -237,20 +252,12 @@ function ChartTicks({ left, right, format }: { left: number; right?: number; for
   )
 }
 
-/// 面板里三种图共用的横轴：一条基线 + 首尾日期。
-function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
-  return (
-    <>
-      <line x1={0} y1={CHART_H - CHART_PAD} x2={CHART_W} y2={CHART_H - CHART_PAD} className="stroke-border" strokeWidth="1" />
-      {/* 标签落在**首尾桶的中心**上：折线/柱子的落点就是桶中心，画在两端会看起来对不齐。 */}
-      <text x={CHART_W / rows.length / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
-        {dayLabel(rows[0].day_ts)}
-      </text>
-      <text x={CHART_W - CHART_W / rows.length / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
-        {dayLabel(rows[rows.length - 1].day_ts)}
-      </text>
-    </>
-  )
+/// 面板里三种图共用的横轴：**一条基线**。
+///
+/// 日期标签**不在这里画** ✗✓：三张图都各自按桶画（`CHART_GUT + i*bw + bw/2`），首尾也在其中。
+/// 这里再画一遍首尾，就会和它们错开半个刻度槽的位置 —— 带宽/资源图上那两个重复的 `10/2`。
+function ChartAxis({ rows: _rows, h = CHART_H }: { rows: SeriesPoint[]; h?: number }) {
+  return <line x1={0} y1={h - CHART_PAD} x2={CHART_W} y2={h - CHART_PAD} className="stroke-border" strokeWidth="1" />
 }
 
 /// 流量：**堆叠柱**（入在下、出在上），一根轴。
@@ -258,7 +265,7 @@ function ChartAxis({ rows }: { rows: SeriesPoint[] }) {
 /// ⚠️ 累积折线**从这里搬走了** ✗✗：它与柱量纲差一个数量级（当天 vs 区间累计），叠在同一张图上
 /// 必须开第二根 y 轴 —— 而双轴图读起来永远是"这条线对哪根轴"。它现在是下面那条独立窄带
 /// （[`Cumulative`]），柱只需要一根轴；逐日累计值仍在 tooltip 里。
-function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+function TrafficChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hidden?: Set<string>; h?: number }) {
   const top = chartTop("traffic", rows)
   // 累计线**回到图里**（维护者的取舍：p2 那种叠法更紧凑）。当初我把它拆出去的理由是
   // "双轴图读不清这条线对哪根轴" —— 那个问题靠**颜色**解决：右轴刻度与线同为橙色，
@@ -268,13 +275,13 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
   const bw = (CHART_W - CHART_GUT - CHART_RGUT) / Math.max(1, rows.length)
   // 柱子**限宽**：只取到 4 天时，按比例分到的宽度会把柱子拉成砖块。
   const bar = Math.min(bw * 0.7, CHART_BAR_MAX)
-  const bottom = CHART_H - CHART_PAD
-  const yOf = (v: number, m: number) => chartY(v, m)
+  const bottom = h - CHART_PAD
+  const yOf = (v: number, m: number) => chartY(v, m, h)
   // 30/90 天时每格都标会糊在一起，按数量抽稀。
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
-      <ChartTicks left={top} right={cumTop} format={bytes} />
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="每日入出站流量与周期累计">
+      <ChartTicks left={top} right={cumTop} format={bytes} h={h} />
       {rows.map((r, i) => {
         const x = CHART_GUT + i * bw + (bw - bar) / 2
         const mid = yOf(r.rx, top)
@@ -302,7 +309,7 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
           一件事说两遍，还把刻度盖住了 —— 删掉徽标，两条问题一起消失。 */}
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
-          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={h - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
             {dayLabel(r.day_ts)}
           </text>
         ) : null,
@@ -316,28 +323,28 @@ function TrafficChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<stri
 /// 两条线都是**同一个量纲**（字节/秒）：各自都是「当天总字节 ÷ **有数据覆盖的秒数**」。
 /// 之前的柱子画的是当天总字节、线是瞬时峰值，两个量纲画在一根轴上 —— 那才是这张图原来看着别扭的原因。
 /// 颜色用面板自己的 token（入站 ok-fg / 出站 primary），**不写死调色板**，暗色主题才成立。
-function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+function BandwidthChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hidden?: Set<string>; h?: number }) {
   const rate = (v: number, r: SeriesPoint) => (r.covered > 0 ? v / r.covered : 0)
   const inRate = (r: SeriesPoint) => rate(r.rx, r)
   const outRate = (r: SeriesPoint) => rate(r.tx, r)
   const top = chartTop("bandwidth", rows)
   const bw = (CHART_W - CHART_GUT - CHART_RGUT) / Math.max(1, rows.length)
-  const yOf = (v: number) => chartY(v, top)
+  const yOf = (v: number) => chartY(v, top, h)
   const line = (f: (r: SeriesPoint) => number) => rows.map((r, i) => `${CHART_GUT + i * bw + bw / 2},${yOf(f(r))}`).join(" ")
   const step = Math.max(1, Math.ceil(rows.length / 6))
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
-      <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} />
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="每日入站与出站带宽速率">
+      <ChartTicks left={top} format={(v) => `${bytes(v)}/s`} h={h} />
       {!hidden?.has("入站") && <polyline fill="none" className="stroke-ok-fg" strokeWidth="1.5" points={line(inRate)} />}
       {/* 出站用**虚线**：两条速率相等时（预览夹具就是）实线会完全重合，看不出是两条。
           改线型是**画法**上的区分，不动数据 —— 不能把其中一条挪开，那是伪造差异。 */}
       {!hidden?.has("出站") && (
         <polyline fill="none" className="stroke-primary" strokeWidth="1.5" strokeDasharray="5 3" points={line(outRate)} />
       )}
-      <ChartAxis rows={rows} />
+      <ChartAxis rows={rows} h={h} />
       {rows.map((r, i) =>
         i % step === 0 || i === rows.length - 1 ? (
-          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={CHART_H - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
+          <text key={r.day_ts} x={CHART_GUT + i * bw + bw / 2} y={h - 4} fontSize="9" textAnchor="middle" className="fill-muted-foreground">
             {dayLabel(r.day_ts)}
           </text>
         ) : null,
@@ -350,10 +357,10 @@ function BandwidthChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<st
 ///
 /// **Y 轴跟着数据走**，不再死锁 0–100%：集群的平均负载通常只有二三成，锁死在 100% 会把实际波动
 /// 压成一根直线 —— 那时「系统很稳」和「探针没采到数」看起来一模一样。上取整到 10 的倍数。
-function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<string> }) {
+function ResourceChart({ rows, hidden, h = CHART_H }: { rows: SeriesPoint[]; hidden?: Set<string>; h?: number }) {
   // 轴上限要**含分布带的上沿** —— 只看均值的话带会溢出轴（这是 A 与 B 唯一真正的耦合处）。
   const top = chartTop("resource", rows)
-  const yOf = (v: number) => chartY(v, top)
+  const yOf = (v: number) => chartY(v, top, h)
   const line = (key: "cpu" | "mem" | "disk") =>
     rows.map((r, i) => `${CHART_GUT + (i + 0.5) * ((CHART_W - CHART_GUT) / Math.max(1, rows.length))},${yOf(r[key])}`).join(" ")
   // 分布带：从**均值线**铺到**最热那台** —— 平均值会掩盖「99 台闲置、1 台打满」，
@@ -364,8 +371,8 @@ function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<str
     return [...up, ...down].join(" ")
   }
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
-      <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} />
+    <svg viewBox={`0 0 ${CHART_W} ${h}`} className="w-full" role="img" aria-label="全队 cpu 内存 硬盘 占用率">
+      <ChartTicks left={top} format={(v) => `${Math.round(v)}%`} h={h} />
       {/* 80% 阈值线**有条件地画**：轴上限低于 80 时它根本不在画面里，画了只会让人以为没数据。
           动态轴之后这条才有意义 —— 它出现的那一刻，正是负载真的接近危险区的时候。 */}
       {top > 80 && (
@@ -382,7 +389,7 @@ function ResourceChart({ rows, hidden }: { rows: SeriesPoint[]; hidden?: Set<str
           <text x={CHART_W - 2} y={yOf(80) - 3} fontSize="9" textAnchor="end" className="fill-danger-fg">80% 阈值</text>
         </g>
       )}
-      <ChartAxis rows={rows} />
+      <ChartAxis rows={rows} h={h} />
       {!hidden?.has("CPU") && (
         <>
           <polygon className="fill-primary/15" points={band("cpu", "cpu_max")} />
@@ -475,6 +482,24 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
 
   // 悬停索引。放在趋势卡这一层，三张图共用同一套交互 —— 三张图本身不用改。
   const [hover, setHover] = useState<number | null>(null)
+  // 卡片被右列（续费日历）撑高时，图表要**吃掉剩下的高度**，而不是在底部留一片空白。
+  // 量的是容器 CSS 高度，换算成 viewBox 里的"设计像素"：图按 `viewBox` 等比缩放，
+  // 传设计像素进去，字号才不会被拉大。
+  const plot = useRef<HTMLDivElement | null>(null)
+  const [chartH, setChartH] = useState(CHART_H)
+  useEffect(() => {
+    const el = plot.current
+    if (!el) return
+    const measure = () => {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      if (w > 0 && h > 0) setChartH(Math.max(110, Math.round((h * CHART_W) / w)))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [tab, rows])
   // 图例开关：点一下隐藏/恢复某条序列。不能靠「挪开一条线」来区分重合的序列 —— 那是伪造数据。
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const toggle = (t: string) =>
@@ -513,7 +538,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             ]
 
   return (
-    <Card>
+    <Card className="flex h-full flex-col">
       <CardHeader>
         <CardTitle className="text-sm">
           趋势
@@ -544,7 +569,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
           </div>
         </CardAction>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="flex flex-1 flex-col gap-3">
         {rows && rows.length > 0 && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {stats.map((st) => (
@@ -584,16 +609,21 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
             这段时间还没有指标数据。
           </p>
         ) : (
-          <div className="relative" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+          <div
+            ref={plot}
+            className="relative min-h-[110px] flex-1"
+            onMouseMove={onMove}
+            onMouseLeave={() => setHover(null)}
+          >
             {tab === "traffic" ? (
               <>
-                <TrafficChart rows={rows} hidden={hidden} />
+                <TrafficChart rows={rows} hidden={hidden} h={chartH} />
 
               </>
             ) : tab === "bandwidth" ? (
-              <BandwidthChart rows={rows} hidden={hidden} />
+              <BandwidthChart rows={rows} hidden={hidden} h={chartH} />
             ) : (
-              <ResourceChart rows={rows} hidden={hidden} />
+              <ResourceChart rows={rows} hidden={hidden} h={chartH} />
             )}
             {hover !== null && (
               <HoverOverlay
@@ -602,6 +632,7 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
                 series={hoverSeries(hover)}
                 top={chartTop(tab, rows)}
                 single={tab !== "traffic"}
+                h={chartH}
               />
             )}
           </div>
