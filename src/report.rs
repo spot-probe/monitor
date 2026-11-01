@@ -125,14 +125,11 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
     let name_w = rows[..shown].iter().map(|r| crate::text::width(&r.name)).max().unwrap_or(0).clamp(8, 18);
     // 用量列：右对齐，宽度取这一批里最长的那个（"957.4 MB" 比 "2.4 GB" 宽）。
     let size_w = rows[..shown].iter().map(|r| crate::text::width(&human(r.rx + r.tx))).max().unwrap_or(0);
-    // 列名：Telegram 没有表格，没有表头就只能靠猜（维护者的原话）。
-    pre.push_str(&format!(
-        "  {}  {}  {}{}\n",
-        crate::text::blank_to("节点", name_w),
-        crate::text::blank_left("用量", size_w),
-        crate::text::blank_to("环比", 9),
-        crate::text::blank_left("本月已用", 8)
-    ));
+    // ⚠️ **对齐区里只放数字，名字放最后** ✗✓：
+    // Telegram 代码块里的中文**不是正好两字符宽**（各客户端字体不同），所以只要"要对的列"里
+    // 出现中文（名字、或中文表头），整行就会漂 —— 在移动端尤其明显。
+    // 于是表头改成一行**列顺序说明**（不参与对齐），数据行是：用量 / 环比 / 本月已用 / 名字。
+    pre.push_str("  用量 · 环比 · 本月已用 · 节点\n");
     for r in &rows[..shown] {
         let total = r.rx + r.tx;
         let cmp = match prev_of(&r.name) {
@@ -154,14 +151,12 @@ pub fn body(rows: &[Row], prev: &[(String, i64, i64)]) -> String {
         } else {
             String::new()
         };
-        let mut line = format!(
-            "  {}  {}  ",
-            crate::text::blank_to(&esc(&crate::text::clip(&r.name, name_w)), name_w),
-            crate::text::blank_left(&human(total), size_w)
-        );
+        let mut line = format!("  {}  ", crate::text::blank_left(&human(total), size_w));
         // 涨跌对齐成一列（空的时候也留位，后面的"本月已用"才不会错开）。
         line.push_str(&format!("{cmp:<9}"));
         line.push_str(&crate::text::blank_left(&warn, 8));
+        line.push_str("  ");
+        line.push_str(&esc(&crate::text::clip(&r.name, name_w)));
         // 行尾空格要剪掉：`<pre>` 会原样保留，看起来像"这行没写完"。
         pre.push_str(line.trim_end());
         pre.push('\n');
