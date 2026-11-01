@@ -1206,13 +1206,13 @@ function useRegisterWindow() {
   }
 }
 
-function RegisterDialog({ site, reg, onClose }: {
-  site: string
+function RegisterDialog({ agentSite, reg, onClose }: {
+  agentSite: string
   reg: ReturnType<typeof useRegisterWindow>
   onClose: () => void
 }) {
   const [minutes, setMinutes] = useState(60)
-  const command = reg.left > 0 ? registerCommand(site, reg.key) : ""
+  const command = reg.left > 0 ? registerCommand(agentSite, reg.key) : ""
   const clock = `${Math.floor(reg.left / 60)}:${String(reg.left % 60).padStart(2, "0")}`
   const span = minutes === 60 ? "一小时" : `${minutes} 分钟`
 
@@ -1281,9 +1281,9 @@ function RegisterDialog({ site, reg, onClose }: {
   )
 }
 
-function InstallDialog({ node, site, onClose, onRotated }: {
+function InstallDialog({ node, agentSite, onClose, onRotated }: {
   node: Node
-  site: string
+  agentSite: string
   onClose: () => void
   onRotated: () => void
 }) {
@@ -1297,7 +1297,7 @@ function InstallDialog({ node, site, onClose, onRotated }: {
   const [allowQuality, setAllowQuality] = useState(false)
 
   const seconds = Math.min(3600, Math.max(1, Math.round(Number(interval) || 1)))
-  const command = token ? installCommand(site, token, seconds, allowUpgrade, allowQuality) : ""
+  const command = token ? installCommand(agentSite, token, seconds, allowUpgrade, allowQuality) : ""
 
   async function rotate() {
     setRotating(true)
@@ -1618,10 +1618,11 @@ function BatchUpgrade({ nodes, onDone }: { nodes: Node[]; onDone: () => void }) 
   )
 }
 
-function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdown, agentLatest }: {
+function Nodes({ nodes, refresh, agentSite, canProvision, provisionNote, groupDropdown, agentLatest }: {
   nodes: Node[]
   refresh: () => void
-  site: string
+  /** agent 该连的地址（安装/卸载命令用）；与面板地址可以不同。 */
+  agentSite: string
   canProvision: boolean
   provisionNote: string
   /** `--group-dropdown`: offer the groups in use under the group field. */
@@ -1666,7 +1667,7 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
     .filter((n) => !onlyOutdated || n.agent_old)
   // Offered on the same terms as the install command: only where this panel is
   // the https domain entry an install command can name.
-  const uninstall = canProvision ? uninstallCommand(site) : ""
+  const uninstall = canProvision ? uninstallCommand(agentSite) : ""
 
   async function remove() {
     if (!deleting) return
@@ -1966,12 +1967,12 @@ function Nodes({ nodes, refresh, site, canProvision, provisionNote, groupDropdow
       {billing && (
         <BillingForm node={billing} onClose={() => setBilling(null)} onSaved={refresh} />
       )}
-      {registering && <RegisterDialog site={site} reg={reg} onClose={() => { setRegistering(false); refresh() }} />}
+      {registering && <RegisterDialog agentSite={agentSite} reg={reg} onClose={() => { setRegistering(false); refresh() }} />}
 
       {installing && (
         <InstallDialog
           node={installing}
-          site={site}
+          agentSite={agentSite}
           onClose={() => setInstalling(null)}
           onRotated={refresh}
         />
@@ -3950,6 +3951,17 @@ function SettingsTab() {
       			<Input value={String(s.site_name ?? "")} onChange={(e) => set("site_name", e.target.value)} placeholder="Monitor" />
       		</Field>
       		<Field
+      		  label="agent 连接地址"
+      		  hint="安装命令里 agent 要连的地址。留空 = 与站点地址相同。"
+      		  controlClassName="max-w-md"
+      		>
+      		  <Input
+      		    value={String(s.agent_site ?? "")}
+      		    onChange={(e) => set("agent_site", e.target.value)}
+      		    placeholder="https://hub.example.com"
+      		  />
+      		</Field>
+      		<Field
       			label="历史数据保留天数"
       			suffix="天"
       			controlClassName="max-w-40"
@@ -3996,6 +4008,7 @@ function SettingsTab() {
       			onClick={() =>
       				save({
       					site_name: String(s.site_name ?? ""),
+      					agent_site: String(s.agent_site ?? ""),
       					// `||` rather than `??`: the hub returns "" for an unset key
       					// rather than null, and "" is the one value this key's write path
       					// refuses.
@@ -5650,6 +5663,7 @@ export function Admin({
   nodes,
   refresh,
   site,
+  agentSite,
   canProvision,
   provisionNote,
   groupDropdown,
@@ -5661,6 +5675,8 @@ export function Admin({
   nodes: Node[]
   refresh: () => void
   site: string
+  /** agent 该连的地址：留空时与 `site` 相同。 */
+  agentSite: string
   canProvision: boolean
   provisionNote: string
   /** `--group-dropdown`: offer the groups in use as a list under that field. */
@@ -5699,7 +5715,7 @@ export function Admin({
             agentLatest={agentLatest}
           />
         ) : (
-          <Nodes nodes={nodes} refresh={refresh} site={site} canProvision={canProvision} provisionNote={provisionNote} groupDropdown={groupDropdown} agentLatest={agentLatest} />
+          <Nodes nodes={nodes} refresh={refresh} agentSite={agentSite} canProvision={canProvision} provisionNote={provisionNote} groupDropdown={groupDropdown} agentLatest={agentLatest} />
         )}
       </div>
   )

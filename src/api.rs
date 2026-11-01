@@ -1212,6 +1212,8 @@ pub async fn me(
         // default, in which case the browser's address is the only one available
         // and the panel falls back to its own origin.
         "site": app.site,
+        // agent 专用地址：留空 = 与 `site` 相同。安装命令的 `--server` 用它。
+        "agent_site": app.db.get("agent_site").unwrap_or_default(),
         // How far back a chart may reach, which is what the panel's and the theme's
         // range pickers are built from: the numbers they offer are the numbers the
         // hub will answer.
@@ -1762,6 +1764,9 @@ pub async fn delete_ping_task(_: Admin, State(app): State<Shared>, Path(id): Pat
 /// set the GitHub secret but never read it back.
 const READABLE_SETTINGS: &[&str] = &[
     "site_name",
+    // agent 连接的地址（安装命令里的 `--server`）。空 = 用 `--site`（或浏览器地址）。
+    // 用途：面板走加速反代、而 agent 应当直连 hub 时（否则 hub 看到的对端是反代机的 IP）。
+    "agent_site",
     "public_page",
     "github_client_id",
     "github_allowed_users",
@@ -3141,6 +3146,15 @@ fn setting_error(app: &App, key: &str, value: &Value) -> Option<String> {
         // here; over http:// anyone on the path between the hub and the mirror
         // chooses that binary, while the node still sees a valid TLS connection to
         // the hub.
+        // agent 连的地址：空（= 用站点地址），或一个 http(s) 开头的地址。
+        // 允许 http：内网安装是明文 http，`--site` 也认这个形状。
+        "agent_site"
+            if !(value.is_empty()
+                || ((value.starts_with("https://") || value.starts_with("http://"))
+                    && !value.contains(char::is_whitespace))) =>
+        {
+            Some("agent_site must be empty or start with http:// or https://".into())
+        }
         "github_proxy" if !(value.is_empty() || value.starts_with("https://")) => {
             Some("GitHub proxy must start with https://: the agent binary is fetched through it and installed on every node".into())
         }

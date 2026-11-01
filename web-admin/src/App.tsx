@@ -8,7 +8,7 @@ import { Login } from "@/components/Login"
 import { Button } from "@/components/ui/button"
 import { api, provisioningSite, useNodes } from "@/lib/api"
 
-type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; group_dropdown?: boolean; login: string; version: string }
+type Me = { authed: boolean; github: boolean; site_name: string; public_page: boolean; site: string; can_provision: boolean; provision_block?: string; group_dropdown?: boolean; login: string; version: string ; agent_site?: string }
 
 // Which half of the hub's provisioning guard refused, in this panel's words. The
 // hub names its own reason (`provision_block`); the last entry is for a hub too
@@ -421,6 +421,9 @@ export default function App() {
               // panel is frequently reached over a loopback port behind a proxy,
               // while the install command and OAuth callback need the real one.
               site={me.site || location.origin}
+              // 「agent 连哪个地址」可以与面板不同：面板走加速反代、agent 直连 hub 时，
+              // hub 才不会把反代机的 IP 记成节点地址。留空 = 与面板同一个地址。
+              agentSite={me.agent_site || me.site || location.origin}
               canProvision={canProvision}
               provisionNote={provisionNote}
               // Off unless the hub was started with `--group-dropdown`, and

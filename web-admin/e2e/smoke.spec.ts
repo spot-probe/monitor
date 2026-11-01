@@ -26,14 +26,15 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("系统运维"))
 })
 
-test("设置页：三个输入框的宽度按内容分档（320 / 160 / 672）", async ({ page }) => {
+test("设置页：输入框的宽度按内容分档（320 / 448 / 160 / 672）", async ({ page }) => {
   await page.goto("/admin/settings")
   const inputs = page.locator('[data-slot="input"]')
-  await expect(inputs).toHaveCount(3)
+  await expect(inputs).toHaveCount(4)
 
   // 防的是两类错：① 又改回「三个统一宽度」；② 限宽只加在容器上而控件没补 w-full，
   // 于是输入框缩成内容的宽度（这个只有真实布局才看得出来，jsdom 抓不到）。
-  const want = [320, 160, 672]
+  // 顺序按页面：站点名称 / agent 连接地址 / 保留天数 / GitHub 代理。
+  const want = [320, 448, 160, 672]
   for (let i = 0; i < want.length; i++) {
     const box = await inputs.nth(i).boundingBox()
     expect(box, `第 ${i + 1} 个输入框应当可见`).toBeTruthy()
