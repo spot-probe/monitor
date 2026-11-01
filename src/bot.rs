@@ -1049,53 +1049,56 @@ fn service_name(key: &str) -> &str {
         "chatgpt" => "ChatGPT",
         "tiktok" => "TikTok",
         "disney" => "Disney+",
+        "amazonpv" => "Prime Video",
+        "reddit" => "Reddit",
         "prime" => "Prime Video",
         other => other,
     }
 }
 
-/// 固定顺序：同一台机器在两次 /probe 之间，服务顺序不该跟着 JSON 键序变。
-fn service_rank(key: &str) -> u8 {
-    match key {
-        "netflix" => 0,
-        "youtube" => 1,
-        "chatgpt" => 2,
-        "tiktok" => 3,
-        _ => 9,
-    }
-}
-
-/// `/probe`：编号 + 名字 + 服务结论。服务集合各台不同，所以**名字列对齐**、结论跟在后面，
-/// 不强行做成矩阵（那会有一半是空格）。
+/// `/probe`：**只点名没解锁的项，全解锁的只计数**。
+///
+/// 原来每行把 5–6 个服务全列出来（`Netflix 解锁/US · YouTube 解锁/US · …`），一行 80+ 字符，
+/// 手机上必然折行、折行后从第 0 列开始 —— 看着就是一团。
+/// 现在每行只写"哪几项不是解锁"（坏消息点名、好消息计数），这与面板里 IP 质量那张表同一条规矩。
 fn probe_text(frame: &Value) -> String {
     let nodes = nodes_of(frame);
-    let mut rows: Vec<(usize, String, String)> = Vec::new();
+    let mut rows: Vec<(usize, &str, Vec<String>, usize)> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
-        let Some(probe) = node.get("probe").filter(|p| !p.is_null()) else { continue };
-        let Some(services) = probe.as_object() else { continue };
-        let mut parts: Vec<(u8, String)> = Vec::new();
+        let Some(services) = node.get("probe").filter(|p| !p.is_null()).and_then(Value::as_object) else {
+            continue;
+        };
+        let mut problems = Vec::new();
+        let mut ok = 0usize;
+        let mut seen = 0usize;
         for (service, v) in services {
             let status = v.get("status").and_then(Value::as_str).unwrap_or("");
-            let region = v.get("region").and_then(Value::as_str).unwrap_or("");
-            let label = match status {
-                "unlocked" => "解锁",
-                "blocked" => "未解锁",
-                "idc" => "IDC",
-                "web" => "仅网页",
-                "app" => "仅App",
-                "cn" => "中国区",
-                "noprem" => "无会员",
-                "org" => "组织",
-                _ => continue,
-            };
-            let region = if region.is_empty() { String::new() } else { format!("/{region}") };
-            parts.push((service_rank(service), format!("{} {label}{region}", service_name(service))));
+            if status.is_empty() {
+                continue;
+            }
+            seen += 1;
+            match status {
+                "unlocked" => ok += 1,
+                other => {
+                    let word = match other {
+                        "blocked" => "未解锁",
+                        "idc" => "机房",
+                        "web" => "仅网页",
+                        "app" => "仅 App",
+                        "cn" => "中国区",
+                        "noprem" => "无会员",
+                        "org" => "仅自制",
+                        "unknown" => "没读明白",
+                        o => o,
+                    };
+                    problems.push(format!("{} {}", service_name(service), word));
+                }
+            }
         }
-        if !parts.is_empty() {
-            parts.sort_by_key(|(rank, _)| *rank);
-            let about = parts.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(" · ");
-            rows.push((i + 1, node["name"].as_str().unwrap_or("?").to_string(), about));
+        if seen == 0 {
+            continue;
         }
+        rows.push((i + 1, node["name"].as_str().unwrap_or("?"), problems, ok));
         if rows.len() >= MAX_LINES {
             break;
         }
@@ -1103,17 +1106,29 @@ fn probe_text(frame: &Value) -> String {
     if rows.is_empty() {
         return "还没有节点报过流媒体探测结果。".into();
     }
-    let iw = rows.iter().map(|(i, _, _)| i.to_string().len()).max().unwrap_or(2).max(2);
-    let nw = rows.iter().map(|(_, name, _)| width(name)).max().unwrap_or(0).clamp(8, 16);
+    // 没解锁的排前面：这一页就是用来找"谁不行"的。
+    rows.sort_by_key(|(_, _, problems, _)| problems.is_empty());
+    let nw = rows.iter().map(|(_, name, _, _)| width(name)).max().unwrap_or(0).clamp(8, 18);
     let mut pre = String::new();
-    for (i, name, about) in &rows {
-        pre.push_str(&format!("{:>iw$} ", i, iw = iw));
+    for (idx, name, problems, ok) in &rows {
+        pre.push_str(&format!("{:>3} ", idx));
         pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
         pre.push_str("  ");
-        pre.push_str(&esc(about));
+        if problems.is_empty() {
+            pre.push_str(&format!("全解锁（{ok} 项）"));
+        } else {
+            pre.push_str(&esc(&problems.join(" · ")));
+            if *ok > 0 {
+                pre.push_str(&format!("（其余 {ok} 项解锁）"));
+            }
+        }
         pre.push('\n');
     }
-    format!("<b>流媒体探测</b> · 最近一次 · {}\n<pre>{}</pre>", fetched(), pre.trim_end())
+    format!(
+        "<b>流媒体探测</b> · 最近一次 · {}\n只列没解锁的项，全解锁的写「全解锁」\n<pre>{}</pre>",
+        fetched(),
+        pre.trim_end()
+    )
 }
 
 fn num(node: &Value, key: &str) -> f64 {
@@ -1375,6 +1390,19 @@ mod tests {
         assert!(whoami_body("X", "1.0", "1", "", 0).contains("未开"), "没开报告要说清楚");
     }
 
+    /// 全部解锁的节点写成「全解锁」，且排在有问题的后面。
+    #[test]
+    fn fully_unlocked_nodes_come_last_and_say_so() {
+        let f = json!({ "nodes": [
+            { "name": "good", "probe": { "netflix": {"status":"unlocked","region":"US"},
+                                          "youtube": {"status":"unlocked","region":"US"} } },
+            { "name": "bad",  "probe": { "netflix": {"status":"org"} } }
+        ]});
+        let text = probe_text(&f);
+        assert!(text.contains("全解锁（2 项）"), "{text}");
+        assert!(text.find("bad") < text.find("good"), "有问题的排前面：{text}");
+    }
+
     /// 菜单按钮：每个 `callback_data` 都必须能被 `render` 接住 —— 否则是个死按钮。
     #[test]
     fn every_menu_button_maps_to_a_real_command() {
@@ -1426,9 +1454,10 @@ mod tests {
     #[test]
     fn probes_are_translated_into_words() {
         let text = probe_text(&frame());
-        // 服务名用**正式写法**（上报里是 netflix 这样的键名），且顺序固定
-        assert!(text.contains("Netflix 解锁/US"), "{text}");
+        // 只点名"不是解锁"的那几项；解锁的只计数（不然一行 80+ 字符，手机上必然折行）
         assert!(text.contains("ChatGPT 仅网页"), "{text}");
+        assert!(text.contains("（其余 1 项解锁）"), "{text}");
+        assert!(!text.contains("Netflix 解锁"), "解锁的不用点名：{text}");
         assert!(!text.contains("la-2"), "没报过的节点不该出现：{text}");
     }
 
