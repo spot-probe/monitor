@@ -1,9 +1,9 @@
-import { useEffect, useState, type ReactNode, useCallback, useRef } from "react"
+import { useEffect, useState, type ReactNode, useRef } from "react"
 import { isOneOff, monthlyCost, residualValue } from "@/lib/cost"
-import { ArrowUpCircle, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Search } from "lucide-react"
+import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
 
-import { api, behind, changes, probeHistory } from "@/lib/api"
-import type { Node, ProbeHistoryRow } from "@/lib/api"
+import { api, behind, changes } from "@/lib/api"
+import type { Node } from "@/lib/api"
 import { bytes, monthUsage, renewedExpiry } from "@/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -697,28 +697,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   // 判据"有数据" = 这台节点**有 `quality`** ✓（即 hub 到底查没查过它 ✓）。
   // ⭐ **点阵卡** ✓（用户提的 ✓）：点「节点实测」那一格 ⇒ 弹出这台节点的探测历史 ✓。
   // ⚠️ 三态分开写 ✓：加载中 ✓ / 失败（人话 + 重试 ✓）/ 拿到数据 ✓ ——
-  // 失败时**不把浏览器的原文摆出来** ✗（"Failed to fetch" 是 `fetch()` 的原话 ✓，
-  // 对用户没有任何意义 ✓✗；而且它**不会自己消失** ✗ ⇒ 必须给一个重试 ✓✓）。
-  const [probeNode, setProbeNode] = useState<Node | null>(null)
-  const [probeRows, setProbeRows] = useState<ProbeHistoryRow[] | null>(null)
-  const [probeErr, setProbeErr] = useState(false)
-  // ⚠️ **请求定序** ✗：快速连点两台时，第一台的应答可能晚于第二台到达，于是把**另一台**的
-  // 探测历史盖到当前弹窗上 —— 而标题来自 `probeNode`、内容来自 `probeRows`，两者会指向
-  // 不同节点，界面上看起来却完全正常（只是数据错了）。同文件其它请求都有 alive/stop 保护，
-  // 这一处漏了。
-  const probeAsk = useRef(0)
-  const loadProbe = useCallback((node: Node) => {
-    const ask = ++probeAsk.current
-    setProbeRows(null)
-    setProbeErr(false)
-    probeHistory(node.id, 30)
-      .then((r) => {
-        if (ask === probeAsk.current) setProbeRows(r.rows)
-      })
-      .catch(() => {
-        if (ask === probeAsk.current) setProbeErr(true)
-      })
-  }, [])
 
   // 筛选与排序：**替代**原来那个"只看有数据"的开关（它是这里面的一个特例 —— `nodata`）。
   const [filter, setFilter] = useState<"all" | "hasdata" | "risk" | "notor" | "bad" | "nodata">("all")
@@ -738,8 +716,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           return !!n.risk && (n.risk.score ?? 0) > 0
         case "notor":
           return !n.tor_exit
-        case "bad":
-          return probeBadCount(n.probe) > 0
         case "hasdata":
           // ⚠️ 原来那个「只看有数据」**不能丢** ✗✓（维护者提的）：`nodata` 是它的反面
           // （"找没查过的"），两者都有人要 —— 一个用来"只看能看的"，一个用来"找还没做的"。
@@ -763,8 +739,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
       switch (sortBy) {
         case "risk":
           return (b.risk?.score ?? -1) - (a.risk?.score ?? -1)
-        case "bad":
-          return probeBadCount(b.probe) - probeBadCount(a.probe)
         case "asn":
           return (a.quality?.asn ?? Number.MAX_SAFE_INTEGER) - (b.quality?.asn ?? Number.MAX_SAFE_INTEGER)
         default:
@@ -1313,7 +1287,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   ["hasdata", "有数据"],
                   ["risk", "有风险"],
                   ["notor", "非 Tor"],
-                  ["bad", "实测异常"],
                   ["nodata", "缺数据"],
                 ] as const).map(([k, label]) => (
                   <button
@@ -1342,7 +1315,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                   <SelectContent>
                     <SelectItem value="node">按节点顺序</SelectItem>
                     <SelectItem value="risk">按风险分</SelectItem>
-                    <SelectItem value="bad">按实测异常</SelectItem>
                     <SelectItem value="asn">按 ASN</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1356,17 +1328,16 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </div>
             <div className="overflow-x-auto">
             <div className="min-w-[68rem]">
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.3fr)] gap-x-3 border-b border-border border-b border-border bg-muted/40 px-3 py-2 text-[13px] font-semibold">
                 <span>节点</span>
                 <span>IP 与归属</span>
                 <span>地理位置</span>
                 <span>安全态势</span>
-                <span>节点实测</span>
               </div>
               {qualityRows.map((n) => (
                 <div
                   key={n.id}
-                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
+                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.3fr)] items-start gap-x-3 border-b border-border px-3 py-2 text-[13px] last:border-b-0"
                 >
                   <div className="min-w-0 space-y-0.5">
                     <div className="flex items-center gap-1.5">
@@ -1494,61 +1465,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       )}
                     </div>
                   </div>
-                {/* ⭐ 「节点实测」✓（第一期：Netflix ✓）—— 这一格的命是**分辨三种"没有"** ✓✓：
-                    ① **未允许检测** ✓（人可以去勾上 ✓）
-                    ② **版本不支持** ✓（agent 太旧 ✓ —— **永远不会有** ✓，只能升级 ✓）
-                    ③ **还没测过** ✓（再等等就有了 ✓）
-                    ⇒ 混成一句会让人**去等一个永远不会来的结果** ✓✗（或去查一个其实没坏的东西 ✓）。
-                    ⚠️ 判据顺序是刻意的 ✗：**先问"允许吗"、再问"会吗"** ✓ ——
-                    因为"没允许"是**这台机器自己的政策** ✓，比"版本支不支持"更该先说 ✓。 */}
-                {/* ⚠️ **这一格同时是入口** ✓（用户提的"点击弹出 card" ✓）——
-                    所以它是个 `button` ✓（键盘可达 ✓、有焦点环 ✓），而**内容一字未改** ✓。
-                    ⚠️ 行高不变 ✓：点阵卡是弹出的 ✓，不占表格的地方 ✓✓。 */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setProbeNode(n)
-                    loadProbe(n)
-                  }}
-                  className="min-w-0 space-y-0.5 rounded-md text-left transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                  title="查看这台节点的探测历史"
-                >
-                  {/* ⚠️ **能点的样子必须看得见** ✗✓：它此前只有 hover 底色 ✓ ——
-                      而白卡片上的 hover 底色几乎看不出来 ✓✗ ⇒ 静态时**毫无提示** ✓
-                      （用户原话："节点实测没有点击的按钮" ✓）。⇒ 挂一个常驻的箭头 ✓，
-                      与节点列表右侧那排图标是同一套语汇 ✓✓。 */}
-                  <div className="flex items-center gap-1 truncate text-xs">
-                    {n.stream_probe === false ? (
-                      <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
-                        版本不支持
-                      </Badge>
-                    ) : n.allow_ip_quality === false ? (
-                      <Badge variant="outline" className="border-transparent bg-warn/10 font-medium text-warn">
-                        未允许检测
-                      </Badge>
-                    ) : probeSummary(n.probe) ? (
-                      <span className="truncate font-medium">{probeSummary(n.probe)}</span>
-                    ) : (
-                      <Badge variant="outline" className="border-transparent bg-muted font-normal text-muted-foreground">
-                        还没测过
-                      </Badge>
-                    )}
-                    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
-                  </div>
-                  {/* ⚠️ **时效** ✓✓ —— 这一格的命就是它：没有"多久之前"，
-                      一条三周前的"解锁"看起来和刚测的一样 ✓✗。 */}
-                  {oldestProbeAt(n) > 0 ? (
-                    <div className="truncate text-[11px] text-muted-foreground/70">
-                      {(() => {
-                        const mins = Math.max(0, Math.round((Date.now() / 1000 - oldestProbeAt(n)) / 60))
-                        if (mins < 2) return "刚刚测的"
-                        if (mins < 90) return `${mins} 分钟前`
-                        const hours = Math.round(mins / 60)
-                        return hours < 48 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
-                      })()}
-                    </div>
-                  ) : null}
-                </button>
                 </div>
               ))}
             </div>
@@ -1579,43 +1495,6 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             档位文字由本面板给出（按分数 25 / 75 划档），各家口径不同 · 风险来自在线库（第三方，需要开关）·
             ASN 与位置来自本地库（不外发）· Tor 出口来自官方出口清单（不外发，每小时更新）。
           </p>
-          {/* 图例 ✓ —— 表格里那一列用了几个人话词 ✓，这里解释它们分别是什么意思 ✓。
-              ⚠️ 它**不是**"预留说明"了 ✗：流媒体检测**已经上线** ✓（agent 每 6 小时自己探一次 ✓），
-              所以旧版那句"等待 agent 支持"现在**是假话** ✓✗ —— 已改掉 ✓。 */}
-          <details className="group rounded-lg border border-dashed border-border bg-muted/30 p-3.5 text-xs leading-relaxed text-muted-foreground">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium text-foreground">
-              <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
-              这些标记是什么意思
-            </summary>
-            <ul className="mt-2 list-disc space-y-1 pl-4">
-              <li>
-                <span className="font-medium text-foreground">未允许检测</span>：这台机器没开「允许 IP
-                质量检测」。打开之后 hub 才会为它查询与接收探测。
-              </li>
-              <li>
-                <span className="font-medium text-foreground">版本不支持</span>：agent 还没有探测能力，
-                升级之后才会出结果，在那之前等多久都不会有。
-              </li>
-              <li>
-                <span className="font-medium text-foreground">还没测过</span>：有能力、也允许了，
-                只是还没轮到它那一次（每 6 小时一次，各台按自己的时点错开）。
-              </li>
-              <li>
-                <span className="font-medium text-foreground">解锁（机房）· 仅网页可用 · 仅 App 可用</span>：
-                能用，但有限制。机房 IP 在很多服务上吃亏；后两种只通一边（网页能开、App 打不开）。
-                它们既不是「解锁」也不是「未解锁」，所以单独列出。
-              </li>
-              <li>
-                <span className="font-medium text-foreground">中国区 · 可用·无会员</span>：来自 YouTube。
-                前者是响应来自中国版（`www.google.cn`）；后者是视频能看、但 Premium 会员在这个国家买不到。
-                两档都是「能用」，只是少一样东西，别当成「没解锁」。
-              </li>
-              <li>
-                <span className="font-medium text-foreground">结论带时效</span>：今天解锁不等于下周解锁，
-                所以每格下面都写着多久之前测的。取不到页面时不会报结论 —— 你会看到上一次的结论与它的年龄。
-              </li>
-            </ul>
-          </details>
         </div>
       ) : page === "resource" ? (
         <>
@@ -2187,374 +2066,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           </DialogContent>
         </Dialog>
 
-        {/* ⭐ **点阵卡** ✓（一行一个服务 ✓ 一格 = 一次 12 小时 ✓）。
-            ⚠️ 它必须待在三元表达式**之外** ✗✗ —— 我第一版把它贴在"某天到期明细"那个弹窗旁边 ✓，
-            而那个弹窗属于「资源/成本」那一支 ✓✗ ⇒ 在「IP 质量」下**根本没被渲染** ✓✗。
-            ⚠️ 三态都在这里 ✓，失败那一态有"重试" ✓。 */}
-        <Dialog
-          open={probeNode !== null}
-          onOpenChange={(v) => {
-            if (!v) {
-              setProbeNode(null)
-              setProbeRows(null)
-              // 关掉之后迟到的应答不该把内容填回来 ✓（同一个序号机制）
-              probeAsk.current++
-              setProbeErr(false)
-            }
-          }}
-        >
-          {/* 宽度用 `min(96vw, 1100px)`（用户要求再放大一些）。
-              120 格 × 最小 3px + 119 道缝 ≈ 600px，加服务名 112px 与徽章 96px ≈ 860px。 */}
-          {/* ⚠️⚠️ 宽度用**内联 style** ✓✓ —— 本仓 DialogContent 自带 `w-full` ✓，
-              而两个同属性的工具类谁生效看的是**样式表顺序** ✓✗（不是 className 里的顺序 ✓），
-              所以我先前加的 `w-[…]` 一直被压住 ✓✗。内联 style 不参与那场优先级游戏 ✓。
-              ⚠️ 组件本身是 `left-[50%] translate-x-[-50%]` ✓ ⇒ 居中不用管 ✓，只管宽度 ✓。 */}
-          <DialogContent
-            className="max-h-[85vh] overflow-y-auto"
-            // ⚠️ 宽度按**点阵的真实需求**算 ✓：120 格 × 9px = 1080 ✓ + 服务名 112 ✓
-            // + 状态徽章 80 ✓ + 内边距与列间距 ⇒ 约 1350px ✓ ⇒ 所以上限提到 1320 ✓
-            //（再窄就会把点挤出容器 ✓✗ —— 而点的宽度是固定的 ✓，挤不掉 ✓）。
-            // ⚠️ 宽度按**实测需求**算 ✓（不拍脑袋 ✓）：120 格 × 9px = 1080 ✓
-            // + 119 道 1px 缝 = 119 ✓ ⇒ 点阵本身 **1199px** ✓
-            // + 服务名 112 ✓ + 状态徽章 80 ✓ + 内边距 ≈ **1423px** ⇒ 上限取 1440 ✓✓
-            // ⚠️ 宽度按**现在的点数**重算 ✓（一格一天 ⇒ 30 格 ✓）：
-            // 30 × 9px = 270 ✓ + 29 道 1px 缝 = 29 ✓ ⇒ 点阵 **299px** ✓
-            // + 服务名 112 ✓ + 徽章 80 ✓ + 内边距 ≈ **520px** ⇒ 上限取 640 ✓✓
-            // ⚠️ 不能沿用 1440 ✗：列会被拉宽 ✓✗ ⇒ 点与点的**视觉间距又变大** ✓（那正是刚改掉的东西 ✓）。
-            style={{ width: "min(96vw, 960px)", maxWidth: "none" }}
-          >
-            <DialogHeader>
-              <DialogTitle className="text-sm">{probeNode?.name ?? ""} 的探测历史</DialogTitle>
-            </DialogHeader>
-            {probeErr ? (
-              <div className="space-y-2 text-xs">
-                <p className="text-destructive">没能取到探测历史。</p>
-                <p className="text-muted-foreground">
-                  这通常是网络或 hub 刚重启造成的——点下面重试一次即可。
-                </p>
-                <Button size="sm" variant="outline" onClick={() => probeNode && loadProbe(probeNode)}>
-                  重试
-                </Button>
-              </div>
-            ) : probeRows === null ? (
-              <div className="space-y-1.5">
-                <Skeleton className="h-4 w-2/3" />
-                <Skeleton className="h-4 w-1/2" />
-              </div>
-            ) : probeRows.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                还没有记录。历史从 hub 升级到 1.11.16 之后才开始累积，早先只保留了最后一次结果。
-              </p>
-            ) : (
-              <ProbeMatrix rows={probeRows} />
-            )}
-          </DialogContent>
-        </Dialog>
     </div>
   )
 }
-/// ⭐ **探测点阵** ✓✓（用户提的做法 ✓）：一行一个服务 ✓ · 一格 = 一次 6 小时 ✓ ——
-/// 点会汇成一张阵 ✓，于是"**从什么时候开始不对劲**"一眼可见 ✓✓。
-///
-/// ⚠️⚠️ **列的位置由时间算，不是"有几个点就画几个"** ✗✗ —— 这是整个组件最要紧的地方 ✓：
-/// 夹具里就有"整整一天没有记录"的情形 ✓，若按顺序画 ✓，缺的那一天会让**后面的每个点都左移** ✓✗
-/// ⇒ 点阵会**谎报时间** ✓✗（正是"错值看起来完全正常"那一类 ✓）。
-/// ⇒ 第 k 列固定是 `start + k×6h` ✓✓。
-///
-/// ⚠️ **空格与"测了不通"必须长得不一样** ✓✓：没数据 ⇒ 一个很淡的**空槽** ✓
-///（不是灰点 ✓ 也不是红点 ✓）—— 这与"失败不是结论"是同一条 ✓，只是这次它**看得见** ✓。
-/// ⚠️ **整行没有数据**（这个服务从没测过 ✓）⇒ 单独写一句 ✓，而不是画 120 个空槽 ✓✗。
-const PROBE_SERVICES = ["netflix", "tiktok", "reddit", "chatgpt", "amazonpv", "youtube"] as const
-const PROBE_LABELS: Record<string, string> = {
-  netflix: "Netflix",
-  tiktok: "TikTok",
-  reddit: "Reddit",
-  chatgpt: "ChatGPT",
-  amazonpv: "Prime Video",
-  youtube: "YouTube",
-}
-// ⚠️ **一格 = 一天** ✓（用户要求"用更少的点表达相同的天数" ✓）——
-// 30 天 = **30 格** ✓（原先是每 6 小时一格 ⇒ 120 格 ⇒ 卡片被撑得很宽 ✓✗）。
-// ⚠️ **一格 = 12 小时** ✓（用户要求"点数增加一倍，刚好填满空缺" ✓）——
-// 30 天 = **60 格** ✓；60 × 9px + 59 道 1px 缝 = 599px ✓ ⇒ 加上服务名与徽章 ≈ 820px ✓
-// ⇒ 正好落在 960px 的卡片里 ✓✓（宽度不用再动 ✓）。
-const PROBE_STEP = 43_200
-// ⚠️ **14 天**（用户要求"不需要显示这么多天" ✓）—— 14 × 4 = **56 格** ✓。
-// ⚠️ 而 hub 那边的**保留仍是 30 天** ✓（数据留着 ✓，只是这里少画一些 ✓ —— 想看更多时改这一个数即可 ✓）。
-/// 状态的"严重程度" ✓（**数字越小越严重** ✓）—— 同一格里合成时用它 ✓（见下面那段说明 ✓）。
-function probeRank(status?: string): number {
-  switch (status) {
-    case "blocked":
-    case "cn":
-      return 0
-    case "idc":
-    case "web":
-    case "app":
-    case "noprem":
-    case "org":
-      return 1
-    case "unknown":
-      return 2
-    case "unlocked":
-      return 3
-    default:
-      return 4
-  }
-}
-
-const PROBE_SLOTS = 60
-
-/// 一格的观感 ✓（四种色沿用本仓 `riskTone` 那一套 ✓，不发明 ✗）。
-/// ⚠️ 只给"值得看的"上色 ✗：正常解锁是**常态** ✓ ⇒ 淡绿 ✓；有问题的才抢眼 ✓✓。
-function probeTone(status?: string): string {
-  switch (status) {
-    case "unlocked":
-      return "bg-ok/60"
-    case "blocked":
-      return "bg-destructive"
-    case "idc":
-    case "web":
-    case "app":
-    case "noprem":
-    case "org":
-      return "bg-warn"
-    case "cn":
-      return "bg-destructive/70"
-    case "unknown":
-      return "bg-muted-foreground/40"
-    default:
-      return ""
-  }
-}
-
-/// ⚠️ **这些结论里最旧的那条自己的时间** ✗✓ —— 用它代替 `probe_at` ✓：
-/// `probe_at` 是"**最后一次收到上报**"的时间 ✓，而 hub 现在会**保留**这一轮没测到的服务 ✓
-/// ⇒ 拿它说"这些结论有多新"会**偏新** ✓✗。取最旧的那条 ⇒ 至少不会把旧的当成新的 ✓✓。
-/// ⚠️ 升级前存的老数据**没有 `at`** ✗ ⇒ 退回 `probe_at` ✓（不因为缺字段就不显示 ✓）。
-/// ⚠️ 返回 `number` 而**不是 `number | null`** ✗ —— JSX 里同一个表达式会被调用两次 ✓，
-/// 而 TypeScript 收窄不了"第二次调用也不为 null" ✓✗（我第一版就是那样 ⇒ `TS2531` ✓）。
-/// ⇒ **没有数据就返回 0** ✓，调用方用 `> 0` 判断 ✓。
-function oldestProbeAt(n: Node): number {
-  const ats = Object.values(n.probe ?? {})
-    .map((v) => v.at)
-    .filter((x): x is number => typeof x === "number")
-  return ats.length > 0 ? Math.min(...ats) : (n.probe_at ?? 0)
-}
-
-function probeWord(status: string): string {
-  switch (status) {
-    case "unlocked":
-      return "解锁"
-    case "blocked":
-      return "未解锁"
-    case "idc":
-      return "解锁（机房）"
-    case "web":
-      return "仅网页可用"
-    case "app":
-      return "仅 App 可用"
-    case "cn":
-      return "中国区"
-    case "noprem":
-      return "可用·无会员"
-     case "org":
-       // ⭐ Netflix「仅自制」✓ —— 用户那张参考实现的图上就是这四个字 ✓，照它写 ✓。
-       return "仅自制"
-    case "unknown":
-      return "没读明白"
-    default:
-      return status
-  }
-}
-
-/// ⭐ **那一格的摘要** ✓✓（用户第 ③ 条 ✓）：**点名有问题的** ✓，正常的只计数 ✓。
-///
-/// ⚠️ 取舍写在前面 ✗："六项全正常"是常态 ✓ ⇒ 逐项列出来只会让那一格变高 ✓✗；
-/// 而运维真正要的是"**哪台不对劲**" ✓ ⇒ 所以坏消息点名、好消息计数 ✓✓
-///（与那一列"坏消息在前"的排法同一条 ✓）。
-/// ⚠️ 纯函数 ✓：输入就是 hub 给的 `probe` 对象 ✓ ⇒ 不依赖任何组件状态 ✓，逻辑一眼可验 ✓。
-/// ⚠️ 顺序固定按 `PROBE_SERVICES` ✓（不按对象键序 ✓✗ —— 那个顺序在 JS 里是"看起来稳定但没说死"的 ✓）。
-/// 有实测异常的项数（状态不是 `unlocked` 的都算）。给筛选与排序用。
-function probeBadCount(probe?: Record<string, { status?: string }> | null): number {
-  if (!probe) return 0
-  return Object.values(probe).filter((r) => r.status && r.status !== "unlocked").length
-}
-
-function probeSummary(probe?: Record<string, { status?: string; region?: string }> | null): string | null {
-  if (!probe) return null
-  const bad: string[] = []
-  let ok = 0
-  for (const sv of PROBE_SERVICES) {
-    const r = probe[sv]
-    if (!r) continue
-    if (r.status === "unlocked") ok += 1
-    // ⚠️ **带上状态词** ✗✓：原来只点名字（`Netflix · Reddit 等 3 项`），读者看到名字
-    // 也不知道**哪里不对** —— 得点开弹窗才知道是"未解锁"还是"仅网页"。带上状态词之后，
-    // 这一格自己就说得清（`Netflix 未解锁 · ChatGPT 仅网页 · 其余 3 项正常`）。
-    else bad.push(`${PROBE_LABELS[sv] ?? sv} ${probeWord(r.status ?? "")}`.trim())
-  }
-  if (bad.length === 0) return ok > 0 ? `${ok} 项正常` : null
-  const rest = ok > 0 ? ` · 其余 ${ok} 项正常` : ""
-  // ⚠️ 坏消息太多时也不铺满 ✗：最多点两个名 ✓ + 一个计数 ✓（那一格只有一行 ✓）。
-  const named = bad.slice(0, 2).join(" · ")
-  const more = bad.length > 2 ? ` 等 ${bad.length} 项` : ""
-  return `${named}${more}${rest}`
-}
-
-function ProbeMatrix({ rows }: { rows: ProbeHistoryRow[] }) {
-  const latest = rows.reduce((m, r) => Math.max(m, r.at), 0)
-  const end = Math.ceil(latest / PROBE_STEP) * PROBE_STEP
-  const start = end - (PROBE_SLOTS - 1) * PROBE_STEP
-  // ⚠️ 列号由**时间**算 ✓✓（不是数组下标 ✗ —— 见上面那段说明 ✓）
-  const slotOf = (at: number) => Math.round((at - start) / PROBE_STEP)
-  const byService = new Map<string, Map<number, ProbeHistoryRow>>()
-  // ⚠️ **另外记一份"这一格测到了几次"** ✓（用户要求 ✓）——
-  // 独立于上面那个 map ✓：那个存"最坏的那一次"（决定颜色 ✓），这个只用来写悬停 ✓。
-  // 分开的好处 ✓：改这个不影响颜色规则 ✓（一处负责一件事 ✓）。
-  const counts = new Map<string, Map<number, number>>()
-  for (const r of rows) {
-    const k = slotOf(r.at)
-    if (k < 0 || k >= PROBE_SLOTS) continue
-    if (!byService.has(r.service)) byService.set(r.service, new Map())
-    const slot = byService.get(r.service)!
-    const prev = slot.get(k)
-    // ⚠️⚠️ **同一天里"坏消息优先"** ✗✗ —— 一刻度变成一天之后 ✓，一天会有四次探测 ✓，
-    // 它们要合成一格 ✓ ⇒ 规则必须是"**只要有一次不好，这格就不好**" ✓✓：
-    // 反过来（后写的覆盖前写的 ✓、或"只要好就算好" ✗）会把**一天的故障藏起来** ✓✗，
-    // 而那正是这个界面最该让人看见的东西 ✓。
-    if (!prev || probeRank(r.status) < probeRank(prev.status)) slot.set(k, r)
-    // 计数 ✓：与颜色**无关** ✓ —— 一格里有几次就记几次 ✓
-    if (!counts.has(r.service)) counts.set(r.service, new Map())
-    const c = counts.get(r.service)!
-    c.set(k, (c.get(k) ?? 0) + 1)
-  }
-  // ⚠️ **有问题的排在上面** ✓（运维先看坏的 ✓）
-  // ⚠️ 顺手把"最新一格"也带出来 ✓（徽章要用 ✓）—— 在数据里算一次 ✓，
-  // 好过在 JSX 里现算两遍 ✓（那种写法早晚会两处不一致 ✓）。
-  const order = PROBE_SERVICES.map((sv) => {
-    const m = byService.get(sv)
-    const lastK = m && m.size ? Math.max(...m.keys()) : -1
-    const st = lastK >= 0 ? m!.get(lastK)!.status : undefined
-    // 名次：有问题的最前 ✓ · 正常的中间 ✓ · 从没测过的最后 ✓（它是"没有"，不该抢眼 ✓）
-    const rank = m === undefined ? 2 : st === "unlocked" ? 1 : 0
-    const last = lastK >= 0 ? m!.get(lastK) : undefined
-    return { sv, m, rank, last }
-  }).sort((a, b) => a.rank - b.rank || a.sv.localeCompare(b.sv))
-  const fmt = (at: number) => new Date(at * 1000).toLocaleString()
-  return (
-    <div className="space-y-2 text-xs">
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70">
-        <span className="w-28 shrink-0" />
-        {/* ⚠️ **相对时间** ✓（同事第 ④ 条 ✓）：绝对时间又长又死板 ✓✗ ——
-            精确到秒的那一刻留给悬停 ✓（每个点本来就有 title ✓✓）。 */}
-        <span>30 天前</span>
-        <span className="mx-auto">15 天前</span>
-        <span>今天</span>
-      </div>
-      {order.map(({ sv, m, last }) => (
-        <div key={sv} className="flex items-center gap-2">
-          {/* ⚠️ 名字后带**最新地域** ✓（用户第 ② 条 ✓："YouTube(UK)" ✓）——
-                数据里本来就有 `last.region` ✓，只是先前没显示 ✓。
-                ⚠️ 用 `last`（最新一格 ✓）而不是历史里随便一个 ✓ —— 与右端徽章同源 ✓✓。 */}
-          <span className="w-28 shrink-0 truncate font-medium" title={last?.region ? `${PROBE_LABELS[sv] ?? sv}(${last.region})` : undefined}>
-            {PROBE_LABELS[sv] ?? sv}
-            {last?.region ? <span className="text-muted-foreground">({last.region})</span> : null}
-          </span>
-          {m === undefined ? (
-            <div
-              className="grid min-w-0 flex-1 gap-px"
-              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(3px, 1fr))` }}
-              title="这个服务还没有任何记录"
-            >
-              {Array.from({ length: PROBE_SLOTS }, (_, k) => (
-                <span
-                  key={k}
-                  className="mx-auto h-[15px] w-[9px] rounded-[3px] border border-muted-foreground/35"
-                />
-              ))}
-            </div>
-          ) : (
-            <div
-              className="grid min-w-0 flex-1 gap-px"
-              // 这里是点阵"消失"的根因：原来是 minmax(0, 1fr) —— `0` 表示"可以压到 0 宽"，
-              // 缝（120 格 × 2px）再加上行尾 w-24 的徽章（96px）一挤，每一列就变成 0 像素，
-              // 于是中间看起来什么都没有（而文字与徽章都正常）。给一个最小宽度：宁可横向滚动。
-              style={{ gridTemplateColumns: `repeat(${PROBE_SLOTS}, minmax(3px, 1fr))` }}
-            >
-              {Array.from({ length: PROBE_SLOTS }, (_, k) => {
-                const r = m.get(k)
-                const at = start + k * PROBE_STEP
-                return r ? (
-                  <span
-                    key={k}
-                    title={`${fmt(at)} · ${probeWord(r.status)}${r.region ? ` · ${r.region}` : ""} · ${counts.get(sv)?.get(k) ?? 1} / 2 次`}
-                    // ⚠️ **宽高比 3:4 的小长条** ✓（用户第 ① 条 ✓）—— 此前是 h-3.5 + rounded-full ✓，
-                    // 而 56 格时每列宽约 15px ✓ ⇒ rounded-full 在 ~15×14 上就是个**椭圆** ✓✗。
-                    // ⇒ 固定 9×12 ✓ + rounded-[3px] ✓（四角一点弧度 ✓）+ **居中** ✓
-                    //（不居中的话它会被拉回满列宽 ✓✗，又变成椭圆 ✓）。
-                    className={`mx-auto h-[15px] w-[9px] rounded-[3px] ${probeTone(r.status)}`}
-                  />
-                ) : (
-                  <span
-                    key={k}
-                    title={`${fmt(at)} · 没有记录`}
-                    className="mx-auto h-[15px] w-[9px] rounded-[3px] border border-muted-foreground/35"
-                  />
-                )
-              })}
-            </div>
-          )}
-          {/* ⭐ **最新状态** ✓✓（前端同事的第 ③ 条 ✓ —— 也是最值钱的一条 ✗）：
-              看历史图时，第一眼最想确认的其实是"**现在通不通**" ✓；
-              此前六行全绿的时候，这一点根本看不出来 ✓✗。 */}
-          {m === undefined ? (
-            <span className="w-20 shrink-0" />
-          ) : last ? (
-            <Badge variant="outline" className={`w-20 shrink-0 justify-center border-transparent ${probeTone(last.status)} font-normal`}>
-              {probeWord(last.status)}
-            </Badge>
-          ) : null}
-        </div>
-      ))}
-      {/* ⚠️ **图例 + 一句收起** ✓（前端同事的第 ⑤ 条 ✓）：
-          原来那段像免责声明 ✓✗（"一格 = 6 小时 / 没测到与测了不通是两回事 / 从哪天开始记" ✓）
-          ⇒ 图例放在外面 ✓（一眼看懂 ✓），细节收进 `Help` 的悬停层 ✓✓（本仓现成的组件 ✓）。 */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border pt-2 text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="size-2.5 rounded-full bg-ok/45" />
-          解锁
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="size-2.5 rounded-full bg-warn" />
-          受限（机房 / 仅一边可用 / 买不到会员 / 仅自制）
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="size-2.5 rounded-full bg-destructive" />
-          不通
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="size-2.5 rounded-full bg-muted/60" />
-          没有记录
-        </span>
-        <Help>
-          一格 = 一次 6 小时，共 30 天。很淡的空槽表示那一次
-          <span className="font-medium">没有记录</span>
-          ——它与"测了不通"是两回事，不要当成结论。历史从 hub 开始记录那天起累积，
-          更早的结果只保留了最后一次；把鼠标停在某一格上可以看到那一格的时间与结论。
-        </Help>
-      </div>
-    </div>
-  )
-}
-
-
-// ───────────────────────── 成本 ─────────────────────────
-
-
-
-/// 金额格式**一列只有一种样子**：整数不带小数（`¥88`）、非整数两位（`¥83.58`）、
-/// 过万才用「万」。原来是"小于 100 就两位"，于是同一列里 `¥88.00` 与 `¥128` 并排 ——
-/// 看起来像两套格式（截图里的价格表就是这样）。
 const cny = (v: number) => {
   if (v >= 10000) return `¥${(v / 10000).toFixed(2)} 万`
   return Number.isInteger(v)

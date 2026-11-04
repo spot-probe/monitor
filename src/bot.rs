@@ -28,11 +28,10 @@ const MAX_LINES: usize = 25;
 
 /// 一条命令 + 一句解释。**对齐靠 `<pre>`**：Telegram 里只有 `<pre>`/`<code>` 是等宽字体，
 /// 而普通文字是比例字体 —— 在比例字体里补空格永远对不齐。
-const COMMANDS: [(&str, &str); 12] = [
+const COMMANDS: [(&str, &str); 11] = [
     ("/nodes", "集群概览 + 节点列表（在线、版本、CPU/内存）"),
     ("/node <名字>", "单台详情，也可以 /node 3"),
     ("/traffic", "今日与本月流量"),
-    ("/probe", "各节点最近一次流媒体探测"),
     ("/upgrade <名字>", "远程升级（会先弹确认按钮）"),
     ("/mute <名字> [2h]", "静音（默认 1 小时）"),
     ("/muted", "现在静音了哪些"),
@@ -975,7 +974,6 @@ fn render(cmd: &str, frame: &Value) -> Option<String> {
         // `/status` 保留为**别名**：老习惯还在，但不单独维护一份内容。
         "status" | "nodes" => Some(nodes_text(frame)),
         "traffic" => Some(traffic_text(frame)),
-        "probe" => Some(probe_text(frame)),
         "upgrade" => Some(upgrade_list(frame)),
         _ => None,
     }
@@ -986,7 +984,7 @@ fn menu_keyboard() -> Value {
     let button = |label: &str, cmd: &str| json!({ "text": label, "callback_data": format!("cmd:{cmd}") });
     json!({ "inline_keyboard": [
         [button("节点", "nodes"), button("流量", "traffic")],
-        [button("流媒体", "probe"), button("待升级", "upgrade")],
+        [button("待升级", "upgrade")],
     ] })
 }
 
@@ -1039,96 +1037,6 @@ fn traffic_text(frame: &Value) -> String {
         }
     }
     format!("<b>流量</b> · {} 台 · {}\n<pre>{}</pre>", nodes.len(), fetched(), pre.trim_end())
-}
-
-/// 服务的**正式写法** —— 上报里是 `netflix` 这种键名，直接摆出来是"程序里的名字"。
-fn service_name(key: &str) -> &str {
-    match key {
-        "netflix" => "Netflix",
-        "youtube" => "YouTube",
-        "chatgpt" => "ChatGPT",
-        "tiktok" => "TikTok",
-        "disney" => "Disney+",
-        "amazonpv" => "Prime Video",
-        "reddit" => "Reddit",
-        "prime" => "Prime Video",
-        other => other,
-    }
-}
-
-/// `/probe`：**只点名没解锁的项，全解锁的只计数**。
-///
-/// 原来每行把 5–6 个服务全列出来（`Netflix 解锁/US · YouTube 解锁/US · …`），一行 80+ 字符，
-/// 手机上必然折行、折行后从第 0 列开始 —— 看着就是一团。
-/// 现在每行只写"哪几项不是解锁"（坏消息点名、好消息计数），这与面板里 IP 质量那张表同一条规矩。
-fn probe_text(frame: &Value) -> String {
-    let nodes = nodes_of(frame);
-    let mut rows: Vec<(usize, &str, Vec<String>, usize)> = Vec::new();
-    for (i, node) in nodes.iter().enumerate() {
-        let Some(services) = node.get("probe").filter(|p| !p.is_null()).and_then(Value::as_object) else {
-            continue;
-        };
-        let mut problems = Vec::new();
-        let mut ok = 0usize;
-        let mut seen = 0usize;
-        for (service, v) in services {
-            let status = v.get("status").and_then(Value::as_str).unwrap_or("");
-            if status.is_empty() {
-                continue;
-            }
-            seen += 1;
-            match status {
-                "unlocked" => ok += 1,
-                other => {
-                    let word = match other {
-                        "blocked" => "未解锁",
-                        "idc" => "机房",
-                        "web" => "仅网页",
-                        "app" => "仅 App",
-                        "cn" => "中国区",
-                        "noprem" => "无会员",
-                        "org" => "仅自制",
-                        "unknown" => "没读明白",
-                        o => o,
-                    };
-                    problems.push(format!("{} {}", service_name(service), word));
-                }
-            }
-        }
-        if seen == 0 {
-            continue;
-        }
-        rows.push((i + 1, node["name"].as_str().unwrap_or("?"), problems, ok));
-        if rows.len() >= MAX_LINES {
-            break;
-        }
-    }
-    if rows.is_empty() {
-        return "还没有节点报过流媒体探测结果。".into();
-    }
-    // 没解锁的排前面：这一页就是用来找"谁不行"的。
-    rows.sort_by_key(|(_, _, problems, _)| problems.is_empty());
-    let nw = rows.iter().map(|(_, name, _, _)| width(name)).max().unwrap_or(0).clamp(8, 18);
-    let mut pre = String::new();
-    for (idx, name, problems, ok) in &rows {
-        pre.push_str(&format!("{:>3} ", idx));
-        pre.push_str(&blank_to(&esc(&clip(name, nw)), nw));
-        pre.push_str("  ");
-        if problems.is_empty() {
-            pre.push_str(&format!("全解锁（{ok} 项）"));
-        } else {
-            pre.push_str(&esc(&problems.join(" · ")));
-            if *ok > 0 {
-                pre.push_str(&format!("（其余 {ok} 项解锁）"));
-            }
-        }
-        pre.push('\n');
-    }
-    format!(
-        "<b>流媒体探测</b> · 最近一次 · {}\n只列没解锁的项，全解锁的写「全解锁」\n<pre>{}</pre>",
-        fetched(),
-        pre.trim_end()
-    )
 }
 
 fn num(node: &Value, key: &str) -> f64 {
@@ -1390,19 +1298,6 @@ mod tests {
         assert!(whoami_body("X", "1.0", "1", "", 0).contains("未开"), "没开报告要说清楚");
     }
 
-    /// 全部解锁的节点写成「全解锁」，且排在有问题的后面。
-    #[test]
-    fn fully_unlocked_nodes_come_last_and_say_so() {
-        let f = json!({ "nodes": [
-            { "name": "good", "probe": { "netflix": {"status":"unlocked","region":"US"},
-                                          "youtube": {"status":"unlocked","region":"US"} } },
-            { "name": "bad",  "probe": { "netflix": {"status":"org"} } }
-        ]});
-        let text = probe_text(&f);
-        assert!(text.contains("全解锁（2 项）"), "{text}");
-        assert!(text.find("bad") < text.find("good"), "有问题的排前面：{text}");
-    }
-
     /// 菜单按钮：每个 `callback_data` 都必须能被 `render` 接住 —— 否则是个死按钮。
     #[test]
     fn every_menu_button_maps_to_a_real_command() {
@@ -1417,7 +1312,7 @@ mod tests {
                 seen += 1;
             }
         }
-        assert_eq!(seen, 4, "菜单按钮数量");
+        assert_eq!(seen, 3, "菜单按钮数量");
     }
 
     #[test]
@@ -1449,16 +1344,6 @@ mod tests {
         // 数字**右对齐**：两行同一个数量级时，"GB" 落在同一列
         let rows: Vec<&str> = text.lines().filter(|l| l.contains("GB")).collect();
         assert!(rows.len() >= 2, "{text}");
-    }
-
-    #[test]
-    fn probes_are_translated_into_words() {
-        let text = probe_text(&frame());
-        // 只点名"不是解锁"的那几项；解锁的只计数（不然一行 80+ 字符，手机上必然折行）
-        assert!(text.contains("ChatGPT 仅网页"), "{text}");
-        assert!(text.contains("（其余 1 项解锁）"), "{text}");
-        assert!(!text.contains("Netflix 解锁"), "解锁的不用点名：{text}");
-        assert!(!text.contains("la-2"), "没报过的节点不该出现：{text}");
     }
 
     /// 节点名与系统名来自那台机器：进 HTML 之前必须转义，否则一条消息会被 Telegram 整条
