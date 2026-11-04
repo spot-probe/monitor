@@ -2127,7 +2127,7 @@ type Fx = {
 
 function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx | null }) {
   const [sort, setSort] = useState<"monthly" | "expiry">("monthly")
-  const [allOpen, setAllOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [pick, setPick] = useState<string | null>(null)
   const [only, setOnly] = useState<"priced" | "noprice" | "norate" | "all">("priced")
   const [q, setQ] = useState("")
@@ -2413,26 +2413,18 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
 
         {/* ④ 明细：标准 Table。 */}
         <div className="rounded-lg border border-border/60">
-          <div className="px-3">{table(top)}</div>
+          <div className="px-3">{table(expanded ? bySort : top)}</div>
           {filtered.length > top.length && (
             <button
               type="button"
-              onClick={() => setAllOpen(true)}
-              className="w-full border-t border-border/60 py-2 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+              onClick={() => setExpanded(!expanded)}
+              className="w-full border-t border-border/60 py-2 text-xs text-muted-foreground transition-colors hover:bg-muted/60"
             >
-              还有 {filtered.length - top.length} 台 —— 点开看全部
+              {expanded ? "收起" : `还有 ${filtered.length - top.length} 台 —— 展开全部`}
             </button>
           )}
         </div>
 
-        <Dialog open={allOpen} onOpenChange={setAllOpen}>
-          <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle className="text-sm">节点成本（{filtered.length} 台）</DialogTitle>
-            </DialogHeader>
-            <div className="rounded-lg border border-border/60 px-3">{table(bySort)}</div>
-          </DialogContent>
-        </Dialog>
       </CardContent>
       </Card>
     </div>
