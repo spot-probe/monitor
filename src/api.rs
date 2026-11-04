@@ -450,19 +450,6 @@ fn node_view(
         // 「未允许检测」与「允许了但暂无数据」✓✗（这两件事长得完全不同 ✓）：
         // 前者该显示"未允许检测" ✓，后者才是"暂无解析数据" ✓。
         view["allow_ip_quality"] = json!(node.allow_ip_quality);
-        // 「这个 agent 会不会探流媒体」✓（能力 ✓，由版本决定 ✓）——
-        // 面板据此把「**版本不支持探测**」与「**还没测过**」分开 ✓✓（两件事 ✓，处置不同 ✓）。
-        view["stream_probe"] = json!(node.stream_probe);
-        // 流媒体探测的结果 ✓（第一期：Netflix ✓）。⚠️ **在 hub 侧解析成 JSON** ✗✓：
-        // 面板拿到的应当是结构化对象 ✓（而不是一个要自己 parse 的字符串 ✓ ——
-        // 那样每个用它的地方都得处理"解析失败" ✓，迟早有一处忘了 ✓）。
-        // ⚠️ 解析不了就当**没有** ✓（不编一个空对象 ✗ —— 那会让面板显示"探测过了、什么都没有" ✓✗）。
-        view["probe"] = node
-            .probe
-            .as_deref()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
-            .unwrap_or(serde_json::Value::Null);
-        view["probe_at"] = json!(node.probe_at);
         // 最近一次远程升级的结论（agent 回报的）。它挂在**会话**上，所以只在节点在线时有；
         // 这也正是它的语义：一次升级只可能发生在节点在线的时候。
         view["upgrade"] = json!(current.and_then(|a| a.upgrade.as_ref()));
@@ -1871,11 +1858,6 @@ pub struct AtRiskQuery {
     group: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct ProbeHistoryQuery {
-    days: Option<i64>,
-}
-
 /// 一台节点的**探测历史** ✓✓（面板那张点阵用它 ✓）。
 ///
 /// ⚠️ **鉴权照 `metrics` 抄** ✗✓：它是**按节点**的数据 ✓ ⇒ 用同一道 `readable` 检查 ✓
@@ -1906,34 +1888,6 @@ pub async fn healthz(State(app): State<Shared>) -> Response {
             (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
         }
     }
-}
-
-pub async fn probe_history(
-    State(app): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-    Query(q): Query<ProbeHistoryQuery>,
-) -> Response {
-    let full = authed(&app, &headers);
-    if !readable(&app, full, id) {
-        return (StatusCode::UNAUTHORIZED, "sign-in required").into_response();
-    }
-    let days = q.days.unwrap_or(7).clamp(1, 30);
-    // ⚠️ `since` 在这里算 ✓（而不是让 db 层自己取时间 ✓ —— 那样这一层就没法测了 ✓✗）
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let since = now - days * 86_400;
-    let rows = app
-        .db
-        .probe_history(id, since)
-        .into_iter()
-        .map(|(service, status, region, at)| {
-            json!({ "service": service, "status": status, "region": region, "at": at })
-        })
-        .collect::<Vec<_>>();
-    Json(json!({ "days": days, "since": since, "rows": rows })).into_response()
 }
 
 pub async fn at_risk(_: Admin, State(app): State<Shared>, Query(q): Query<AtRiskQuery>) -> Response {

@@ -383,7 +383,9 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
         "report" => report(app, node_id, rpc.params)?,
         // 流媒体探测的结果 ✓（agent 自己每 6 小时探一次 ✓ 报上来 ✓）。
         // ⚠️ 校验在 `sanitize_probe` 里（纯函数 ✓ 有测试 ✓）—— 这里只管"存" ✓。
-        "probe" => probe(app, node_id, &rpc.params)?,
+        // 流媒体检测已下线。老 agent 仍会每 6h 发一次 —— 接住并丢弃：
+        // 不落库、不报错、不断连（agent 发的是 notification，本来就不等回复）。
+        "probe" => {}
         "upgrade.report" => {
             // 这是 agent 对一次升级的**结论**，不是原始数据：长度与可见字符都按对待
             // 其它不设防字段的同一套规矩处理（它们来自一台不被担保的机器）。
@@ -680,117 +682,6 @@ fn check_contract(node_id: i64, metrics: &serde_json::Value) {
     let missing: Vec<&str> = report_fields().filter(|k| metrics.get(k).is_none()).collect();
     if !missing.is_empty() {
         warn!("node {node_id} reports without {missing:?}: those columns will read zero and the default theme will void this node's live view, so this agent and this hub are out of step");
-    }
-}
-
-/// 把 agent 报来的探测结果**收拾成我们能存的样子** ✓✓ —— 纯函数 ✓（所以那些"不该收的东西"能测死 ✓）。
-///
-/// ⚠️ 这些数据来自**一台不被担保的机器** ✓（与 report 的其余字段同一条规矩 ✓）：
-/// 所以这里做三件事，且**只**做这三件事 ✓：
-/// 1. **白名单服务名** ✓ —— 只认我们知道的那几个 ✓；其余一律丢掉 ✓
-///    （否则将来一个"服务名"就能往库里塞任意键 ✓✗，面板再去渲染它 ✓）；
-/// 2. **状态值白名单** ✓ —— 只认 `unlocked` / `blocked` / `unknown` ✓ 三个 ✓；
-///    ⚠️ 它们与 agent 侧的 `Status` 是**同一套字面量** ✓（两边必须一致 ✓ —— 见那边的注释 ✓）；
-/// 3. **地区码形状** ✓ —— 两位大写字母 ✓，否则丢掉 ✓（不是拒绝整条 ✓：状态仍然有用 ✓）。
-///
-/// 另外：**整体大小上限** ✓ —— 一个 JSON 不该能把库或内存撑坏 ✓
-/// （hub 刚因为"整份读进内存"出过 OOM ✓，这条规矩一样适用 ✓）。
-///
-/// 返回 `None` 表示"这条报文没有任何可用的东西" ✓ ⇒ 调用方**什么都不写** ✓
-/// （**不要**用一条空结论覆盖掉上一次的好结论 ✓✗）。
-/// 收下一次探测结果 ✓：**先校验** ✓（`sanitize_probe` ✓），**再存** ✓，并**由 hub 盖时间戳** ✓✓。
-///
-/// ⚠️ **时间戳为什么由 hub 盖** ✗✓：`probe_at` 是"结论新不新"的依据 ✓，
-/// 而一台不被担保的机器的时钟**可以错**（也常常错 ✓）⇒ 用它的时间去判断新鲜度 ✓✗
-/// 等于把判断权交给它 ✓。网络延迟是秒级 ✓，而周期是 6 小时 ✓ ⇒ 收到就算当时测的 ✓。
-///
-/// ⚠️ 校验后没有可用内容（`None` ✓）⇒ **什么都不写** ✓ ——
-/// **绝不能**用一条空结论覆盖掉上一次的好结论 ✓✗（那是"把没读到当成没解锁"的同一类错 ✓）。
-fn probe(app: &App, node_id: i64, params: &serde_json::Value) -> Result<()> {
-    // ⭐ **同一个许可也管这里** ✓：没允许检测的节点**连一轮都不该探** ✓ ⇒ 它报上来的结果也不存 ✗。
-    // 语义与 `assess` 的门 B **完全一致** ✓：**什么都不动** ✓ —— "没允许"不是关于这台机器的结论 ✓，
-    // 把它存成一轮数据会覆盖掉它以前（允许时）测到的结论 ✓✗。
-    // ⚠️ 挡在 hub 上、而不是只挡在 agent 上：**老版本 agent 还在无条件探测** ✓，改过参数的 agent
-    // 也可能 ✓ —— 许可的最终解释权在这一层 ✓✓（与门 A / 门 B 同一条思路 ✓）。
-    if !app.db.quality_allowed(node_id) {
-        debug!("node {node_id} sent a probe report without permission; ignored");
-        return Ok(());
-    }
-    let Some(clean) = sanitize_probe(params) else {
-        debug!("node {node_id} sent a probe report with nothing usable in it");
-        return Ok(());
-    };
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    app.db.save_probe(node_id, &clean, at)?;
-    Ok(())
-}
-
-fn sanitize_probe(params: &serde_json::Value) -> Option<serde_json::Value> {
-    const MAX_BYTES: usize = 4 * 1024;
-    // ⚠️ 加服务**只改这一行** ✓ —— 而它必须**早于** agent 开始发那个服务 ✗✓
-    //（"绝不给对方发它还不能处理的东西" ✓ ⇒ hub 先能收 ✓）。加一个没人发的服务是无害的 ✓。
-    // ⚠️ **一次把六个都开了** ✗✓ —— 理由与取舍都写在这里 ✓：
-    // · 理由 ✓：服务的白名单必须**早于** agent 开始发它 ✓（"绝不给对方发它还不能处理的东西" ✓），
-    //   而每次加服务都改一遍 hub ✓ 会让"先发 hub、再发 agent"这个顺序**多出五次机会出错** ✓✗；
-    // · ⚠️ **放宽它 = 放宽了一个安全边界** ✗：现在一台不被担保的机器可以往库里写这**六个键** ✓
-    //   （从前只有两个 ✓）。⇒ 可接受的理由有两条 ✓：**值仍受白名单与形状校验** ✓
-    //   （状态六档 ✓ · 地区两位大写 ✓）· **整体仍限 4 KB** ✓✓ —— 也就是说它能塞的
-    //   只是"我们认识的形状" ✓，而不是任意内容 ✓。
-    // · 剩下的三个（disneyplus / youtube / amazonpv）**也一起开着** ✓ ——
-    //   它们是同一批已定的服务 ✓，加进来不会扩大"形状"上的风险 ✓（同上两条 ✓）。
-    const SERVICES: [&str; 6] = ["netflix", "tiktok", "chatgpt", "reddit", "youtube", "amazonpv"];
-    // ⚠️ 四个 ✓：`idc` 是"**解锁了、但对方把这个地址识别成机房**" ✓✓ ——
-    // 它与"解锁"**不是一回事** ✓（机房 IP 在很多服务上吃亏 ✓，而这正是运维想知道的 ✓），
-    // 也与"未解锁"不同 ✓ ⇒ 单独一档 ✓（用户定的"甲" ✓）。
-    // ⚠️ **六档** ✓（用户定"甲" ✓）：`web` = **网页能用、App 不行** ✓；
-    // `app` = **反过来** ✓（两者来自 ChatGPT 那一套探测 ✓ —— 它分别探 API 与 iOS 端 ✓）。
-    // ⚠️ 这两档既不是"解锁"也不是"未解锁" ✗ ⇒ 必须单独存在 ✓（合并任何一边都是丢信息 ✓）。
-    // ⚠️ **八档** ✓：新加的两个来自 YouTube ✓（用户定"甲" ✓ —— 与前三次同一个取舍 ✓）：
-    // `cn` = 响应里出现 `www.google.cn` ✓（YouTube 在中国那一档 ✓）；
-    // `noprem` = "Premium is not available in your country" ✓
-    // ⇒ "**YouTube 能用，但 Premium 在这个国家买不到**" ✓✓（又一个"部分可用" ✓）。
-    // ⚠️ **`org` 必须排在 agent 之前发** ✗✗：agent 一旦上报这个词 ✓，
-    // 而这里还不认 ⇒ **整项被静默丢掉** ✓（不报错 ✓ 只是那台机器少一格 ✓ —— 最难查的那种 ✓）。
-    // ⭐ `org` = Netflix「**仅自制**」✓（参考实现的 `NF.Only` ✓）：那一档**能用** ✓，
-    // 但只有自制剧能看 ✓ ⇒ 与 `web`/`app`/`noprem` 同属"**能用但有条件**" ✓✓。
-    const STATUSES: [&str; 9] =
-        ["unlocked", "blocked", "unknown", "idc", "web", "app", "cn", "noprem", "org"];
-
-    // 先看大小 ✓：超了直接当没有 ✓（不解析一个我们本来就不打算存的巨物 ✓）
-    let raw = serde_json::to_string(params).ok()?;
-    if raw.len() > MAX_BYTES {
-        return None;
-    }
-    let obj = params.as_object()?;
-    let mut out = serde_json::Map::new();
-    for (name, v) in obj {
-        if !SERVICES.contains(&name.as_str()) {
-            continue; // 不认识的服务 ⇒ 丢掉 ✓（不报错 ✓：将来 agent 先升级也不会被拒 ✓）
-        }
-        let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
-        if !STATUSES.contains(&status) {
-            continue; // 状态读不懂 ⇒ 这一项没有可用的东西 ✓
-        }
-        // 地区：**两位大写字母**才收 ✓（与 agent 侧判据同一条形状 ✓）；
-        // 没有 / 形状不对 ⇒ 就不给地区 ✓ —— 状态仍然保留 ✓（不因为一格坏了丢掉有用的那格 ✓）。
-        let region = v
-            .get("region")
-            .and_then(|x| x.as_str())
-            .filter(|r| r.len() == 2 && r.chars().all(|c| c.is_ascii_uppercase()));
-        let mut item = serde_json::Map::new();
-        item.insert("status".into(), serde_json::json!(status));
-        if let Some(r) = region {
-            item.insert("region".into(), serde_json::json!(r));
-        }
-        out.insert(name.clone(), serde_json::Value::Object(item));
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(out))
     }
 }
 
@@ -1473,31 +1364,6 @@ mod tests {
         assert!(app.agents.read().unwrap().contains_key(&id), "and keeps receiving probe pushes");
     }
 
-    /// 探测结果也受 `--allow-ip-quality` 管 ✓ —— 不是"agent 探、hub 照收"✗。
-    #[test]
-    fn a_probe_report_from_a_node_that_did_not_allow_it_is_not_stored() {
-        let app = app();
-        let id = node(&app);
-        // 与 `sanitize_probe` 的用例同一份形状：能被存下来的那种。
-        let report = json!({"netflix": {"status": "unlocked", "region": "JP"}});
-
-        // 新节点默认没勾「允许 IP 质量检测」（`create_node` 不写这一列，列默认 0）。
-        probe(&app, id, &report).unwrap();
-        assert!(
-            app.db.node(id).unwrap().unwrap().probe.is_none(),
-            "没允许检测的节点，报上来的探测结果不该落库"
-        );
-
-        // 允许之后同一份报文就该存下来 —— 这条让上面那句"不该落库"不会因为报文本身有问题而假通过。
-        app.db.save_facts(id, &json!({"allow_ip_quality": true}), "", "ip").unwrap();
-        probe(&app, id, &report).unwrap();
-        let stored = app.db.node(id).unwrap().unwrap().probe;
-        assert!(
-            stored.as_deref().is_some_and(|s| s.contains("netflix")),
-            "允许之后同一份报文要被存下来，实际：{stored:?}"
-        );
-    }
-
     #[test]
     fn junk_from_an_agent_is_rejected_without_taking_the_connection_down() {
         let app = app();
@@ -1506,88 +1372,21 @@ mod tests {
         // Unknown methods are ignored.
         assert!(dispatch(&app, id, "ip", r#"{"method":"whatever"}"#).is_ok());
     }
-    /// ⭐ **这是"不被担保输入"的唯一闸门** ✓✓ —— 所以它的测试要盯住"什么会被放进去" ✗。
-    /// 一台机器可以发任何东西过来 ✓；这里钉住的是：**只有我们认识的东西能入库** ✓。
-    #[test]
-    fn probe_reports_are_narrowed_to_what_we_know() {
-        // 认识的服务 + 好的状态 ⇒ 收下 ✓（并原样带上地区 ✓）
-        let ok = json!({"netflix": {"status": "unlocked", "region": "JP"}});
-        assert_eq!(sanitize_probe(&ok), Some(json!({"netflix": {"status": "unlocked", "region": "JP"}})));
 
-        // ⚠️ **不认识的服务名 ⇒ 丢掉** ✓✗ —— 否则一个"服务名"就能往库里塞任意键 ✓，
-        // 而面板会去渲染它 ✓（这一条挡的就是那个 ✓）
-        let stranger = json!({"netflix": {"status": "unlocked"}, "evil": {"status": "unlocked"}});
-        assert_eq!(sanitize_probe(&stranger), Some(json!({"netflix": {"status": "unlocked"}})));
-
-        // ⚠️ **状态读不懂 ⇒ 这一项没有可用的东西** ✓（不猜成 unlocked ✓✗，也不猜成 blocked ✓）
-        assert_eq!(sanitize_probe(&json!({"netflix": {"status": "maybe"}})), None);
-        assert_eq!(sanitize_probe(&json!({"netflix": {}})), None);
-        // 全都不可用 ⇒ **什么都不能写** ✓（调用方据此**不覆盖**上一次的好结论 ✓✓）
-        assert_eq!(sanitize_probe(&json!({"evil": {"status": "unlocked"}})), None);
-        assert_eq!(sanitize_probe(&json!({})), None);
-        assert_eq!(sanitize_probe(&json!("not an object")), None);
-
-        // ⚠️ **地区形状不对 ⇒ 丢掉地区、保留状态** ✓✓ —— 不因为一格坏了丢掉有用的那格 ✓；
-        // 而形状检查是必须的 ✓：`us`（小写 ✓）/ `USA`（三位 ✓）/ `U1`（含数字 ✓）都不是地区 ✓✗
-        for bad in ["us", "USA", "U1", "", "🇺🇸"] {
-            assert_eq!(
-                sanitize_probe(&json!({"netflix": {"status": "blocked", "region": bad}})),
-                Some(json!({"netflix": {"status": "blocked"}})),
-                "地区 {bad:?} 不该被收下 ✓"
-            );
-        }
-
-        // ⚠️ **整体大小上限** ✓：一个巨物不该能进库（也不该被解析成一堆键 ✓）
-        let huge = json!({"netflix": {"status": "unlocked", "junk": "x".repeat(8 * 1024)}});
-        assert_eq!(sanitize_probe(&huge), None, "超大报文 ⇒ 当没有 ✓");
-    }
-    /// ⭐ `idc` 是**第四档** ✓✓（用户定"甲" ✓）：解锁了、但对方把这个地址识别成**机房** ✓。
-    /// ⚠️ 它与"解锁"不是一回事 ✓（机房 IP 在很多服务上吃亏 ✓，而这正是运维想知道的 ✓），
-    /// 也与"未解锁"不同 ✓ —— 所以它必须**能被收下** ✓，且**不能被降级**成别的档 ✓。
+    /// 流媒体检测下线之后的**过渡期**：老 agent 仍会每 6h 发一次 `probe`。
+    /// 它必须被**静默丢弃** —— 不报错（不会把连接弄断）、不落库（新数据不再进来）。
+    /// 这是 B1 唯一需要守住的兼容契约。
     #[test]
-    fn an_idc_verdict_survives_the_whitelist() {
-        assert_eq!(
-            sanitize_probe(&json!({"tiktok": {"status": "idc", "region": "JP"}})),
-            Some(json!({"tiktok": {"status": "idc", "region": "JP"}})),
-            "idc 必须被原样收下 ✓（它是一档结论 ✓，不是噪声 ✓）"
-        );
-        // 而真的读不懂的状态**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
-        assert_eq!(sanitize_probe(&json!({"tiktok": {"status": "maybe"}})), None);
-    }
-    /// ⭐ `web` / `app` 两档 ✓✓（用户定"甲" ✓）：ChatGPT 会分别探 API 与 iOS 端 ✓，
-    /// 于是可能出现"**网页能用、App 不行**"（`web` ✓）或反过来（`app` ✓）。
-    /// ⚠️ 它们**既不是解锁也不是未解锁** ✗ ⇒ 合并任何一边都是**丢信息** ✓
-    ///（而"能用一半"恰恰是运维会据以决定要不要换机器的那类事实 ✓）。
-    #[test]
-    fn the_partial_tiers_survive_the_whitelist() {
-        for (status, region) in [("web", "JP"), ("app", "US")] {
-            assert_eq!(
-                sanitize_probe(&json!({"chatgpt": {"status": status, "region": region}})),
-                Some(json!({"chatgpt": {"status": status, "region": region}})),
-                "{status} 必须被原样收下 ✓"
-            );
-        }
-        // 而六档之外的东西**仍然**要被丢掉 ✓（放宽白名单不等于不再校验 ✓）
-        for bad in ["partial", "web_only", "desktop"] {
-            assert_eq!(sanitize_probe(&json!({"chatgpt": {"status": bad}})), None, "{bad} 不该被收 ✓");
-        }
-    }
-    /// ⭐ YouTube 带进来的两档 ✓✓（用户定"甲" ✓）：
-    /// `cn` = 响应里出现 `www.google.cn` ✓（YouTube 在中国那一档 ✓）；
-    /// `noprem` = "**能用，但 Premium 在这个国家买不到**" ✓✓ ——
-    /// ⚠️ 合并进"解锁"会让"能用但买不到会员"看起来完全正常 ✓✗（而那是要付费的用户最关心的一条 ✓）。
-    #[test]
-    fn the_youtube_tiers_survive_the_whitelist() {
-        for bad in ["cn", "noprem"] {
-            assert_eq!(
-                sanitize_probe(&json!({"youtube": {"status": bad, "region": "JP"}})),
-                Some(json!({"youtube": {"status": bad, "region": "JP"}})),
-                "{bad} 必须被原样收下 ✓"
-            );
-        }
-        // 八档之外的东西仍然要被丢掉 ✓
-        for bad in ["premium", "china", "nopremium"] {
-            assert_eq!(sanitize_probe(&json!({"youtube": {"status": bad}})), None, "{bad} 不该被收 ✓");
-        }
+    fn a_probe_report_from_an_old_agent_is_dropped_without_error_or_data() {
+        let app = app();
+        let id = node(&app);
+        let report = json!({
+            "jsonrpc": "2.0", "method": "probe",
+            "params": {"netflix": {"status": "unlocked", "region": "US"}}
+        });
+        assert!(dispatch(&app, id, "198.51.100.4", &report.to_string()).is_ok(), "不能报错");
+        let stored = app.db.node(id).unwrap().unwrap();
+        assert!(stored.probe.is_none(), "不再落库：{:?}", stored.probe);
+        assert!(stored.probe_at.is_none(), "时间戳也不写");
     }
 }
