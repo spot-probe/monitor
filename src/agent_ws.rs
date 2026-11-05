@@ -414,8 +414,24 @@ fn dispatch(app: &App, node_id: i64, ip: &str, text: &str) -> Result<Option<Stri
             }
             // 进度：成功 ⇒ 它马上会退出并被 systemd 拉起，面板该显示"等待重连"；
             // 失败 ⇒ 进度到此为止（原因由 `node.upgrade` 展示，不在进度里重复）。
+            //
+            // ⚠️⚠️ **顺序竞态** ✗✗：这条回报走的是**旧连接**，而"重连成功"的 `hello` 走的是
+            // **新连接** —— 两个任务谁先跑没有保证（都要抢同一把 DB 锁）。若 `hello` 先到，
+            // 它已经把进度清掉了，这里再写回"等待重连"⇒ 面板会一直转圈到 10 分钟 TTL 到期，
+            // 而节点其实早就带着新版本在线了（维护者看到的就是这个）。
+            // ⇒ 判据换成**事实**而不是顺序：节点已经带着这个版本在线 ⇒ 升级确实完成了。
             if status.ok {
-                app.set_upgrade(node_id, crate::UpgradePhase::WaitingReconnect);
+                let on_target = app
+                    .db
+                    .node(node_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|n| !status.version.is_empty() && n.agent_version == status.version);
+                if on_target {
+                    app.clear_upgrade(node_id);
+                } else {
+                    app.set_upgrade(node_id, crate::UpgradePhase::WaitingReconnect);
+                }
             } else {
                 app.clear_upgrade(node_id);
             }
@@ -1388,5 +1404,37 @@ mod tests {
         let stored = app.db.node(id).unwrap().unwrap();
         assert!(stored.probe.is_none(), "不再落库：{:?}", stored.probe);
         assert!(stored.probe_at.is_none(), "时间戳也不写");
+    }
+
+    /// 升级回报走**旧连接**、"重连成功"的 hello 走**新连接** —— 两个任务先后无保证。
+    /// 若 hello 先到（它已经把进度清掉了），后到的回报**不能**再写"等待重连"：
+    /// 节点已经带着新版本在线，那条进度是过期信息，面板会一直转圈到 TTL 到期。
+    #[test]
+    fn an_upgrade_report_that_arrives_after_the_reconnect_does_not_revive_the_progress() {
+        let app = app();
+        let id = node(&app);
+        // 新连接已经 hello 过：节点记着 1.1.18。
+        app.db.save_facts(id, &json!({"agent_version": "1.1.18"}), "198.51.100.4", "").unwrap();
+        // 旧连接的"成功"回报此时才到。
+        let report = json!({
+            "jsonrpc": "2.0", "method": "upgrade.report",
+            "params": {"ok": true, "version": "1.1.18", "reason": ""}
+        });
+        dispatch(&app, id, "198.51.100.4", &report.to_string()).unwrap();
+        assert!(app.upgrade_of(id).is_none(), "已经在目标版本上 ⇒ 不该显示「等待重连」");
+    }
+
+    /// 反过来：回报先到（节点还在跑旧版本）⇒ 必须显示「等待重连」，等它重启。
+    #[test]
+    fn an_upgrade_report_before_the_restart_still_waits_for_reconnect() {
+        let app = app();
+        let id = node(&app);
+        app.db.save_facts(id, &json!({"agent_version": "1.1.17"}), "198.51.100.4", "").unwrap();
+        let report = json!({
+            "jsonrpc": "2.0", "method": "upgrade.report",
+            "params": {"ok": true, "version": "1.1.18", "reason": ""}
+        });
+        dispatch(&app, id, "198.51.100.4", &report.to_string()).unwrap();
+        assert!(matches!(app.upgrade_of(id), Some(crate::UpgradePhase::WaitingReconnect)), "还没重启 ⇒ 该等");
     }
 }
