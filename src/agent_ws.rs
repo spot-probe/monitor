@@ -1401,9 +1401,9 @@ mod tests {
             "params": {"netflix": {"status": "unlocked", "region": "US"}}
         });
         assert!(dispatch(&app, id, "198.51.100.4", &report.to_string()).is_ok(), "不能报错");
-        let stored = app.db.node(id).unwrap().unwrap();
-        assert!(stored.probe.is_none(), "不再落库：{:?}", stored.probe);
-        assert!(stored.probe_at.is_none(), "时间戳也不写");
+        // 列已经删了（schema 29）—— 这条上报只可能是"被丢掉"，不可能是"存起来了"。
+        // 列真的没了由 `db::tests::migrating_from_28_drops_the_probe_columns_and_history` 钉住。
+        assert!(app.db.node(id).unwrap().is_some(), "节点本身还在");
     }
 
     /// 升级回报走**旧连接**、"重连成功"的 hello 走**新连接** —— 两个任务先后无保证。

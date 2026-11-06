@@ -143,19 +143,6 @@ CREATE TABLE IF NOT EXISTS node (
   -- ⚠️ 与上面那列**有一处关键不同** ✗：**老 agent 不报这个字段，而那时要当作"允许"** ✓ ——
   -- 这是"向后兼容、老节点不断"的决定 ✓（见读 hello 那一处 ✓）。
   allow_ip_quality INTEGER NOT NULL DEFAULT 0,
-  -- **流媒体解锁检测的结果** ✓（agent 自己每 6 小时探一次 ✓ 并上报 ✓）。
-  -- ⚠️ 存成 **JSON** ✓✓：一个服务一格形状（状态 ✓ 地区 ✓），将来加服务/加"方式"只是多一个键 ✓，
-  -- 不改表 ✓（用户要的"提前预留"正是这个意思 ✓）。
-  -- ⚠️ 而**时间戳单独一列** ✗：它是"结论新不新"的唯一依据 ✓ ——
-  -- 埋在 JSON 里会让"过期判断"变成各处自己解析 ✓（今天已经因为"两处各写一份"吃过亏 ✓）。
-  probe TEXT,
-  probe_at INTEGER,
-  -- agent 是否**会**做流媒体探测 ✓（能力 ✓，不是许可 ✗ —— 它由版本决定 ✓ 在 hello 里上报 ✓）。
-  -- ⚠️⚠️ **缺席时按 0 处理** ✗✗ —— 与 `allow_ip_quality` **正好相反** ✓：
-  -- 那个缺席按"允许"（向后兼容 ✓ 老节点不断 ✓）；这个缺席按"**不会**" ✓，
-  -- 因为老 agent **真的没有这段代码** ✓✓（那不是政策选择 ✓，是事实 ✓）。
-  -- ⇒ 面板据此把「**版本不支持**」与「**还没测过**」分开 ✓✓（两件事 ✓，处置不同 ✓）。
-  stream_probe INTEGER NOT NULL DEFAULT 0,
   -- 节点质量（IP 结论 ✓）：由 hub 用**本地**库查出 ✓，不是 agent 上报的 ✗ ——
   -- agent 依旧零改动 ✓，也不把节点 IP 发给第三方 ✓（除非以后显式打开在线库 ✓）。
   -- 八个列**全部可空** ✓：查不到就是空 ✓ —— "未知"与"美国"是两件事 ✗（`''` 会被读成后者 ✓）。
@@ -231,36 +218,6 @@ CREATE TABLE IF NOT EXISTS traffic (
     payload  TEXT NOT NULL,
     PRIMARY KEY (ip, provider, day)
   );
-
-  -- ⭐ **探测历史** ✓✓（用户提的"点阵"要用它 ✓）：**每探一次写一行** ✓，
-  -- 而不是像 `node.probe` 那样只留最后一次 ✗（那样就看不出趋势 ✓✗ ——
-  -- 而"这台昨天还行、今天不行"恰恰是最有用的信息 ✓）。
-  --
-  -- ⚠️ **保留策略是必须的** ✗（见 `probe_history_keep_days` ✓）：按 6 小时一次算 ✓，
-  -- 100 台 × 6 服务 × 4 次/天 ≈ **2400 行/天** ✓ ⇒ 一年 ~88 万行 ✗ ⇒ 默认只留 30 天 ✓✓
-  --（30 天足够看出趋势 ✓，而那是这个功能唯一的用途 ✓）。
-  --
-  -- ⚠️ `at` 由 **hub 盖** ✓（与 `probe_at` 同一条规矩 ✓：不收 agent 报的时间 ✓ ——
-  -- 一台不被担保的机器的时钟可以错 ✓，而这个字段正是"什么时候测的"的依据 ✓）。
-  -- ⚠️ `node_id` 上**不建外键** ✗（与其它历史表一致 ✓）：节点删了，历史留着不碍事 ✓，
-  -- 建了外键反而会让删节点变麻烦 ✓。
-  CREATE TABLE IF NOT EXISTS probe_history (
-    node_id TEXT NOT NULL,
-    service TEXT NOT NULL,
-    status  TEXT NOT NULL,
-    region  TEXT,
-    at      INTEGER NOT NULL,
-    PRIMARY KEY (node_id, service, at)
-  );
--- ⚠️ **这个索引必须在这里**，不能只写在 `if from < 23` 的迁移块里 ✗✗ ——
--- 全新安装走的是"先 execute_batch(SCHEMA)、再 migrate(fresh ? SCHEMA_VERSION : version)"，
--- 于是 `from == 23` 及以下的所有块**全被跳过**：只有升级上来的库才有它，
--- 而全新库的点阵查询（`ORDER BY at`）退化成"扫该节点全部服务行 + 临时排序"。
--- ⚠️ 而且现有的"升级库 == 全新建库"总闸看不见这个差异 —— 它比的是 `PRAGMA table_info`
--- 的**列**，索引不在其中。这是同一个事实有两个来源的典型：迁移块与 SCHEMA 各写一遍，
--- 就会被忘掉一遍。索引的列在 SCHEMA 里已经存在，所以放进 SCHEMA 不违反下面那条规矩
--- （那条针对的是"迁移之后才出现的列"）。
-CREATE INDEX IF NOT EXISTS probe_history_at ON probe_history(node_id, at);
 
 CREATE TABLE IF NOT EXISTS metric (
   node_id INTEGER NOT NULL REFERENCES node(id) ON DELETE CASCADE,
@@ -394,7 +351,7 @@ CREATE TABLE IF NOT EXISTS session (
 /// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
 /// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
 /// column is not there yet.
-const SCHEMA_VERSION: i64 = 28;
+const SCHEMA_VERSION: i64 = 29;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -608,6 +565,26 @@ fn migrate_to_26(conn: &Connection) -> Result<()> {
   at      INTEGER NOT NULL
 ) WITHOUT ROWID;",
     )?;
+    Ok(())
+}
+
+/// 29：流媒体探测下线 ⇒ 删掉它的**三列**与**历史表**。
+///
+/// `ALTER TABLE … DROP COLUMN` 要 SQLite 3.35+；本仓用 bundled，远高于它。
+/// 每一步都先查列在不在 —— 迁移测试会拿当前 schema 建库再"减回去"，
+/// 而"删一个不存在的列"会直接报错（与 `add_column` 容忍重复同一条规矩）。
+fn migrate_to_29(conn: &Connection) -> Result<()> {
+    for col in ["probe", "probe_at", "stream_probe"] {
+        let present: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_table_info('node') WHERE name = ?1", [col], |r| {
+                r.get(0)
+            })?;
+        if present > 0 {
+            conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), [])?;
+        }
+    }
+    // 表上的索引跟着表一起没，不用单独删。
+    conn.execute_batch("DROP TABLE IF EXISTS probe_history;")?;
     Ok(())
 }
 
@@ -848,6 +825,9 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 28 {
         migrate_to_28(&tx)?;
     }
+    if from < 29 {
+        migrate_to_29(&tx)?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
     Ok(())
@@ -909,25 +889,6 @@ pub struct Node {
     /// 以及大量测试里手写的节点 ✓）都会被读成"不允许" ✗✓ —— 与上面那条政策正好相反 ✓。
     #[serde(default = "quality_allowed_by_default")]
     pub allow_ip_quality: bool,
-    /// 这个 agent **会不会**做流媒体探测 ✓（**能力** ✓，不是许可 ✗ —— 由它的版本决定 ✓）。
-    /// ⚠️⚠️ **缺席时按 false** ✓✓ —— 与上面那个许可**正好相反** ✗✗：
-    /// 老 agent 手里**真的没有那段代码** ✓ ⇒ 这里的 false 描述的是**事实** ✓，
-    /// 不是"暂不允许" ✓。面板据此把「版本不支持」与「还没测过」分开 ✓✓。
-    ///
-    /// ⚠️ 这里**只要一个普通的 `#[serde(default)]`** ✓✓（它给的就是 `false` ✓）——
-    /// 而 `allow_ip_quality` 那边必须用**自定义的**默认函数 ✓（它要的是 `true` ✓）。
-    /// ⇒ 两个字段长得一样、默认值相反、写法也就不同 ✓ —— 这不是不一致 ✓，是各自正确 ✓。
-    /// （缺了它，任何不带这个字段的节点 JSON 都会让**反序列化直接失败** ✓✗ ——
-    ///  今天在 `allow_ip_quality` 那一步已经栽过一次，6 条测试当场倒下 ✓。）
-    #[serde(default)]
-    pub stream_probe: bool,
-    /// 流媒体探测的结果 ✓（**已校验过的 JSON 文本** ✓，见 `agent_ws::sanitize_probe` ✓）。
-    /// ⚠️ 这里存的是**文本** ✓（SQLite 里就是 TEXT ✓），视图那边再解析成 JSON ✓ ——
-    /// 库这一层不该替调用方决定"它是不是合法 JSON" ✓。
-    pub probe: Option<String>,
-    /// 那次探测**什么时候**做的 ✓（Unix 秒 ✓，**由 hub 盖** ✓✓）。
-    /// ⚠️ 与 `probe` 分开存 ✓：它是"新不新"的唯一依据 ✓，不该埋在 JSON 里让人各处解析 ✓。
-    pub probe_at: Option<i64>,
     /// 最近一次远程升级：时间戳（0 = 从没升过）、是否成功、版本、失败原因。
     ///
     /// ⚠️ `#[serde(default)]` **不是装饰** ✗✓：`Node` 会被**反序列化**（测试夹具、以及
@@ -1971,10 +1932,6 @@ impl Db {
         // deleted node's id to the next node created, which would otherwise
         // inherit the removed machine's latency chart.
         conn.execute("DELETE FROM ping_record WHERE node_id = ?1", [id])?;
-        // ⚠️ `probe_history` 同样**没有外键**（`node_id` 还是 TEXT），所以上面那条理由对它
-        // 一字不差地成立 ✗ —— 此前只清了 `ping_record`，于是删掉 id=5 再新建一台拿到 id=5
-        // 的机器，会继承上一台的探测点阵。TEXT 与 INTEGER 的字面量在 SQLite 里比较是安全的。
-        conn.execute("DELETE FROM probe_history WHERE node_id = ?1", [id])?;
         Ok(conn.execute("DELETE FROM node WHERE id = ?1", [id])? > 0)
     }
 
@@ -2035,9 +1992,6 @@ impl Db {
                              -- 但下面读 hello 的那一步会把它翻成 1 = 允许 ✓，
                              -- 因为这条政策的决定是向后兼容、老节点不断 ✓）。
                              , allow_ip_quality=?18
-                             -- 同样追加在最后 ✓（编号一个都不动 ✓）。
-                             -- ⚠️ 这个缺席按 **false** ✓（与上面那个相反 ✓）：老 agent 真的不会探 ✓。
-                             , stream_probe=?19
              WHERE id=?1",
             params![
                 id,
@@ -2067,7 +2021,6 @@ impl Db {
                 // 这个是**能力**（缺席 = 老 agent **手里没有这段代码** ✓ ⇒ 按"不会"办 ✓✓）。
                 // ⇒ 把这里的 false 改成 true 会让面板对**所有旧节点**说"它还没测过" ✓✗，
                 //   而真相是"它根本不会测" ✓ —— 用户会去等一个永远不会来的结果 ✓✗。
-                i64::from(f.get("stream_probe").and_then(|v| v.as_bool()).unwrap_or(false))
             ],
         )?;
         let blank: bool = conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?;
@@ -4229,11 +4182,8 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         private_remark: s("private_remark"),
         allow_remote_upgrade: n("allow_remote_upgrade") != 0,
         allow_ip_quality: n("allow_ip_quality") != 0,
-        stream_probe: n("stream_probe") != 0,
         // ⚠️ 两列都可空 ✓（没探测过就是 NULL ✓）⇒ 用 `get(..).ok()` 而不是 `unwrap_or_default` ✗：
         // 空字符串与"没探测过"是两件事 ✓（前者会在视图里变成一个空的 probe 对象 ✓✗）。
-        probe: r.get::<_, Option<String>>("probe").ok().flatten(),
-        probe_at: r.get::<_, Option<i64>>("probe_at").ok().flatten(),
         upgrade_at: r.get::<_, Option<i64>>("upgrade_at").ok().flatten().unwrap_or(0),
         upgrade_ok: r.get::<_, Option<i64>>("upgrade_ok").ok().flatten().unwrap_or(0) != 0,
         upgrade_version: r.get::<_, Option<String>>("upgrade_version").ok().flatten().unwrap_or_default(),
@@ -6287,18 +6237,36 @@ mod tests {
         assert_eq!(notnull, 1, "必须 NOT NULL ✓（库里的 0 只代表『明确不允许』✓）");
         assert_eq!(dflt, "0", "默认必须是 0 ✓（新装要勾选才允许 ✓）");
     }
-    /// **升级路径的闸**：一个"20 版"的库迁移后必须有两列、且戳到 21 ✓。
-    /// 顺便断言**两列都可空** ✓ —— 没探测过写 NULL ✓，
-    /// 而"探测过、但这一项没结论"要靠 JSON 里的键来表达 ✓（不是靠 NULL ✓）——
-    /// 若被写成 NOT NULL，错误会在"新增一台节点"时才炸 ✓（与 q_ 那八列同一条理由 ✓）。
+    /// **升级路径的闸（schema 29）**：一个"28 版"的库迁移后，流媒体那三列与历史表都必须**消失**，
+    /// 而其余数据一行不少 —— 删列是最不可逆的一步，所以这条测试同时盯"删干净"和"没误删"。
     #[test]
-    fn migrating_from_20_adds_the_probe_columns() {
+    fn migrating_from_28_drops_the_probe_columns_and_history() {
         let db = Db::open(":memory:").unwrap();
         let conn = db.conn();
-        for col in ["probe", "probe_at"] {
-            conn.execute(&format!("ALTER TABLE node DROP COLUMN {col}"), []).unwrap();
+        // 把库"减回" 28：三列加回来、历史表建回来（迁移测试就是这么造老库的）。
+        for (col, decl) in [
+            ("probe", "probe TEXT"),
+            ("probe_at", "probe_at INTEGER"),
+            ("stream_probe", "stream_probe INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            conn.execute(&format!("ALTER TABLE node ADD COLUMN {decl}"), []).unwrap();
+            let _ = col;
         }
-        conn.execute("PRAGMA user_version = 20", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS probe_history (
+               node_id TEXT NOT NULL, service TEXT NOT NULL, status TEXT NOT NULL,
+               region TEXT, at INTEGER NOT NULL, PRIMARY KEY (node_id, service, at));
+             CREATE INDEX IF NOT EXISTS probe_history_at ON probe_history(node_id, at);",
+        )
+        .unwrap();
+        // 留一台节点，确认删列没把行删掉。
+        conn.execute(
+            "INSERT INTO node (name, token, created_at, stream_probe) VALUES ('kept', 't', 0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("PRAGMA user_version = 28", []).unwrap();
+
         let cols = |c: &rusqlite::Connection| -> Vec<String> {
             c.prepare("PRAGMA table_info(node)")
                 .unwrap()
@@ -6307,25 +6275,28 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert!(!cols(&conn).contains(&"probe".to_string()), "前提：列已删掉");
-        migrate(&conn, 20).unwrap();
+        assert!(cols(&conn).contains(&"stream_probe".to_string()), "前提：老库里有这一列");
+
+        migrate(&conn, 28).unwrap();
+
         let after = cols(&conn);
-        assert!(after.contains(&"probe".to_string()) && after.contains(&"probe_at".to_string()));
-        assert_eq!(
-            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
-            SCHEMA_VERSION
-        );
-        let notnull: i64 = conn
+        for col in ["probe", "probe_at", "stream_probe"] {
+            assert!(!after.contains(&col.to_string()), "{col} 必须被删掉：{after:?}");
+        }
+        let history: i64 = conn
             .query_row(
-                // ⚠️ 列名用**方括号**引用 ✓（SQLite 支持 ✓）—— 用双引号的话，
-                // 在"Python 模板 → 写进 Rust 字符串"这条路上要转义两层 ✓，
-                // 而今天已经在这上面栽过一次（反斜杠被吃掉 ⇒ Rust 字符串提前结束 ✓✗）。
-                "SELECT COUNT(*) FROM pragma_table_info('node') WHERE name IN ('probe','probe_at') AND [notnull]=1",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='probe_history'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(notnull, 0, "两列都必须可空");
+        assert_eq!(history, 0, "历史表必须被删掉");
+        let kept: i64 = conn.query_row("SELECT COUNT(*) FROM node", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "删列不能把节点行删掉");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     #[test]
@@ -7703,40 +7674,6 @@ mod heatmap_tests {
     }
 
     /// **升级路径的闸**：一个"21 版"的库迁移后必须有 stream_probe、且戳到 22 ✓。
-    /// ⚠️ 与 `allow_ip_quality` 那条**形状相同、断言相反** ✓✓：
-    /// 这一列是 `NOT NULL DEFAULT 0` ✓，而"缺席按 0"描述的是**事实** ✓
-    ///（老 agent 手里没有那段代码 ✓）—— 不是"暂不允许" ✓。
-    #[test]
-    fn migrating_from_21_adds_the_stream_probe_column() {
-        let db = Db::open(":memory:").unwrap();
-        let conn = db.conn();
-        conn.execute("ALTER TABLE node DROP COLUMN stream_probe", []).unwrap();
-        conn.execute("PRAGMA user_version = 21", []).unwrap();
-        let cols = |c: &rusqlite::Connection| -> Vec<String> {
-            c.prepare("PRAGMA table_info(node)")
-                .unwrap()
-                .query_map([], |r| r.get::<_, String>(1))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        };
-        assert!(!cols(&conn).contains(&"stream_probe".to_string()), "前提：列已删掉");
-        migrate(&conn, 21).unwrap();
-        assert!(cols(&conn).contains(&"stream_probe".to_string()));
-        assert_eq!(
-            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
-            SCHEMA_VERSION
-        );
-        let (notnull, dflt): (i64, String) = conn
-            .query_row(
-                "SELECT [notnull], COALESCE(dflt_value,'') FROM pragma_table_info('node') WHERE name='stream_probe'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(notnull, 1, "必须 NOT NULL ✓");
-        assert_eq!(dflt, "0", "默认必须是 0 ✓（缺席 = 老 agent = 不会探 ✓）");
-    }
     /// **升级路径的闸**：一个"22 版"的库迁移后必须有 `probe_history`、且戳到 23 ✓。
     /// ⚠️ 新表与加列不同 ✗：加列只改一个表 ✓，新表要**建表 + 建索引** ✓ ——
     /// 而"新库"那条路（[`SCHEMA`] ✓）里也必须有同一张表 ✓，
@@ -7781,36 +7718,23 @@ mod heatmap_tests {
         assert_eq!(notnull, 0, "必须可空 ✓：迁移前的那些小时行没有这些数 ✓");
     }
 
+    /// schema 29 之后不再有 `probe_history`：从任何老版本升上来，它都必须是**不在**的状态。
+    /// （"建表"那一步的历史留在 `migrate_to_23` 里 —— 它对老库仍然必要，
+    /// 因为它之后紧跟着 29 的删除；测试只需盯最终状态。）
     #[test]
-    fn migrating_from_22_creates_the_probe_history_table() {
-        let db = Db::open(":memory:").unwrap();
-        let conn = db.conn();
-        conn.execute("DROP TABLE probe_history", []).unwrap();
-        conn.execute("PRAGMA user_version = 22", []).unwrap();
-        let has = |c: &rusqlite::Connection| -> bool {
-            c.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='probe_history'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-                > 0
-        };
-        assert!(!has(&conn), "前提：表已删掉");
-        migrate(&conn, 22).unwrap();
-        assert!(has(&conn), "迁移后必须建出这张表 ✓");
-        assert_eq!(
-            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
-            SCHEMA_VERSION
-        );
-        // ⚠️ 索引也要在 ✓（点阵按"节点 + 时间"取一段 ✓ —— 缺了它是全表扫描 ✗）
-        let idx: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='probe_history_at'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(idx, 1, "索引必须一起建 ✓");
+    fn no_version_ends_up_with_a_probe_history_table() {
+        for from in [22_i64, 23, 27, 28] {
+            let db = Db::open(":memory:").unwrap();
+            let conn = db.conn();
+            migrate(&conn, from).unwrap();
+            let has: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='probe_history'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 0, "从 {from} 版升上来之后不该有这张表");
+        }
     }
 }

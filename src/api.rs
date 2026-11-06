@@ -1962,7 +1962,7 @@ pub async fn ping_series(
     Query(q): Query<PingSeriesQuery>,
 ) -> Response {
     // ⚠️ 这条以前**完全不做身份判断** ✗：匿名调用者能拿到全部节点的按任务延迟/丢包，
-    // 包括 `public = false`（未发布）的机器 —— 而同族的 `probe_history` / `metrics`
+    // 包括 `public = false`（未发布）的机器 —— 而同族的 `metrics`
     // 都走 `authed` + `readable`。这里补上：非管理员只看得到公开节点。
     let full = authed(&app, &headers);
     let Ok(_permit) = HISTORY_GATE.try_acquire() else {
@@ -4996,7 +4996,7 @@ mod tests {
     /// 背景：`ping_series` / `ping_heatmap` 的签名只有 `(State, Query)`，既不收 `headers`
     /// 也没有 `Admin` 提取器，而全仓**没有认证中间件**（路由的分组只是排版，权限靠每个
     /// handler 自己查）。于是 `public = false` 的节点，它的延迟与丢包也能被匿名调用者按
-    /// 节点读走 —— 而同族的 `probe_history` / `metrics` 都走 `authed` + `readable`。
+    /// 节点读走 —— 而同族的 `metrics` 都走 `authed` + `readable`。
     ///
     /// 这里钉两件事：匿名只拿得到公开节点；"公开页关着"时，聚合的那条（热力图）直接 401。
     #[tokio::test]
