@@ -2026,8 +2026,26 @@ function HeatRows({ edges, buckets, slowest }: {
   if (edges.length < 2 || buckets.length === 0) return null
   const bands = edges.length - 1
   const peak = Math.max(1, ...buckets.flatMap((b) => b.counts))
+  // 五档而不是四档：`0` 必须和"很少"分开 —— 它代表**没有样本**，不是"少"。
+  // ⚠️ 零值格用 `bg-muted`，容器必须是浅底（`bg-card`）：两者同为 `bg-muted` 时，
+  // 零值格会直接消失，整行看起来是断的（维护者截图里那些白口就是它）。
   const tone = (c: number) =>
-    c === 0 ? "bg-muted" : c <= peak * 0.25 ? "bg-primary/20" : c <= peak * 0.6 ? "bg-primary/45" : "bg-primary/80"
+    c === 0
+      ? "bg-muted"
+      : c <= peak * 0.2
+        ? "bg-primary/15"
+        : c <= peak * 0.4
+          ? "bg-primary/35"
+          : c <= peak * 0.7
+            ? "bg-primary/60"
+            : "bg-primary/90"
+  const legend: [string, string][] = [
+    ["bg-muted", "无样本"],
+    ["bg-primary/15", "少"],
+    ["bg-primary/35", "中"],
+    ["bg-primary/60", "多"],
+    ["bg-primary/90", "最多"],
+  ]
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
     <>
@@ -2044,7 +2062,8 @@ function HeatRows({ edges, buckets, slowest }: {
               {buckets.map((b) => (
                 <span
                   key={b.ts}
-                  className={`h-2.5 flex-1 rounded-[1px] ${tone(b.counts[i])}`}
+                    className={`h-3 flex-1 rounded-[2px] ${tone(b.counts[i])}`}
+                    aria-label={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 个样本`}
                   title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次${
                     slowest?.get(b.ts) ? ` · 最慢 ${slowest.get(b.ts)!.name} ${slowest.get(b.ts)!.ms} ms` : ""
                   }`}
@@ -2059,8 +2078,21 @@ function HeatRows({ edges, buckets, slowest }: {
       <span />
       <p className="flex justify-between text-[10px] leading-none text-muted-foreground">
         <span>{clock(buckets[0].ts)}</span>
-        <span>{clock(buckets[buckets.length - 1].ts)}</span>
+          <span>{clock(buckets[Math.floor(buckets.length / 2)].ts)}</span>
+          <span>{clock(buckets[buckets.length - 1].ts)}</span>
       </p>
+        {/* 图例：四档颜色原来没有任何解释 —— 读者分不清 primary/35 和 /60 差在哪。
+            右边给峰值次数，色阶才有**绝对**含义，而不只是相对深浅。 */}
+        <span />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-[10px] leading-none text-muted-foreground">
+          {legend.map(([cls, label]) => (
+            <span key={label} className="flex items-center gap-1">
+              <span aria-hidden className={`size-2.5 rounded-[2px] ${cls}`} />
+              {label}
+            </span>
+          ))}
+          <span className="tnum ml-auto">峰值 {peak} 次 / 格</span>
+        </div>
     </>
   )
 }
@@ -3108,8 +3140,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
 								<Help>按<span className="font-medium">时间 × 延迟区间</span>统计每一格里有多少个样本。横轴是时间（与上面那张图同一个窗口）。纵轴是这个窗口内的<span className="font-medium">真实毫秒区间</span> —— 由数据的分位数算出，不是写死的档位（延迟的"正常"取决于目标）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里：它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
 							</h4>
 						</div>
-						<div className="mt-2 rounded-lg bg-muted p-3">
-							<div className="grid grid-cols-[5.5rem_1fr] items-center gap-y-0.5">
+						{/* 浅底 + 细边（原来是 `bg-muted`）：零值格用 `bg-muted`，容器再是 `bg-muted`
+						    的话它就消失了 —— 截图里那些"白色的口子"就是这么来的。 */}
+						<div className="mt-2 rounded-lg border border-border/60 bg-card p-3">
+							<div className="grid grid-cols-[5.5rem_1fr] items-center gap-y-1">
 								<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
 							</div>
 						</div>
