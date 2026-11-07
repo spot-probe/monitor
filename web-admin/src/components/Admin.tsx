@@ -2209,6 +2209,23 @@ function BandChart({ points, height = 150 }: {
     }
   }
   if (run.length) segs.push(run)
+  // **无数据区间**：段与段之间、以及首尾没覆盖到的部分。
+  // 它们在图上原来只是一片空白 —— 与"渲染坏了"无法区分（维护者看到的"白色缺口"就是它）。
+  // 现在铺一层很淡的斜纹，让它读作"这里没有样本"，而不是"图没画好"。
+  const gaps: [number, number][] = []
+  for (let i = 1; i < segs.length; i++) {
+    const a = segs[i - 1][segs[i - 1].length - 1].ts
+    const b = segs[i][0].ts
+    if (b > a) gaps.push([x(a), x(b)])
+  }
+  if (segs.length) {
+    const first = segs[0][0].ts
+    const lastTs = segs[segs.length - 1][segs[segs.length - 1].length - 1].ts
+    if (first > t0) gaps.push([x(t0), x(first)])
+    if (lastTs < t1) gaps.push([x(lastTs), x(t1)])
+  }
+  // pattern 的 id 必须唯一：同一页可能同时挂着两条曲线（多个目标）。
+  const hatch = `band-hatch-${Math.random().toString(36).slice(2, 9)}`
   const path = (s: typeof points, f: (q: (typeof points)[number]) => number | null) =>
     s.map((q) => `${x(q.ts).toFixed(1)},${y(Number(f(q))).toFixed(1)}`).join(" ")
   // 带子 = 上沿 P75 正着走 + 下沿 P25 倒着回来，闭合成多边形（每段一条）。
@@ -2238,6 +2255,15 @@ function BandChart({ points, height = 150 }: {
           strokeDasharray="3 3"
           vectorEffect="non-scaling-stroke"
         />
+      ))}
+      {/* 无数据的斜纹底：先画，面积带与折线盖在上面 */}
+      <defs>
+        <pattern id={hatch} width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="8" stroke="currentColor" strokeWidth="1" className="text-foreground/10" />
+        </pattern>
+      </defs>
+      {gaps.map(([a, b], i) => (
+        <rect key={`gap-${i}`} x={a} y={pad} width={Math.max(0, b - a)} height={height - pad * 2} fill={`url(#${hatch})`} />
       ))}
       {segs.map((s, i) => (
         <polygon key={`band-${i}`} points={band(s)} className="fill-primary/15" />
@@ -3140,7 +3166,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 									<span className="h-[2px] bg-danger-fg" />
 									<span className="min-h-0 flex-1 bg-ok-fg/20" />
 								</span>
-								底=平均 · 顶=最差
+								底=平均 · 顶=最差 · 斜纹=无数据
         {(() => {
           // 中位数的数值：原来画在图里、压着曲线；跟图例走就永远不会重叠。
           const last = [...pct].reverse().find((q) => q.p50 !== null)
