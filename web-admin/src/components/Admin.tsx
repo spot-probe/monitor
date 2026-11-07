@@ -5623,8 +5623,10 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
 
 export const ADMIN_SECTIONS = [
   {
-    // "资源" 而不是 "监控"：这一组回答的是"我有哪些机器、它们怎么样"，
-    // 而"监控"会让人以为这里是告警规则（这块在「通知」里）。
+    // 三个组名统一**两个字**，各自回答一个动词：
+    //   资源＝**看**（我有哪些机器、它们怎么样）· 配置＝**改**（这个 hub 的外观/通知/安全/库）·
+    //   运维＝**养**（版本与数据库）。
+    // ⚠️ 第一组叫"资源"而不是"监控"：后者会让人以为这里是告警规则（那在「设置 › 通知」里）。
     group: "资源",
     items: [
       { path: "/admin/overview", label: "总览", icon: LayoutDashboard },
@@ -5633,7 +5635,7 @@ export const ADMIN_SECTIONS = [
     ],
   },
   {
-  	group: "站点配置",
+  	group: "配置",
   	// 这一组是「这个 hub 自己的配置」：叫什么、留多久数据、对外长什么样。
   	// 顺序按动它的频率：主题比设置常改，所以在前。
   	items: [
@@ -5642,7 +5644,7 @@ export const ADMIN_SECTIONS = [
   	],
   },
   {
-	group: "系统运维",
+	group: "运维",
 	// 这一组只剩一件事：把它维持好 —— 版本与数据库（原来是「更新」与「数据」两页，
 	// 现在合成「维护」，用页签分开）。
 	items: [{ path: "/admin/maintenance", label: "维护", icon: Wrench }],

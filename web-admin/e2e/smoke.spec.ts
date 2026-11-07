@@ -11,7 +11,7 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
 
   // 防的是：分组被合并回两组、或名字被改回去（维护者为此专门定过名）。
   // 「资源管理」定名「资源」；「数据」搬到「系统运维」末尾（A 方案）。
-  const groups = ["资源", "站点配置", "系统运维"]
+  const groups = ["资源", "配置", "运维"]
   const ys: number[] = []
   for (const g of groups) {
     const label = nav.getByText(g, { exact: true })
@@ -22,9 +22,9 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   expect(ys[0]).toBeLessThan(ys[1])
   expect(ys[1]).toBeLessThan(ys[2])
 
-  // B 方案之后：站点配置 = 主题 / 设置；系统运维只剩一个「维护」（版本 + 数据库）。
+  // B 方案之后：配置 = 主题 / 设置；运维只剩一个「维护」（版本 + 数据库）。
   const navText = (await nav.innerText()).replace(/\s+/g, " ")
-  expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("系统运维"))
+  expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("运维"))
   expect(navText).toContain("维护")
   // 合并掉的入口不该再出现在导航里（它们变成页签了）。
   for (const gone of ["通知", "安全", "更新", "数据"]) {
