@@ -3768,11 +3768,18 @@ impl Db {
         let file = main_file(&conn);
         let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let free_pages: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-        // Both are pruned at the same cutoff, so the earlier of the two marks where
-        // history begins -- sought one node at a time, because `MIN(ts)` over a
-        // whole table cannot use a key that begins with `node_id` (15.9 s at 90
-        // days of 100 nodes, 1.8 ms this way).
-        let oldest = oldest(&conn, &["metric", "ping_record"])?;
+        // 历史从哪开始，要问**汇总表**（`metric_hour` / `ping_hour`）—— 明细表
+        // （`metric` / `ping_record`）只留 `DETAIL_DAYS` 天，它的 `MIN(ts)` 永远 ≤ 7 天，
+        // 拿它当"已存多少天"会让进度条永久停在 7/retention（维护者看到的就是这个）。
+        // 两处都取：`oldest` 是**历史**跨度（进度条用它），`oldest_detail` 是明细窗口。
+        // 逐节点求 `MIN(ts)`：整表 `MIN(ts)` 用不上以 `node_id` 打头的键（15.9 s vs 1.8 ms）。
+        let history = oldest(&conn, &HOUR_TABLES)?;
+        let detail = oldest(&conn, &["metric", "ping_record"])?;
+        // 汇总表刚建、还没折过桶时，历史就只能由明细决定。
+        let oldest = match (history, detail) {
+            (Some(h), Some(d)) => Some(h.min(d)),
+            (h, d) => h.or(d),
+        };
         let mut rows = serde_json::Map::new();
         for table in TABLES {
             let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
@@ -3793,6 +3800,7 @@ impl Db {
             "wal": bytes_of(&format!("{file}-wal")),
             "free": free_pages * page_size,
             "oldest": oldest,
+            "oldest_detail": detail,
             "retention": retention,
             "rows": rows,
             "summary": summary,
@@ -4394,8 +4402,8 @@ mod tests {
         db.check_backup(&bad).unwrap();
     }
 
-    /// `oldest` is what the data page compares against the retention window, so it
-    /// must span both pruned tables rather than whichever happens to have rows.
+    /// `oldest` 是数据页拿去和保留期比较的那个数 ⇒ 它必须来自**汇总表**（历史），
+    /// 而不是明细表 —— 明细只留 `DETAIL_DAYS` 天，拿它算会让进度条永久停在 7/retention。
     #[test]
     fn stats_report_the_earliest_history_row_and_the_window_it_is_kept_for() {
         let scratch = Scratch::new();
@@ -4426,7 +4434,24 @@ mod tests {
             })
             .unwrap();
         db.insert_ping(id, task, now - 9 * 86_400, 12).unwrap();
-        assert_eq!(db.stats().unwrap()["oldest"], now - 9 * 86_400);
+        assert_eq!(db.stats().unwrap()["oldest"], now - 9 * 86_400, "两表明细取更早的那个");
+
+        // 汇总表里有一行更早的历史 ⇒ `oldest` 跟它走（这才是"已存多少天"），
+        // 而 `oldest_detail` 仍指向分钟级那一行（≤ 7 天）。
+        db.conn()
+            .execute(
+                "INSERT INTO metric_hour (node_id, ts, minutes, cpu, mem_used, swap_used, disk_used,
+                                          net_rx, net_tx, net_rx_max, net_tx_max)
+                 VALUES (?1, ?2, 60, 1.0, 1, 0, 1, 0, 0, 0, 0)",
+                rusqlite::params![id, now - 20 * 86_400],
+            )
+            .unwrap();
+        assert_eq!(db.stats().unwrap()["oldest"], now - 20 * 86_400, "历史以汇总表为准");
+        assert_eq!(
+            db.stats().unwrap()["oldest_detail"],
+            now - 9 * 86_400,
+            "明细是另一个窗口：两表明细里更早的那行"
+        );
 
         // Above the ceiling reads as the ceiling -- and the hourly prune then
         // deletes the history past it, which is the one change in this release that

@@ -5102,8 +5102,13 @@ type DbInfo = {
   size: number
   wal: number
   free: number
-  /** Timestamp of the earliest history row, null on a database with none. */
+  /**
+   * 最早一条**历史**（汇总表 `metric_hour` / `ping_hour`）的时间戳。
+   * ⚠️ 不要拿明细表算：明细只留 `DETAIL_DAYS`（7 天），进度条会永久停在 7/retention。
+   */
   oldest: number | null
+  /** 最早一条**明细**（分钟级）的时间戳；它在 7 天后就没了，是另一个窗口。 */
+  oldest_detail?: number | null
   retention: number
   rows: Record<string, number>
 }
@@ -5203,6 +5208,14 @@ function Data() {
           {/* 和保留天数并排：跨度小于保留期是还没攒够，大于保留期就是每小时
               那次 prune 没在跑。 */}
           {stat("历史跨度", info.oldest ? `${Math.floor((Date.now() / 1000 - info.oldest) / 86400)} 天` : "—")}
+          {/* 明细是**另一个窗口**：分钟行只留 7 天（`DETAIL_DAYS`），之后只有小时汇总。
+              两个数并排写出来，读者才不会把"历史 30 天"当成"每分钟的数据留了 30 天"。 */}
+          {stat(
+            "明细跨度",
+            info.oldest_detail
+              ? `${Math.floor((Date.now() / 1000 - info.oldest_detail) / 86400)} 天`
+              : "—",
+          )}
           {/* 单位：这两个数是**行数**，不加单位会被读成"个/台"之类。 */}
           {DB_ROWS.map(([key, label]) => stat(label, `${(info.rows[key] ?? 0).toLocaleString()} 条`))}
         </div>
