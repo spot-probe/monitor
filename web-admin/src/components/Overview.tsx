@@ -1529,7 +1529,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     <ItemMedia className="mt-0.5 size-4 text-muted-foreground">{n.icon}</ItemMedia>
                     <ItemContent>
                       <ItemTitle className="text-sm">{n.text}</ItemTitle>
-                      <ItemDescription>{n.hint}</ItemDescription>
+                      {/* `text-xs` 不是随手加的：官方 ItemDescription 默认 text-sm，而这张卡的
+                          说明行必须与其余三张卡的次要文字同一级（12px）—— 否则同一行里
+                          "标题 14 / 说明 14"，整张卡看起来比旁边那张大一号。 */}
+                      <ItemDescription className="text-xs">{n.hint}</ItemDescription>
                     </ItemContent>
                     {/* 行尾给**真的能去**的地方：到期去节点页，落后去更新页。
                         证书那条没地方可去 —— 这也是它做不成的原因之一（面板没有那份数据）。 */}
