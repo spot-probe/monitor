@@ -10,7 +10,8 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   const nav = page.locator("nav").first()
 
   // 防的是：分组被合并回两组、或名字被改回去（维护者为此专门定过名）。
-  const groups = ["资源管理", "站点配置", "系统运维"]
+  // 「资源管理」定名「资源」；「数据」搬到「系统运维」末尾（A 方案）。
+  const groups = ["资源", "站点配置", "系统运维"]
   const ys: number[] = []
   for (const g of groups) {
     const label = nav.getByText(g, { exact: true })
@@ -21,9 +22,11 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   expect(ys[0]).toBeLessThan(ys[1])
   expect(ys[1]).toBeLessThan(ys[2])
 
-  // 「设置」属于站点配置、「通知」属于系统运维 —— 维护者在 A/B 两个方案里选了 A。
+  // 「设置」属于站点配置、「通知」与「数据」属于系统运维 —— 维护者在 A/B 两个方案里选了 A。
   const navText = (await nav.innerText()).replace(/\s+/g, " ")
   expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("系统运维"))
+  // 「数据」已经不在第一组了：它的位置必须在「系统运维」之后。
+  expect(navText.indexOf("数据")).toBeGreaterThan(navText.indexOf("系统运维"))
 })
 
 test("设置页：输入框的宽度按内容分档（320 / 448 / 160 / 672）", async ({ page }) => {

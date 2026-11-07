@@ -5618,12 +5618,13 @@ function Update({ versions, reload, nodes, site, canProvision, provisionNote, ag
 
 export const ADMIN_SECTIONS = [
   {
-    group: "资源管理",
+    // "资源" 而不是 "监控"：这一组回答的是"我有哪些机器、它们怎么样"，
+    // 而"监控"会让人以为这里是告警规则（这块在「通知」里）。
+    group: "资源",
     items: [
       { path: "/admin/overview", label: "总览", icon: LayoutDashboard },
       { path: "/admin/nodes", label: "节点", icon: Server },
       { path: "/admin/ping", label: "延迟", icon: Radio },
-      { path: "/admin/data", label: "数据", icon: Database },
     ],
   },
   {
@@ -5639,12 +5640,14 @@ export const ADMIN_SECTIONS = [
   	group: "系统运维",
   	// 这一组是「把它维持好」：出问题谁知道（通知）、谁能进来（安全）、跑的是哪个版本（更新）。
   	items: [
-  		// 「通知」改成「通用」✓（用户要求 ✓）：这一页不再只放通知 ✓ ——
-    // 它会有**页签**：通知（继承原来的全部内容 ✓ 含流量报告）· IP 信息（IP 风险库 + IP 数据库 ✓）。
-    // 图标也从铃铛换掉 ✓（铃铛会让人以为这一页只有通知 ✓）。
-    { path: "/admin/notify", label: "通用", icon: SlidersHorizontal },
+		// 叫「通知」而不是「通用」✓：这一页装的是通知渠道 + 各类提醒 + IP 库，
+		// 而"通用"会让想改通知的人先去「设置」找 —— 名字要说清里面是什么。
+		{ path: "/admin/notify", label: "通知", icon: SlidersHorizontal },
   		{ path: "/admin/security", label: "安全", icon: Shield },
   		{ path: "/admin/update", label: "更新", icon: ArrowUpCircle },
+		// 「数据」（各表行数 / vacuum / 备份恢复）属于**养**这个 hub，不属于"看机器" ✓ ——
+		// 所以它从「资源」搬到这一组，排在最后（最不常用）。
+		{ path: "/admin/data", label: "数据", icon: Database },
   	],
   },
 ]
