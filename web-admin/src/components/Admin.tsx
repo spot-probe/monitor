@@ -2042,7 +2042,9 @@ function HeatBars({ edges, buckets, slowest }: {
     <div>
       {/* ⚠️ `max-w` 是必须的 ✗✓：桶少的时候（预览里只有 4 个）`flex-1` 会把每根柱拉成
           500px 宽的大板砖 —— 维护者说的"长条"就是它。给个上限，桶少就居中排一排细柱。 */}
-      <div className="flex h-[120px] items-end justify-center gap-1">
+      {/* 间隙 1px 而不是 4px：桶多时（24 小时 ≈ 150 个）4px 的缝会把图读成条形码，
+            1px 时它连成一片，桶少时（预览里 4 个）又仍然是分开的柱。 */}
+      <div className="flex h-[120px] items-end justify-center gap-px">
         {buckets.map((b, k) => {
           const total = totals[k]
           return (
@@ -2378,7 +2380,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
     api<{ edges: number[]; buckets: { ts: number; counts: number[]; lost: number }[] }>(
       // ⚠️ **带上 `points`** ✗：不带时服务端按默认 1440 个桶算 —— 7 天窗口就是一万格左右，
       // 而屏幕上一格只有几个像素宽。折线图那条一直是 `points=360`，热力图漏了。
-      `/nodes/ping-heatmap?task=${id}&hours=${winHours}&points=360`,
+      // ⚠️ 64 而不是折线图的 360 ✗✓：堆叠柱**每桶至少要 ~20px 宽**才读得出来。
+                  // 360 个桶在 1900px 上只有 5px 一根，看着像条形码（维护者看到的就是它）；
+                  // 64 个桶 ≈ 30px 一根，24 小时窗口里每桶 22 分钟，仍然够细。
+                  `/nodes/ping-heatmap?task=${id}&hours=${winHours}&points=64`,
     )
       .then((d) => { if (alive) setHeat({ task: id, edges: d.edges ?? [], buckets: d.buckets ?? [] }) })
       .catch(() => { /* 取不到就不画矩阵 ✓ —— 折线图与色条不受影响 ✓ */ })
