@@ -29,8 +29,8 @@ const BLOCK_NOTES: Record<string, string> = {
 const LEGACY: Record<string, string> = {
   "/admin/notify": "/admin/settings?tab=notify",
   "/admin/security": "/admin/settings?tab=security",
-  "/admin/update": "/admin/maintenance?tab=version",
-  "/admin/data": "/admin/maintenance?tab=database",
+  "/admin/update": "/admin/version",
+  "/admin/maintenance": "/admin/version",
 }
 
 function normalise(p: string) {

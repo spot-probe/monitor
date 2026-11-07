@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook
+import { ArrowUpCircle, Database, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook
 } from "lucide-react"
-import { Gauge, Loader2, Timer , Wrench } from "lucide-react"
+import { Gauge, Loader2, Timer  } from "lucide-react"
 import { ExternalLink } from "lucide-react"
 import { LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
@@ -5645,9 +5645,12 @@ export const ADMIN_SECTIONS = [
   },
   {
 	group: "运维",
-	// 这一组只剩一件事：把它维持好 —— 版本与数据库（原来是「更新」与「数据」两页，
-	// 现在合成「维护」，用页签分开）。
-	items: [{ path: "/admin/maintenance", label: "维护", icon: Wrench }],
+	// 两项而不是"一个「维护」+ 页签"：单项分组会让组名与项名互抢含义
+	//（"维护"同时得概括"版本"和"数据库"）⇒ 拆回两项，都是 2 个字。
+	items: [
+		{ path: "/admin/version", label: "版本", icon: ArrowUpCircle },
+		{ path: "/admin/data", label: "数据", icon: Database },
+	],
   },
 ]
 
@@ -5704,57 +5707,6 @@ function SettingsPage({
   )
 }
 
-/** 「维护」= 版本 / 数据库（原来是「更新」与「数据」两页）。 */
-function Maintenance({
-  query,
-  go,
-  versions,
-  reload,
-  nodes,
-  site,
-  canProvision,
-  provisionNote,
-  agentLatest,
-}: {
-  query: string
-  go: (next: string) => void
-  versions: Versions | null
-  reload: () => void
-  nodes: Node[]
-  site: string
-  canProvision: boolean
-  provisionNote: string
-  agentLatest: string | null
-}) {
-  const tab = (new URLSearchParams(query).get("tab") ?? "version") === "database" ? "database" : "version"
-  return (
-    <div className="space-y-5">
-      <Segmented
-        label="维护分区"
-        value={tab}
-        onChange={(v) => go(`/admin/maintenance?tab=${v}`)}
-        options={[
-          { value: "version", label: "版本" },
-          { value: "database", label: "数据库" },
-        ]}
-      />
-      {tab === "version" ? (
-        <Update
-          versions={versions}
-          reload={reload}
-          nodes={nodes}
-          site={site}
-          canProvision={canProvision}
-          provisionNote={provisionNote}
-          agentLatest={agentLatest}
-        />
-      ) : (
-        <Data />
-      )}
-    </div>
-  )
-}
-
 export function Admin({
   path,
   query,
@@ -5800,10 +5752,8 @@ export function Admin({
             <Themes />
           ) : path === "/admin/settings" ? (
             <SettingsPage query={query} go={go} nodes={nodes} refresh={refresh} site={site} />
-          ) : path === "/admin/maintenance" ? (
-            <Maintenance
-              query={query}
-              go={go}
+          ) : path === "/admin/version" ? (
+            <Update
               versions={versions}
               reload={reloadVersions}
               nodes={nodes}
@@ -5812,6 +5762,8 @@ export function Admin({
               provisionNote={provisionNote}
               agentLatest={agentLatest}
             />
+          ) : path === "/admin/data" ? (
+            <Data />
         ) : (
           <Nodes nodes={nodes} refresh={refresh} agentSite={agentSite} canProvision={canProvision} provisionNote={provisionNote} groupDropdown={groupDropdown} agentLatest={agentLatest} />
         )}

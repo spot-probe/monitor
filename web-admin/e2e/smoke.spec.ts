@@ -25,9 +25,11 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   // B 方案之后：配置 = 主题 / 设置；运维只剩一个「维护」（版本 + 数据库）。
   const navText = (await nav.innerText()).replace(/\s+/g, " ")
   expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("运维"))
-  expect(navText).toContain("维护")
-  // 合并掉的入口不该再出现在导航里（它们变成页签了）。
-  for (const gone of ["通知", "安全", "更新", "数据"]) {
+  // 运维组是两项，都是 2 个字（不再有单项的「维护」）。
+  expect(navText).toContain("版本")
+  expect(navText).toContain("数据")
+  // 合并进「设置」的那几个入口不该再出现在导航里。
+  for (const gone of ["通知", "安全", "更新", "维护"]) {
     expect(navText).not.toContain(gone)
   }
 })
@@ -36,10 +38,11 @@ test("旧地址会落到合并后的那一页", async ({ page }) => {
   // 书签、外部链接都还指着这些地址 —— 它们必须重定向到对应的页签，而不是 404 或空白。
   await page.goto("/admin/security")
   await expect(page).toHaveURL(/\/admin\/settings\?tab=security$/)
-  await page.goto("/admin/data")
-  await expect(page).toHaveURL(/\/admin\/maintenance\?tab=database$/)
   await page.goto("/admin/update")
-  await expect(page).toHaveURL(/\/admin\/maintenance(\?tab=version)?$/)
+  await expect(page).toHaveURL(/\/admin\/version$/)
+  // 「数据」现在是独立一页，地址不变。
+  await page.goto("/admin/data")
+  await expect(page).toHaveURL(/\/admin\/data$/)
 })
 
 test("设置页：输入框的宽度按内容分档（320 / 448 / 160 / 672）", async ({ page }) => {
