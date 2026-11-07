@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode, useRef } from "react"
+import { Fragment, useEffect, useState, type ReactNode, useRef } from "react"
 import { isOneOff, monthlyCost, residualValue } from "@/lib/cost"
 import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
 
@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
+import { Item, ItemActions, ItemContent, ItemSeparator, ItemGroup, ItemMedia, ItemTitle, ItemDescription } from "@/components/ui/item"
+import { Progress } from "@/components/ui/progress"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -1515,26 +1518,32 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               // 那两份数据，印出来就是编造。
               <p className="text-sm text-muted-foreground">暂无其它待处理项。</p>
             ) : (
-              <div className="divide-y divide-border">
-                {notices.map((n) => (
-                  <div key={n.text} className="flex items-start gap-2.5 py-3 first:pt-0 last:pb-0">
+              <ItemGroup>
+                {notices.map((n, i) => (
+                  <Fragment key={n.text}>
+                  {i > 0 && <ItemSeparator className="bg-border/60" />}
+                  <Item size="sm" className="items-start px-0 py-2">
                     {/* 维护者要求：这一整块**不留任何颜色**（图标也洗掉）。所以严重度只由**文字**表达
-                        —— 「6 台到期」「3 台集中在 10-12」本身就说清楚了要做什么。 */}
-                    <span className="mt-0.5 shrink-0 text-muted-foreground">{n.icon}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm">{n.text}</div>
-                      <div className="text-xs text-muted-foreground">{n.hint}</div>
-                    </div>
+                        —— 「6 台到期」「3 台集中在 10-12」本身就说清楚了要做什么。
+                        ⚠️ `size-4` 与行首对齐：图标尺寸由这里定死，不再每行自己写。 */}
+                    <ItemMedia className="mt-0.5 size-4 text-muted-foreground">{n.icon}</ItemMedia>
+                    <ItemContent>
+                      <ItemTitle className="text-sm">{n.text}</ItemTitle>
+                      <ItemDescription>{n.hint}</ItemDescription>
+                    </ItemContent>
                     {/* 行尾给**真的能去**的地方：到期去节点页，落后去更新页。
                         证书那条没地方可去 —— 这也是它做不成的原因之一（面板没有那份数据）。 */}
                     {n.href && (
-                      <Button size="sm" variant="ghost" asChild className="shrink-0 self-center">
-                        <a href={n.href}>查看</a>
-                      </Button>
+                      <ItemActions>
+                        <Button size="sm" variant="ghost" asChild>
+                          <a href={n.href}>查看</a>
+                        </Button>
+                      </ItemActions>
                     )}
-                  </div>
+                  </Item>
+                  </Fragment>
                 ))}
-              </div>
+              </ItemGroup>
             )}
           </CardContent>
         </Card>
@@ -1547,40 +1556,56 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             </CardAction>
           </CardHeader>
           <CardContent className="space-y-3">
-            {/* 分段堆叠条：绿 = 最新、琥珀 = 落后（hub 的 agent_old）、灰 = 未上报。
-                三者互斥且覆盖全部节点，「未上报」不并进落后 —— 没连过的机器不该被说成旧版本。 */}
-            <div className="flex h-2.5 overflow-hidden rounded-full bg-muted">
+            {/* 分段堆叠条（Distribution Bar）：绿 = 最新、琥珀 = 落后（hub 的 agent_old）、
+                灰 = 未上报。三者互斥且覆盖全部节点，「未上报」不并进落后 ——
+                没连过的机器不该被说成旧版本。
+                ⚠️ 整条是一张**图**：「13 台里 11 台最新」这句话读屏听不出来条形的宽度，
+                所以给它一个 aria-label，把三段一起说出来。 */}
+            <div
+              role="img"
+              aria-label={`${nodes.length} 台里：${agentBuckets
+                .map((b) => `${b.label} ${b.count} 台`)
+                .join("，")}`}
+              className="flex h-2.5 gap-px overflow-hidden rounded-full bg-muted"
+            >
               {agentBuckets.map((b) => (
                 <span
                   key={b.key}
-                  className={b.color}
+                  className={cn(b.color, "h-full first:rounded-l-full last:rounded-r-full")}
                   style={{ width: `${nodes.length ? (b.count / nodes.length) * 100 : 0}%` }}
-                  title={`${b.label} ${b.count} 台`}
                 />
               ))}
             </div>
-            <div className="space-y-1.5">
+            <ItemGroup className="gap-0.5">
               {agentBuckets.map((b) => (
-                <a
+                <Item
                   key={b.key}
-                  // 「落后」这一行点进去是**节点页、并且已经筛好"只看待升级"** ——
-                  // 因为下一步多半就是动手（批量升级按钮在那一页），而不是再读一遍说明。
-                  // 原来指向更新页：那里只是把同样的信息再讲一次。
-                  href={b.key === "old" && b.count > 0 ? "/admin/nodes?outdated=1" : undefined}
-                  className="flex items-baseline justify-between gap-3 rounded text-xs transition-colors hover:bg-muted/40"
+                  asChild
+                  size="sm"
+                  className="gap-2 px-0 py-1.5 text-xs"
                 >
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
-                    <span className={`size-2 rounded-sm ${b.color}`} />
-                    {b.label}
-                    <span className="font-mono">{b.version || "—"}</span>
-                  </span>
-                  <span className="shrink-0">
-                    <span className="tnum font-medium">{b.count} 台</span>
-                    <span className="tnum ml-1.5 text-muted-foreground">{nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%</span>
-                  </span>
-                </a>
+                  <a
+                    // 「落后」这一行点进去是**节点页、并且已经筛好"只看待升级"** ——
+                    // 因为下一步多半就是动手（批量升级按钮在那一页），而不是再读一遍说明。
+                    href={b.key === "old" && b.count > 0 ? "/admin/nodes?outdated=1" : undefined}
+                  >
+                    <ItemMedia className="size-2">
+                      <span className={cn("size-2 rounded-sm", b.color)} />
+                    </ItemMedia>
+                    <ItemContent className="flex-row items-baseline gap-1.5">
+                      <span className="text-muted-foreground">{b.label}</span>
+                      <span className="font-mono text-muted-foreground">{b.version || "—"}</span>
+                    </ItemContent>
+                    <ItemActions>
+                      <span className="font-medium">{b.count} 台</span>
+                      <span className="w-9 text-right text-muted-foreground">
+                        {nodes.length ? Math.round((b.count / nodes.length) * 100) : 0}%
+                      </span>
+                    </ItemActions>
+                  </a>
+                </Item>
               ))}
-            </div>
+            </ItemGroup>
           </CardContent>
         </Card>
       </div>
@@ -1690,22 +1715,16 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                     // 先试过两种画法，都不行：3px 下划线像"文字下划线"；整行背景填充的
                     // 右边缘会切过数字，像"选中高亮"。放进自己的一列之后，条只做**横向
                     // 比较**（分母是这一榜的最大值，不是绝对好坏），数字仍然给精度。
-                    <div
-                      key={`${r.task}-${r.node}`}
-                      className="flex items-center gap-3 py-1 text-sm"
-                    >
+                    <Item key={`${r.task}-${r.node}`} size="sm" className="gap-3 px-0 py-1 text-sm">
                       <span className="w-40 shrink-0 truncate font-medium">{r.node}</span>
-                      <span className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-                        <span
-                          // ⚠️ **实心**，不带透明度 ✗✓：右边「用量榜」的条是 `bg-primary`，
-                          // 而这里原来是 `bg-primary/40` —— 两张并排的卡里，同一个"一根条"
-                          // 有两种颜色，读者会以为是两种含义。现在统一：蓝=数值，黄=该处理。
-                          className={`block h-full rounded-full ${
-                            idx === 0 ? "bg-warn-fg" : "bg-primary"
-                          }`}
-                          style={{ width: `${Math.max(2, (r.value / worst) * 100)}%` }}
-                        />
-                      </span>
+                      <Progress
+                        // ⚠️ **实心**，不带透明度 ✗✓：右边「用量榜」的条也是 `bg-primary`。
+                        // 两张并排的卡里，同一根条不能有两种颜色。统一：蓝=数值，黄=该处理。
+                        value={Math.max(2, (r.value / worst) * 100)}
+                        className="h-2 min-w-0 flex-1 bg-muted"
+                        indicatorClassName={idx === 0 ? "bg-warn-fg" : "bg-primary"}
+                        label={`${r.node} · ${riskTab === "latency" ? "平均延迟" : "丢包"}${idx === 0 ? " · 本榜最差" : ""}`}
+                      />
                       <span className="w-16 shrink-0 truncate text-xs text-muted-foreground">{r.task}</span>
                       <span
                         className={`tnum w-24 shrink-0 text-right text-xs ${
@@ -1717,7 +1736,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                       <span className="tnum w-12 shrink-0 text-right text-[11px] text-muted-foreground">
                         {r.samples} 次
                       </span>
-                    </div>
+                    </Item>
                   ))
                 )
               })()
@@ -1741,24 +1760,24 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
               const over = pct >= 1
               return (
                 // 定宽 + 不换行：百分比在最后、右对齐，永远与数字列同一行（原来会被挤到第二行）。
-                <div key={n.id} className="flex items-center gap-3 py-1 text-sm">
+                <Item key={n.id} size="sm" className="gap-3 px-0 py-1 text-sm">
                   {/* 名字**定宽**：两个 `flex-1` 会让名字与条各占一半，条就短了（上一版正是这个毛病）。 */}
                   <span className="w-32 shrink-0 truncate font-medium">{n.name}</span>
                   <span className="w-20 shrink-0 truncate text-xs text-muted-foreground">{n.group || "未分组"}</span>
                   {/* 轨道加一圈极淡的边：0% 时纯 `bg-muted` 与卡片背景几乎同色，读起来像"没画"。 */}
-                  <span className="h-2.5 min-w-0 flex-1 overflow-hidden rounded-full border border-border bg-muted">
-                    <span
-                      className={`block h-full rounded-full ${over ? "bg-danger-fg" : "bg-primary"}`}
-                      style={{ width: `${Math.min(100, pct * 100)}%` }}
-                    />
-                  </span>
+                  <Progress
+                    value={Math.min(100, pct * 100)}
+                    className="h-2.5 min-w-0 flex-1 border border-border bg-muted"
+                    indicatorClassName={over ? "bg-danger-fg" : "bg-primary"}
+                    label={`${n.name} 已用 ${Math.round(pct * 100)}% 额度`}
+                  />
                   <span className="tnum w-32 shrink-0 text-right text-xs text-muted-foreground">
                     {bytes(used)} / {bytes(n.traffic_limit)}
                   </span>
                   <span className={`tnum w-12 shrink-0 text-right text-xs ${over ? "font-semibold text-danger-fg" : "font-medium"}`}>
                     {Math.round(pct * 100)}%
                   </span>
-                </div>
+                </Item>
               )
             })}
             </div>
