@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Item, ItemActions, ItemContent, ItemSeparator, ItemGroup, ItemMedia, ItemTitle, ItemDescription } from "@/components/ui/item"
 import { Progress } from "@/components/ui/progress"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -2270,6 +2271,10 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
   }
   const peak = Math.max(1, ...months.map((m) => m.total))
   const picked = months.find((m) => m.key === pick) ?? null
+  // 三处汇总：全年合计、峰值月、本月 —— 之前读者得自己把 12 根柱子加起来。
+  const monthsTotal = months.reduce((a, m) => a + m.total, 0)
+  const nowKey = `${now.getFullYear()}-${now.getMonth()}`
+  const peakMonth = months.reduce((best, m) => (m.total > best.total ? m : best), months[0])
 
   const filtered = rows.filter((r) => {
     if (q && !`${r.n.name} ${r.n.group ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false
@@ -2421,76 +2426,166 @@ function CostBlock({ nodes, group, fx }: { nodes: Node[]; group: string; fx: Fx 
 
         </CardContent>
       </Card>
-      <Card className="gap-3">
-        <CardHeader className="gap-0 pt-0.5 pb-2!">
-          <CardTitle className="text-sm">
-            未来 12 个月摊平预测{" "}
-            <span className="text-xs font-normal text-muted-foreground">
-              （按当前价格；到期的机器落在到期那个月）
-            </span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-        <div className="overflow-hidden">
-          <div className="flex items-end gap-1 px-3 pt-3">
-            {/* ⚠️ 这张图原来**没有 y 轴**：柱高只能互相比较，读者读不出"¥156 是多还是少"。
-                加两条刻度就够了（顶=峰值、底=0）—— 它只做相对比较，不需要五条网格线。
-                高度 = 120（柱区）+ 18（月份标签），所以 `pb-[18px]` 让"¥0"落在柱子的基线上。 */}
-            {/* ⚠️ **一条真正的纵轴**（竖线 + 两个刻度），而不是两个裸数字 ✗✓：维护者说
-                它们"像两个冒出来的、没处理好的数字"。数字挂在竖线的刻度上，才读得出"这是轴"。
-                竖线只画柱区高度（120），不延伸到月份标签。 */}
-            <div className="relative flex h-[138px] w-12 shrink-0 flex-col items-end justify-between pb-[18px] pr-3 text-[10px] leading-none text-muted-foreground">
-              <span aria-hidden className="absolute top-0 right-0 h-[120px] w-px bg-border" />
-              <span aria-hidden className="absolute top-0 right-0 h-px w-1.5 bg-border" />
-              <span aria-hidden className="absolute right-0 bottom-[18px] h-px w-1.5 bg-border" />
-              <span className="tnum">{cny(peak)}</span>
-              <span className="tnum">¥0</span>
-            </div>
-            {months.map((m) => (
-              <button
-                key={m.key}
-                type="button"
-                onMouseEnter={() => setPick(m.key)}
-                onFocus={() => setPick(m.key)}
-                onClick={() => setPick(m.key === pick ? null : m.key)}
-                className="flex flex-1 flex-col items-center rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                aria-label={`${m.label}：${cny(m.total)}`}
-              >
-                <div className="relative flex h-[120px] w-full items-end justify-center">
-                  {/* 背景槽：本月的"容量"参考线，空月份也能看出这里有个槽位 */}
-                  <div aria-hidden className="absolute inset-x-0 bottom-0 mx-auto h-full w-full max-w-[28px] rounded-t-sm bg-muted/60" />
-                  <div
-                    className={`relative w-full max-w-[28px] rounded-t-sm transition-colors ${pick === m.key ? "bg-primary" : "bg-primary/60 hover:bg-primary/80"}`}
-                    style={{ height: `${Math.max(m.total > 0 ? 2 : 0, (m.total / peak) * 100)}%` }}
-                  />
-                </div>
-                <div className={`mt-1.5 text-[11px] ${pick === m.key ? "text-foreground" : "text-muted-foreground"}`}>{m.label}</div>
-              </button>
-            ))}
-          </div>
-          <div className="mt-3 flex items-start gap-2 border-t border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-            <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
-            {picked ? (
+<Card className="gap-3">
+          <CardHeader className="flex flex-row flex-wrap items-baseline justify-between gap-2 pt-0.5 pb-2!">
+            <CardTitle className="text-sm">未来 12 个月摊平预测</CardTitle>
+            {/* 三个汇总直接写在标题右边：全年合计、峰值月、本月 —— 之前全要靠读者自己加。 */}
+            <CardAction className="text-xs text-muted-foreground">
+              <span className="tnum">
+                全年 <span className="font-medium text-foreground">{cny(monthsTotal)}</span>
+                <span className="mx-1.5 text-border">·</span>
+                峰值 {peakMonth.label}{" "}
+                <span className="font-medium text-foreground">{cny(peakMonth.total)}</span>
+              </span>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="p-0">
+            {/* ⚠️ 一句话说清"柱子"是什么 ✗✓：这张图原来只有标题，读者得从"摊平预测"四个字里猜
+                每一根柱代表什么。它其实是"**那个月到期**的机器、按月摊算后的续费金额"——
+                不是当月的实际扣款，也不是全年的平均。 */}
+            <p className="px-3 text-xs text-muted-foreground">
+              每根柱 = 那个月<strong className="font-medium text-foreground">到期</strong>的机器
+              按月摊算后的续费金额；没有柱子 = 该月没有到期
+            </p>
+
+            <div className="flex gap-2 px-3 pt-4">
+              {/* y 轴：三条刻度（峰 / 半峰 / 0）。原来只有两头，读者读不出中间那根柱是多少。 */}
+              <div className="flex h-[120px] w-16 shrink-0 flex-col items-end justify-between text-[11px] text-muted-foreground">
+                <span className="tnum">{cny(peak)}</span>
+                <span className="tnum">{cny(Math.round(peak / 2))}</span>
+                <span className="tnum">¥0</span>
+              </div>
+
               <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-foreground">{picked.label}</span>
-                  <span className="font-mono tabular-nums text-foreground">预计本月 {cny(picked.total)}</span>
+                <div className="relative flex h-[120px] items-end gap-1">
+                  {/* 三条网格线：与左边三个刻度对齐 */}
+                  {[0, 50, 100].map((p) => (
+                    <span
+                      key={p}
+                      aria-hidden
+                      className="pointer-events-none absolute inset-x-0 h-px bg-border/60"
+                      style={{ bottom: `${p}%` }}
+                    />
+                  ))}
+                  {months.map((m) => {
+                    const h = m.total > 0 ? Math.max(2, (m.total / peak) * 100) : 0
+                    const isNow = m.key === nowKey
+                    const on = pick === m.key
+                    return (
+                      <Tooltip key={m.key}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            // ⚠️ 悬停**不改** `pick` ✗✓：之前悬停就设 pick，于是"点一下"等于
+                            // "把刚被悬停设上的值取消"，下方面板永远看不到明细。
+                            // 现在悬停只出 tooltip（radix 自己管），点击才固定下来。
+                            // ⚠️ 点击**只固定**，不做开关 ✗✓：`focus` 与 `click` 是两个原生事件，
+                            // focus 先 `setPick`、重渲染之后的 click 又把同一个值"取消"掉 ——
+                            // 结果是"第一次点没反应、第二次才展开"。取消改由明细里的「收起」负责。
+                            onFocus={() => setPick(m.key)}
+                            onClick={() => setPick(m.key)}
+                            aria-label={`${m.label}${isNow ? "（本月）" : ""}：${cny(m.total)}${m.rows.length ? `，${m.rows.length} 台到期` : "，无到期"}`}
+                            className="group relative flex h-full flex-1 cursor-default flex-col items-center justify-end focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            {/* 基线刻度：**空月份只留这一条**（原来是一整块全高浅灰，看着像"满格"）。 */}
+                            <span aria-hidden className="absolute inset-x-0 bottom-0 mx-auto h-px w-full max-w-[36px] bg-border" />
+                            {/* 本月：一条竖虚线，读者才知道自己在哪一格 */}
+                            {isNow && (
+                              <span
+                                aria-hidden
+                                className="absolute inset-y-0 left-1/2 w-0 -translate-x-1/2 border-l border-dashed border-primary/40"
+                              />
+                            )}
+                            {m.total > 0 && (
+                              <span
+                                className={`relative mx-auto w-full max-w-[36px] rounded-t-sm transition-colors ${
+                                  on ? "bg-primary" : isNow ? "bg-primary/70" : "bg-primary/50 group-hover:bg-primary/70"
+                                }`}
+                                style={{ height: `${h}%` }}
+                              />
+                            )}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent collisionPadding={12} className="space-y-1">
+                          <div className="font-medium">
+                            {m.label}
+                            {isNow && <span className="ml-1 text-muted-foreground">（本月）</span>}
+                          </div>
+                          <div className="tnum">
+                            {m.rows.length > 0 ? `${m.rows.length} 台到期 · ${cny(m.total)}` : "该月无到期"}
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    )
+                  })}
                 </div>
-                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
-                  {picked.rows.length === 0 && <span>该月份暂无摊销成本。</span>}
-                  {picked.rows.map((r) => (
-                    <span key={r.n.id}>{r.n.name} <span className="font-mono tabular-nums text-foreground">{cny(r.monthly)}</span></span>
+                <div className="mt-1.5 flex gap-1">
+                  {months.map((m) => (
+                    <span
+                      key={m.key}
+                      className={`flex-1 text-center text-[11px] ${
+                        m.key === nowKey
+                          ? "font-medium text-primary"
+                          : m.key === pick
+                            ? "text-foreground"
+                            : "text-muted-foreground"
+                      }`}
+                    >
+                      {m.label}
+                    </span>
                   ))}
                 </div>
               </div>
-            ) : (
-              <span>把鼠标移到某个月（或点它）看这个月的逐台明细。</span>
-            )}
-          </div>
-        </div>
+            </div>
 
-      </CardContent>
-      </Card>
+            {/* 收口：没选中时给**本月**的结论（而不是一句"把鼠标移上去"）；选中时展开逐台明细。 */}
+            <div className="mt-3 flex items-start gap-2 border-t border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              {picked ? (
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-foreground">
+                      {picked.label}
+                      {picked.key === nowKey && <span className="ml-1">（本月）</span>}
+                    </span>
+                    <span className="flex items-baseline gap-3">
+                      <span className="tnum font-medium text-foreground">预计本月 {cny(picked.total)}</span>
+                      <button
+                        type="button"
+                        onClick={() => setPick(null)}
+                        className="text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        收起
+                      </button>
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                    {picked.rows.length === 0 && <span>该月份暂无摊销成本。</span>}
+                    {picked.rows.map((r) => (
+                      <span key={r.n.id}>
+                        {r.n.name}{" "}
+                        <span className="tnum text-foreground">{cny(r.monthly)}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex min-w-0 flex-1 flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                  <span>
+                    本月{" "}
+                    <span className="tnum text-foreground">
+                      {cny(months.find((m) => m.key === nowKey)?.total ?? 0)}
+                    </span>
+                    <span className="ml-1">
+                      （{(months.find((m) => m.key === nowKey)?.rows.length ?? 0) || "无"} 台到期）
+                    </span>
+                  </span>
+                  <span className="text-[11px]">点某个月看逐台明细</span>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       <Card className="gap-3">
         <CardHeader className="gap-0 pt-0.5 pb-2!">
           <CardTitle className="text-sm">服务器成本总览</CardTitle>
