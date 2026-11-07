@@ -91,18 +91,21 @@ test("总览：默认落地页、KPI、续费日历", async ({ page }) => {
   await expect(page.getByText("节点总数")).toBeVisible()
   await expect(page.getByText("续费日历")).toBeVisible()
 
-  // 日历的结构：数**日期格里显示的数字**（span.tnum），一个月 28–31 个。
-  // **不要数按钮** —— 只有「当天有到期节点」的格子才是按钮；全新库上一个都没有，
-  // 按按钮数会得到 0。日期格本身与「能不能点」是两件事。
-  const grid = page.locator("div.grid.grid-cols-7").first()
-  const n = await grid.locator("span.tnum").count()
-  expect(n, "日历应有 28–31 个日期格，实际 " + n).toBeGreaterThanOrEqual(28)
+  // 日历的结构：数**本月**的日期格（28–31 个）。邻月淡显的那几天也占着格子、也带 `span.tnum`，
+  // 所以按 `aria-hidden` 排除掉，否则 42 格全会被数进来。
+  const grid = page.getByRole("grid")
+  const n = await grid.locator('[role="gridcell"]:not([aria-hidden]) span.tnum').count()
+  expect(n, "日历应有 28–31 个本月日期格，实际 " + n).toBeGreaterThanOrEqual(28)
   expect(n).toBeLessThanOrEqual(31)
-  // 月份导航：两条切换 + 中间那个「回到本月」的月份标签。
-  await expect(page.getByRole("button", { name: "上月" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "下月" })).toBeVisible()
+  // 语义：读屏要能认出这是日历（而不是一堆按钮）。
+  await expect(grid).toHaveAttribute("aria-label", /续费日历/)
+  // 键盘：整块只占**一个** Tab 位（roving tabindex）。
+  await expect(grid.locator('[role="gridcell"][tabindex="0"]')).toHaveCount(1)
+  // 月份导航：两侧 chevron（无障碍名「上个月/下个月」）+ 中间那个「回到本月」的月份标签。
+  await expect(page.getByRole("button", { name: "上个月" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "下个月" })).toBeVisible()
   await expect(page.getByTitle("回到本月")).toBeVisible()
-  await page.getByRole("button", { name: "下月" }).click()
+  await page.getByRole("button", { name: "下个月" }).click()
 })
 
 test("实时通道真的连上了 WebSocket，而不是悄悄退回 5 秒轮询", async ({ page }) => {

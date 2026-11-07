@@ -1,6 +1,14 @@
 import { Fragment, useEffect, useState, type ReactNode, useRef } from "react"
 import { isOneOff, monthlyCost, residualValue } from "@/lib/cost"
-import { ArrowUpCircle, CalendarClock, ChevronDown, CircleAlert, Search } from "lucide-react"
+import {
+  ArrowUpCircle,
+  CalendarClock,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
+  Search,
+} from "lucide-react"
 
 import { api, behind, changes } from "@/lib/api"
 import type { Node } from "@/lib/api"
@@ -645,6 +653,11 @@ function TrendCard({ rows, tab, setTab, range, setRange }: {
   )
 }
 
+/** 本地日历天的键（`YYYY-MM-DD`）。**不能用 `toISOString()`** —— 那是 UTC，东八区会差一天。 */
+function dayKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
+
 /// 总览：一个页面的 KPI + 近期事项 + Agent 版本 + 续费日历。
 ///
 /// 只读 `nodes` 已有的字段（在线、到期日、价格、agent 版本），**不加接口、不加请求**，
@@ -779,6 +792,11 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
     return { y: d.getFullYear(), m: d.getMonth() }
   })
   const [pickedDay, setPickedDay] = useState<string | null>(null)
+  // 键盘导航的"落点"：整张网格只有这一格 tabIndex=0（roving tabindex）。没设过时落到今天。
+  const [focusKey, setFocusKey] = useState<string | null>(null)
+  const cellRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // 跨月移动时要等重渲染之后才聚焦 —— 用一个标记区分"键盘翻月"与"鼠标点翻月"。
+  const wantFocus = useRef(false)
   // ⭐ "我已续费"那张卡 ✓ + **正在确认的那一台** ✓（两步按钮：先点"我已续费" ⇒ 变成"确认" ✓）
   const [renewOpen, setRenewOpen] = useState(false)
   const [renewAsk, setRenewAsk] = useState<number | null>(null)
@@ -946,19 +964,19 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
   const peak = Math.max(0, ...[...byDay.values()].map((v) => v.length))
 
   const first = new Date(month.y, month.m, 1)
-  const days = new Date(month.y, month.m + 1, 0).getDate()
-  // 周一起始（中文日历的习惯，也是竞品那张图的样子）。
+  const daysInMonth = new Date(month.y, month.m + 1, 0).getDate()
+  // 周一起始（中文日历的习惯）。
   const lead = (first.getDay() + 6) % 7
-  const cells: (string | null)[] = [
-    ...Array(lead).fill(null),
-    ...Array.from({ length: days }, (_, i) => {
-      const d = new Date(month.y, month.m, i + 1)
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-    }),
-  ]
-  // ⚠️ **补满整行** ✗✓：只有 `lead + 天数` 时，末行常常不满 7 格 —— 缺的那格会露出容器的
-  // `bg-border`，右下角出现一个灰色方块（截图里就是这样）。补到 7 的整数倍即可。
-  while (cells.length % 7 !== 0) cells.push(null)
+  // **邻月淡显**：前导与收尾都填真实的邻月日期（不可点、不可聚焦）。两件事一起解决：
+  // ① 每行都是 7 格、整块高度固定（上一版用空格子补满，翻月时高度会跳）；
+  // ② 月末最后一天是周日时，邻月日期让"这个月到哪儿结束"看得见。
+  const total = Math.ceil((lead + daysInMonth) / 7) * 7
+  const cells = Array.from({ length: total }, (_, i) => {
+    const d = new Date(month.y, month.m, 1 - lead + i)
+    return { key: dayKey(d), day: d.getDate(), outside: d.getMonth() !== month.m }
+  })
+  const weeks: (typeof cells)[] = []
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7))
   const today = new Date()
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
 
@@ -1006,6 +1024,56 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
     setMonth({ y: d.getFullYear(), m: d.getMonth() })
     setPickedDay(null)
   }
+
+  // 网格的键盘：整块只占**一个** Tab 位（roving tabindex），进去之后用方向键走。
+  // 没有到期的日子照样能聚焦 —— 键盘用户要能"看见"整月，而不是只跳到有事的那几天。
+  const onGridKey = (e: React.KeyboardEvent) => {
+    const cur = focusKey ?? todayKey
+    const [y, m, d] = cur.split("-").map(Number)
+    const at = (delta: number) => new Date(y, m - 1, d + delta)
+    const monday = (new Date(y, m - 1, d).getDay() + 6) % 7
+    let next: Date | null = null
+    switch (e.key) {
+      case "ArrowLeft": next = at(-1); break
+      case "ArrowRight": next = at(1); break
+      case "ArrowUp": next = at(-7); break
+      case "ArrowDown": next = at(7); break
+      case "Home": next = at(-monday); break
+      case "End": next = at(6 - monday); break
+      case "PageUp": next = new Date(y, m - 2, d); break
+      case "PageDown": next = new Date(y, m, d); break
+      case "Enter":
+      case " ": {
+        if ((byDay.get(cur) ?? []).length > 0) setPickedDay(cur)
+        e.preventDefault()
+        return
+      }
+      default:
+        return
+    }
+    e.preventDefault()
+    const key = dayKey(next)
+    setFocusKey(key)
+    if (next.getMonth() !== month.m || next.getFullYear() !== month.y) {
+      // 跨月：翻月之后由下面那个 effect 聚焦（此时目标格子还没渲染出来）。
+      wantFocus.current = true
+      setMonth({ y: next.getFullYear(), m: next.getMonth() })
+      setPickedDay(null)
+    } else {
+      cellRefs.current[key]?.focus()
+    }
+  }
+
+  // 只在"键盘翻月"之后抢焦点：鼠标点「上月/下月」时不该把焦点拽进网格。
+  useEffect(() => {
+    if (!wantFocus.current || !focusKey) return
+    const el = cellRefs.current[focusKey]
+    if (el) {
+      el.focus()
+      wantFocus.current = false
+    }
+  }, [focusKey, month])
+
 
 
   return (
@@ -1810,7 +1878,9 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
           <CardTitle className="text-sm">续费日历</CardTitle>
           <div className="flex items-center gap-2">
             <span aria-hidden className="h-5 w-px bg-border" />
-            <Button size="sm" variant="ghost" onClick={() => shift(-1)}>上月</Button>
+            <Button size="icon" variant="ghost" className="size-8" onClick={() => shift(-1)} aria-label="上个月">
+              <ChevronLeft />
+            </Button>
             <button
               type="button"
               onClick={() => {
@@ -1823,72 +1893,95 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             >
               {month.y} 年 {month.m + 1} 月
             </button>
-            <Button size="sm" variant="ghost" onClick={() => shift(1)}>下月</Button>
+            <Button size="icon" variant="ghost" className="size-8" onClick={() => shift(1)} aria-label="下个月">
+              <ChevronRight />
+            </Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* 保留框线（维护者要求）。同事那一轮建议去掉，但这是维护者的取舍 —— 日历的框线帮助
               逐格定位，尤其在有到期副标的日子里。 */}
-          <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border bg-border text-center text-xs">
-            {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
-              <div key={w} className="bg-card py-1.5 font-medium text-muted-foreground">{w}</div>
-            ))}
-            {cells.map((day, i) => {
-              if (!day) return <div key={`lead-${i}`} className="bg-card" />
-              const list = byDay.get(day) ?? []
-              const isPeak = peak > 1 && list.length === peak
-              const on = pickedDay === day
-              // **当天没有到期节点时，这个格子不是按钮**：
-              // 点了没反应的按钮是最糟的一种控件（我一路拒绝的就是这类），而没有事项的日子
-              // 本来也不是可操作对象。所以它降级成普通格子 —— 不响应点击，也不给悬停高亮，
-              // 免得暗示「这里能点」。
-              // ⚠️ 底色用 `bg-card` 而不是 `bg-background` ✗✓：后者比卡片暗一档，于是**每个格子都是
-                // 一块灰底**，整张日历读起来像表格/按钮墙；框线本来由容器的 `gap-px bg-border`
-                // 画出来（维护者要的那层），格子自己不需要再填色。
-                const cellClass = `flex min-h-[54px] flex-col items-center justify-start gap-0.5 bg-card p-1.5 transition-colors ${on ? "ring-2 ring-inset ring-primary" : ""}`
-              const inner = (
-                <>
-                  <span
-                    className={`tnum flex size-5 items-center justify-center rounded-lg text-xs ${
-                      day === todayKey
-                        ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40"
-                        : list.length > 0
-                          ? // 有到期的那天也用主色：与它下面的蓝色徽章连成一体，扫一眼就知道"这天有事"。
-                            "font-medium text-primary" : "text-muted-foreground"
-                    }`}
-                  >
-                    {Number(day.slice(8))}
-                  </span>
-                  {list.length > 0 && (
-                    <span
-                      className={`rounded px-1 text-[10px] leading-tight ${
-                        isPeak ? "bg-primary font-medium text-primary-foreground" : "bg-primary/10 text-primary"
-                      }`}
-                    >
-                      {list.length} 台
-                    </span>
-                  )}
-                </>
-              )
-              if (list.length === 0) {
-                return (
-                  <div key={day} className={cellClass}>
-                    {inner}
-                  </div>
-                )
-              }
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => setPickedDay(day)}
-                  aria-label={`${day}：${list.length} 台到期`}
-                  className={`${cellClass} hover:bg-muted`}
-                >
-                  {inner}
-                </button>
-              )
-            })}
+          {/* 一格一天：`role="grid"` + 每行 `role="row"`，读屏才知道这是日历而不是一堆按钮。
+              鼠标：只有**有到期**的格子可点（没事项的日子点了也没反应，所以不给手型光标）。
+              键盘：整块一个 Tab 位，进去之后 ←→↑↓ 走日/周，Home/End 走周一/周日，PageUp/Down 翻月。 */}
+          <div
+            role="grid"
+            aria-label={`${month.y} 年 ${month.m + 1} 月续费日历`}
+            onKeyDown={onGridKey}
+            className="overflow-hidden rounded-lg border text-center text-xs"
+          >
+            <div role="row" className="grid grid-cols-7 gap-px bg-border">
+              {["一", "二", "三", "四", "五", "六", "日"].map((w) => (
+                <div key={w} role="columnheader" className="bg-card py-1.5 font-medium text-muted-foreground">
+                  {w}
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-col gap-px bg-border">
+              {weeks.map((week, wi) => (
+                <div key={wi} role="row" className="grid grid-cols-7 gap-px">
+                  {week.map((c) => {
+                    const list = byDay.get(c.key) ?? []
+                    const isPeak = peak > 1 && list.length === peak
+                    const has = !c.outside && list.length > 0
+                    // 焦点落点：记住的那一格；第一次进来时落到今天（今天不在本月就落到 1 号）。
+                    const tabbable = !c.outside && (focusKey ? focusKey === c.key : c.key === todayKey)
+                    return (
+                      <div
+                        key={c.key}
+                        role="gridcell"
+                        aria-selected={pickedDay === c.key}
+                        aria-label={
+                          c.outside
+                            ? undefined
+                            : has
+                              ? `${c.key}：${list.length} 台到期`
+                              : `${c.key}：无到期`
+                        }
+                        aria-hidden={c.outside || undefined}
+                        tabIndex={tabbable ? 0 : -1}
+                        ref={(el) => {
+                          cellRefs.current[c.key] = el
+                        }}
+                        onFocus={() => setFocusKey(c.key)}
+                        onClick={() => has && setPickedDay(c.key)}
+                        className={cn(
+                          "flex min-h-[54px] flex-col items-center justify-start gap-1 bg-card p-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset",
+                          has && "cursor-pointer hover:bg-muted",
+                          // 邻月只淡**文字**，不降整格透明度：`opacity-40` 会让底色透出容器的
+                          // 边框色，邻月格比本月格暗一档，看起来像"被禁用的格子"。
+                          c.outside && "text-muted-foreground/40",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "tnum flex size-6 items-center justify-center rounded-md text-xs",
+                            c.key === todayKey
+                              ? "bg-primary/10 font-semibold text-primary ring-1 ring-primary/40"
+                              : has
+                                ? // 有到期的那天也用主色：与它下面的徽章连成一体，扫一眼就知道"这天有事"。
+                                  "font-medium text-primary"
+                                : "text-muted-foreground",
+                          )}
+                        >
+                          {c.day}
+                        </span>
+                        {has && (
+                          <span
+                            className={cn(
+                              "rounded px-1 text-[10px] leading-tight",
+                              isPeak ? "bg-primary font-medium text-primary-foreground" : "bg-primary/10 text-primary",
+                            )}
+                          >
+                            {list.length} 台
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* ⚠️ 底部收口：这张卡常被左边更高的趋势卡撑高，下面留一大片空白（与用量榜同一个
