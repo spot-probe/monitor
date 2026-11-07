@@ -1874,10 +1874,10 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
             于是两者中心天然差 6px。我先后改过 `CardHeader` 的 `items-center` 与 `CardAction` 的
             `self-center`，**都压不过它**（计算结果仍是 align-items: flex-start）。
             一行 flex + items-center 是确定的解法，不再跟原语较劲。 */}
-        <CardHeader className="flex flex-row items-center justify-between gap-2">
-          <CardTitle className="text-sm">续费日历</CardTitle>
-          <div className="flex items-center gap-2">
-            <span aria-hidden className="h-5 w-px bg-border" />
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+          {/* 给这张卡在 lg（1024–1279）只有 ~265px 宽时留一条底线：宁让导航换行，不让标题竖排。 */}
+          <CardTitle className="shrink-0 whitespace-nowrap text-sm">续费日历</CardTitle>
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <Button size="icon" variant="ghost" className="size-8" onClick={() => shift(-1)} aria-label="上个月">
               <ChevronLeft />
             </Button>
@@ -1888,7 +1888,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                 setMonth({ y: d.getFullYear(), m: d.getMonth() })
                 setPickedDay(null)
               }}
-              className="tnum min-w-24 text-center text-base font-semibold hover:text-primary"
+                className="tnum min-w-20 shrink-0 text-center text-sm font-semibold whitespace-nowrap hover:text-primary"
               title="回到本月"
             >
               {month.y} 年 {month.m + 1} 月
@@ -1946,7 +1946,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         onFocus={() => setFocusKey(c.key)}
                         onClick={() => has && setPickedDay(c.key)}
                         className={cn(
-                          "flex min-h-[54px] flex-col items-center justify-start gap-1 bg-card p-1.5 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset",
+                          "flex min-h-[54px] flex-col items-center justify-start gap-1 bg-card p-1 transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset",
                           has && "cursor-pointer hover:bg-muted",
                           // 邻月只淡**文字**，不降整格透明度：`opacity-40` 会让底色透出容器的
                           // 边框色，邻月格比本月格暗一档，看起来像"被禁用的格子"。
@@ -1969,7 +1969,7 @@ export function Overview({ nodes: allNodes, agentLatest, hub, hubLatest, refresh
                         {has && (
                           <span
                             className={cn(
-                              "rounded px-1 text-[10px] leading-tight",
+                              "rounded px-1 text-[10px] leading-tight whitespace-nowrap",
                               isPeak ? "bg-primary font-medium text-primary-foreground" : "bg-primary/10 text-primary",
                             )}
                           >
