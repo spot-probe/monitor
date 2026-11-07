@@ -3161,7 +3161,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
 						<div className="flex flex-wrap items-baseline justify-between gap-x-3">
 							<h4 className="flex items-center gap-1.5 text-sm font-semibold">
 								延迟分布
-								<Help>每根柱 = 一个时间段里的**样本数**；柱内由浅到深是延迟区间（越深越慢）。横轴是时间，与上面那张图同一个窗口。</Help>
+								<Help>每根柱 = 一个时间段里的<span className="font-medium">样本数</span>；柱内由浅到深是延迟区间（越深越慢）。横轴是时间，与上面那张图同一个窗口。</Help>
 							</h4>
 						</div>
 						{/* 浅底 + 细边（原来是 `bg-muted`）：零值格用 `bg-muted`，容器再是 `bg-muted`
