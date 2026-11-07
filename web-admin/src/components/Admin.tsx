@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook
+import { ArrowUpCircle, Bell, CalendarClock, ChevronRight, CircleAlert, CircleCheck, CircleQuestionMark, Copy, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, SlidersHorizontal, TestTube2, Trash2, Upload, Webhook
 } from "lucide-react"
-import { Gauge, Loader2, Timer } from "lucide-react"
+import { Gauge, Loader2, Timer , Wrench } from "lucide-react"
 import { ExternalLink } from "lucide-react"
 import { LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
 import { Suspense, lazy } from "react"
 
+import { Segmented } from "@/components/Segmented"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -4215,12 +4216,14 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
   )
 }
 
-function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
+  function Notify({ nodes, refresh, section }: { nodes: Node[]; refresh: () => void; section?: "notify" | "ip" }) {
   const { s, set, save, reload } = useSettings()
   // 页签状态 ✓（用户要求把运维的动作收拢到这一页 ✓）。
   // **必须和别的 hook 放在一起** ✗ —— 塞进 JSX 里会被 rules-of-hooks 拦下 ✓
   //（今天已经在别处栽过一次 ✓）。
   const [tab, setTab] = useState<"notify" | "ip">("notify")
+    // 被「设置」页当成一个分区渲染时不画自己的切换器 ✓（两级切换器叠在一起最难看）。
+    const shown = section ?? tab
   const [testing, setTesting] = useState(false)
   // 各渠道**最近一次投递**的结果。⚠️ 它不是设置、也不该每 2 秒推：只有这一屏要，所以按需取一次。
   // 有它之前，投递失败只写 journal —— token 过期、chat 写错在界面上完全没有痕迹。
@@ -4275,6 +4278,7 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           ⚠️ **颜色一律走 token** ✗（同事给的 `bg-slate-100/80`/`bg-blue-600`/`text-slate-600` 是写死的 ✓）：
              这个面板的主题系统要能换肤 ✓ ⇒ 结构与尺寸照抄 ✓、颜色映射到 `muted`/`primary` ✓✓。
              否则换一套主题，这一处就会是唯一不跟着变的 ✓（那种"局部漏色"很难被发现 ✓）。 */}
+        {!section && (
       <div className="mb-6 inline-flex items-center rounded-lg bg-muted p-1">
         {([["notify", "通知"], ["ip", "IP 信息"]] as const).map(([k, label]) => (
           <button
@@ -4291,8 +4295,9 @@ function Notify({ nodes, refresh }: { nodes: Node[]; refresh: () => void }) {
           </button>
         ))}
       </div>
+      )}
 
-      {tab === "notify" ? (
+      {shown === "notify" ? (
         <>
       <Section
         title="推送渠道"
@@ -5637,18 +5642,10 @@ export const ADMIN_SECTIONS = [
   	],
   },
   {
-  	group: "系统运维",
-  	// 这一组是「把它维持好」：出问题谁知道（通知）、谁能进来（安全）、跑的是哪个版本（更新）。
-  	items: [
-		// 叫「通知」而不是「通用」✓：这一页装的是通知渠道 + 各类提醒 + IP 库，
-		// 而"通用"会让想改通知的人先去「设置」找 —— 名字要说清里面是什么。
-		{ path: "/admin/notify", label: "通知", icon: SlidersHorizontal },
-  		{ path: "/admin/security", label: "安全", icon: Shield },
-  		{ path: "/admin/update", label: "更新", icon: ArrowUpCircle },
-		// 「数据」（各表行数 / vacuum / 备份恢复）属于**养**这个 hub，不属于"看机器" ✓ ——
-		// 所以它从「资源」搬到这一组，排在最后（最不常用）。
-		{ path: "/admin/data", label: "数据", icon: Database },
-  	],
+	group: "系统运维",
+	// 这一组只剩一件事：把它维持好 —— 版本与数据库（原来是「更新」与「数据」两页，
+	// 现在合成「维护」，用页签分开）。
+	items: [{ path: "/admin/maintenance", label: "维护", icon: Wrench }],
   },
 ]
 
@@ -5661,8 +5658,105 @@ const WARN = 'text-destructive'
 // 懒加载后首屏不必下载它 —— 这就是我早前清单里那条「按分区懒加载」。
 const Overview = lazy(() => import("./Overview").then((m) => ({ default: m.Overview })))
 
+/** 「设置」= 站点 / 通知 / IP 信息 / 安全。分区放在 `?tab=` 里，书签与旧地址都能落到对的那一页。 */
+function SettingsPage({
+  query,
+  go,
+  nodes,
+  refresh,
+  site,
+}: {
+  query: string
+  go: (next: string) => void
+  nodes: Node[]
+  refresh: () => void
+  site: string
+}) {
+  const wanted = new URLSearchParams(query).get("tab") ?? "site"
+  const tab = (["site", "notify", "ip", "security"] as const).includes(wanted as never)
+    ? (wanted as "site" | "notify" | "ip" | "security")
+    : "site"
+  return (
+    <div className="space-y-5">
+      <Segmented
+        label="设置分区"
+        value={tab}
+        onChange={(v) => go(`/admin/settings?tab=${v}`)}
+        options={[
+          { value: "site", label: "站点" },
+          { value: "notify", label: "通知" },
+          { value: "ip", label: "IP 信息" },
+          { value: "security", label: "安全" },
+        ]}
+      />
+      {tab === "site" ? (
+        <SettingsTab />
+      ) : tab === "notify" ? (
+        <Notify section="notify" nodes={nodes} refresh={refresh} />
+      ) : tab === "ip" ? (
+        <Notify section="ip" nodes={nodes} refresh={refresh} />
+      ) : (
+        <Security site={site} />
+      )}
+    </div>
+  )
+}
+
+/** 「维护」= 版本 / 数据库（原来是「更新」与「数据」两页）。 */
+function Maintenance({
+  query,
+  go,
+  versions,
+  reload,
+  nodes,
+  site,
+  canProvision,
+  provisionNote,
+  agentLatest,
+}: {
+  query: string
+  go: (next: string) => void
+  versions: Versions | null
+  reload: () => void
+  nodes: Node[]
+  site: string
+  canProvision: boolean
+  provisionNote: string
+  agentLatest: string | null
+}) {
+  const tab = (new URLSearchParams(query).get("tab") ?? "version") === "database" ? "database" : "version"
+  return (
+    <div className="space-y-5">
+      <Segmented
+        label="维护分区"
+        value={tab}
+        onChange={(v) => go(`/admin/maintenance?tab=${v}`)}
+        options={[
+          { value: "version", label: "版本" },
+          { value: "database", label: "数据库" },
+        ]}
+      />
+      {tab === "version" ? (
+        <Update
+          versions={versions}
+          reload={reload}
+          nodes={nodes}
+          site={site}
+          canProvision={canProvision}
+          provisionNote={provisionNote}
+          agentLatest={agentLatest}
+        />
+      ) : (
+        <Data />
+      )}
+    </div>
+  )
+}
+
 export function Admin({
   path,
+  query,
+  go,
   nodes,
   refresh,
   site,
@@ -5675,6 +5769,9 @@ export function Admin({
   reloadVersions,
 }: {
   path: string
+  /** `?tab=` 之后的查询串（合并页的分区）；空串表示默认分区。 */
+  query: string
+  go: (next: string) => void
   nodes: Node[]
   refresh: () => void
   site: string
@@ -5697,26 +5794,22 @@ export function Admin({
           </Suspense>
         ) : path === "/admin/ping" ? (
           <Ping nodes={nodes} />
-        ) : path === "/admin/notify" ? (
-          <Notify nodes={nodes} refresh={refresh} />
-        ) : path === "/admin/data" ? (
-          <Data />
-        ) : path === "/admin/themes" ? (
-          <Themes />
-        ) : path === "/admin/security" ? (
-          <Security site={site} />
-        ) : path === "/admin/settings" ? (
-          <SettingsTab />
-        ) : path === "/admin/update" ? (
-          <Update
-            versions={versions}
-            reload={reloadVersions}
-            nodes={nodes}
-            site={site}
-            canProvision={canProvision}
-            provisionNote={provisionNote}
-            agentLatest={agentLatest}
-          />
+          ) : path === "/admin/themes" ? (
+            <Themes />
+          ) : path === "/admin/settings" ? (
+            <SettingsPage query={query} go={go} nodes={nodes} refresh={refresh} site={site} />
+          ) : path === "/admin/maintenance" ? (
+            <Maintenance
+              query={query}
+              go={go}
+              versions={versions}
+              reload={reloadVersions}
+              nodes={nodes}
+              site={site}
+              canProvision={canProvision}
+              provisionNote={provisionNote}
+              agentLatest={agentLatest}
+            />
         ) : (
           <Nodes nodes={nodes} refresh={refresh} agentSite={agentSite} canProvision={canProvision} provisionNote={provisionNote} groupDropdown={groupDropdown} agentLatest={agentLatest} />
         )}

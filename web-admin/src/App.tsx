@@ -23,27 +23,51 @@ const BLOCK_NOTES: Record<string, string> = {
 
 // `/admin` alone is not a page; it is normalised to the first section so that a
 // bookmark and the OAuth redirect both resolve to a real route.
+//
+// 合并之后的**旧地址**也在这里改写（`/admin/notify` → `/admin/settings?tab=notify`）：
+// 书签、外部链接、以及 README 里贴过的地址都还指着它们。
+const LEGACY: Record<string, string> = {
+  "/admin/notify": "/admin/settings?tab=notify",
+  "/admin/security": "/admin/settings?tab=security",
+  "/admin/update": "/admin/maintenance?tab=version",
+  "/admin/data": "/admin/maintenance?tab=database",
+}
+
 function normalise(p: string) {
-  return p === "/admin" || p === "/admin/" ? "/admin/overview" : p.replace(/\/$/, "") || "/admin/overview"
+  const clean =
+    p === "/admin" || p === "/admin/" ? "/admin/overview" : p.replace(/\/$/, "") || "/admin/overview"
+  return LEGACY[clean] ?? clean
+}
+
+/** 路径与查询分开返回：页面比较 `path`，页签读 `query`。 */
+function split(target: string): [string, string] {
+  const i = target.indexOf("?")
+  return i < 0 ? [target, ""] : [target.slice(0, i), target.slice(i + 1)]
 }
 
 function usePath() {
-  const [path, setPath] = useState(() => {
-    const start = normalise(location.pathname)
-    if (start !== location.pathname) history.replaceState({}, "", start + location.search)
-    return start
+  const [state, setState] = useState(() => {
+    const [path, query] = split(normalise(location.pathname + location.search))
+    const full = query ? `${path}?${query}` : path
+    if (full !== location.pathname + location.search) history.replaceState({}, "", full)
+    return { path, query }
   })
   useEffect(() => {
-    const sync = () => setPath(normalise(location.pathname))
+    const sync = () => {
+      const [path, query] = split(normalise(location.pathname + location.search))
+      setState({ path, query })
+    }
     addEventListener("popstate", sync)
     return () => removeEventListener("popstate", sync)
   }, [])
   return [
-    path,
+    state.path,
+    state.query,
     useCallback((next: string) => {
-      const to = normalise(next)
+      const [path, query] = split(normalise(next))
+      const to = query ? `${path}?${query}` : path
       history.pushState({}, "", to)
-      setPath(to)
+      setState({ path, query })
     }, []),
   ] as const
 }
@@ -108,7 +132,7 @@ function useNavOpen() {
 }
 
 export default function App() {
-  const [path, go] = usePath()
+  const [path, query, go] = usePath()
   const [dark, toggleTheme] = useTheme()
   const [navOpen, toggleNav] = useNavOpen()
   const [me, setMe] = useState<Me | null>(null)
@@ -412,6 +436,8 @@ export default function App() {
           ) : (
             <Admin
               path={path}
+              query={query}
+              go={go}
               agentLatest={agentLatest}
               versions={versions}
               reloadVersions={reloadVersions}

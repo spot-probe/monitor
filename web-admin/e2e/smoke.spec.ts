@@ -22,11 +22,24 @@ test("侧栏分成三组，组名与顺序固定", async ({ page }) => {
   expect(ys[0]).toBeLessThan(ys[1])
   expect(ys[1]).toBeLessThan(ys[2])
 
-  // 「设置」属于站点配置、「通知」与「数据」属于系统运维 —— 维护者在 A/B 两个方案里选了 A。
+  // B 方案之后：站点配置 = 主题 / 设置；系统运维只剩一个「维护」（版本 + 数据库）。
   const navText = (await nav.innerText()).replace(/\s+/g, " ")
   expect(navText.indexOf("设置")).toBeLessThan(navText.indexOf("系统运维"))
-  // 「数据」已经不在第一组了：它的位置必须在「系统运维」之后。
-  expect(navText.indexOf("数据")).toBeGreaterThan(navText.indexOf("系统运维"))
+  expect(navText).toContain("维护")
+  // 合并掉的入口不该再出现在导航里（它们变成页签了）。
+  for (const gone of ["通知", "安全", "更新", "数据"]) {
+    expect(navText).not.toContain(gone)
+  }
+})
+
+test("旧地址会落到合并后的那一页", async ({ page }) => {
+  // 书签、外部链接都还指着这些地址 —— 它们必须重定向到对应的页签，而不是 404 或空白。
+  await page.goto("/admin/security")
+  await expect(page).toHaveURL(/\/admin\/settings\?tab=security$/)
+  await page.goto("/admin/data")
+  await expect(page).toHaveURL(/\/admin\/maintenance\?tab=database$/)
+  await page.goto("/admin/update")
+  await expect(page).toHaveURL(/\/admin\/maintenance(\?tab=version)?$/)
 })
 
 test("设置页：输入框的宽度按内容分档（320 / 448 / 160 / 672）", async ({ page }) => {
