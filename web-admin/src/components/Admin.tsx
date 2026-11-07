@@ -2013,91 +2013,115 @@ function Nodes({ nodes, refresh, agentSite, canProvision, provisionNote, groupDr
 
 /// A probe's recent latency as a bare polyline. No axes, no library: the column
 /// beside it already carries the number, and this only has to show the shape.
-/// 延迟分布矩阵的**行**：每一带输出一对「标签 + 格子」，交给外层网格约束列宽。
+/// 延迟分布：**堆叠柱**（时间 × 延迟区间）。
 ///
-/// **为什么不自己包容器** ✗：矩阵、色条、上面那张图必须在**同一个网格**里才有共同的列 ✓。
-/// 前一版各包各的 flex、各自算 `w-24` —— 维护者量出来差了一个 `w-24` ✓，根因正是
-/// "没有共同的列定义" ✗，而不是某个宽度算错 ✓。
-function HeatRows({ edges, buckets, slowest }: {
+/// 维护者的原话：矩阵"长条不好看"。根因是格子 `flex-1` 拉满 —— 只有 4 个时间桶时，
+/// 每格就是 430px 宽的长条。换成柱状之后：
+///
+/// - 柱高 = 那段窗口里的**样本数**（"哪个时段在探"）；
+/// - 柱内分段 = **延迟区间**，由浅到深（越快越浅）——"那段是不是变慢了"；
+/// - 与上面那条 P25–P75 曲线**共用同一个时间窗口**，两张图读的是同一件事。
+function HeatBars({ edges, buckets, slowest }: {
   edges: number[]
   buckets: { ts: number; counts: number[]; lost: number }[]
   slowest?: Map<number, { name: string; ms: number }>
 }) {
   if (edges.length < 2 || buckets.length === 0) return null
   const bands = edges.length - 1
-  const peak = Math.max(1, ...buckets.flatMap((b) => b.counts))
-  // 五档而不是四档：`0` 必须和"很少"分开 —— 它代表**没有样本**，不是"少"。
-  // ⚠️ 零值格用 `bg-muted`，容器必须是浅底（`bg-card`）：两者同为 `bg-muted` 时，
-  // 零值格会直接消失，整行看起来是断的（维护者截图里那些白口就是它）。
-  const tone = (c: number) =>
-    c === 0
-      ? "bg-muted"
-      : c <= peak * 0.2
-        ? "bg-primary/15"
-        : c <= peak * 0.4
-          ? "bg-primary/35"
-          : c <= peak * 0.7
-            ? "bg-primary/60"
-            : "bg-primary/90"
-  const legend: [string, string][] = [
-    ["bg-muted", "无样本"],
-    ["bg-primary/15", "少"],
-    ["bg-primary/35", "中"],
-    ["bg-primary/60", "多"],
-    ["bg-primary/90", "最多"],
-  ]
+  const totals = buckets.map((b) => b.counts.reduce((a, c) => a + c, 0))
+  const peak = Math.max(1, ...totals)
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+
+  /// 分段色阶：**单一色相、按延迟由浅到深**。用一条连续色阶而不是分类色 ——
+  /// 区间本身是有序的（1 ms 和 300 ms 不是两种类别，是一条轴上的两段），
+  /// 分类色会让读者去找"这个颜色代表什么"，而深浅是自明的。
+  const ramp = ["bg-primary/15", "bg-primary/25", "bg-primary/35", "bg-primary/45", "bg-primary/60", "bg-primary/75", "bg-primary/90"]
+  const tone = (band: number) => ramp[Math.min(ramp.length - 1, Math.round((band / Math.max(1, bands - 1)) * (ramp.length - 1)))]
+
   return (
-    <>
-      {[...Array(bands)].map((_, r) => {
-        const i = bands - 1 - r
-        // `contents`（display: contents）让这一对子元素**直接成为外层网格的两格** ✓ ——
-        // 于是标签进左列、格子在右列，且**不需要 Fragment 的 import** ✓。
-        return (
-          <div key={edges[i]} className="contents">
-            <span className="text-right text-[10px] leading-none text-muted-foreground">
-              {edges[i]}–{edges[i + 1]} ms
-            </span>
-            <div className="flex gap-px">
-              {buckets.map((b) => (
-                <span
-                  key={b.ts}
-                    className={`h-3 flex-1 rounded-[2px] ${tone(b.counts[i])}`}
-                    aria-label={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 个样本`}
-                  title={`${clock(b.ts)} · ${edges[i]}–${edges[i + 1]} ms · ${b.counts[i]} 次${
-                    slowest?.get(b.ts) ? ` · 最慢 ${slowest.get(b.ts)!.name} ${slowest.get(b.ts)!.ms} ms` : ""
+    <div>
+      {/* ⚠️ `max-w` 是必须的 ✗✓：桶少的时候（预览里只有 4 个）`flex-1` 会把每根柱拉成
+          500px 宽的大板砖 —— 维护者说的"长条"就是它。给个上限，桶少就居中排一排细柱。 */}
+      <div className="flex h-[120px] items-end justify-center gap-1">
+        {buckets.map((b, k) => {
+          const total = totals[k]
+          return (
+            <Tooltip key={b.ts}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="group relative flex h-full min-w-0 flex-1 basis-0 flex-col justify-end focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`${clock(b.ts)}：${total} 个样本${
+                    slowest?.get(b.ts) ? `，最慢 ${slowest.get(b.ts)!.name} ${slowest.get(b.ts)!.ms} ms` : ""
                   }`}
-                />
-              ))}
-            </div>
-          </div>
-        )
-      })}
-      {/* **自己的时间轴** ✓：矩阵现在是独立的一张图 ✓，不再借上面那张图的横轴 ✓
-          （维护者的原话：需要为热力图增加水平的时间轴 ✓）。 */}
-      <span />
-      <p className="flex justify-between text-[10px] leading-none text-muted-foreground">
+                  // 与矩阵版一致：空桶不画柱，只留一条基线刻度（否则"没有样本"看起来像"有"）。
+                >
+                  <span aria-hidden className="absolute inset-x-0 bottom-0 mx-auto h-px w-full bg-border" />
+                  {total > 0 && (
+                    <span
+                      className="relative mx-auto flex w-full max-w-[26px] flex-col-reverse overflow-hidden rounded-t-[2px]"
+                      style={{ height: `${Math.max(2, (total / peak) * 100)}%` }}
+                    >
+                      {b.counts.map((c, i) =>
+                        c > 0 ? (
+                          <span
+                            key={i}
+                            className={`w-full ${tone(i)} transition-colors group-hover:opacity-90`}
+                            style={{ flexGrow: c }}
+                          />
+                        ) : null,
+                      )}
+                    </span>
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent collisionPadding={12} className="space-y-1">
+                <div className="font-medium">
+                  {clock(b.ts)} · {total} 个样本
+                </div>
+                {b.counts.map((c, i) =>
+                  c > 0 ? (
+                    <div key={i} className="tnum text-muted-foreground">
+                      {edges[i]}–{edges[i + 1]} ms · {c} 次
+                    </div>
+                  ) : null,
+                )}
+                {slowest?.get(b.ts) && (
+                  <div className="text-muted-foreground">
+                    最慢 {slowest.get(b.ts)!.name} · {slowest.get(b.ts)!.ms} ms
+                  </div>
+                )}
+              </TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </div>
+
+      {/* 时间轴：首 / 中 / 尾 */}
+      <p className="mt-1.5 flex justify-between text-[10px] leading-none text-muted-foreground">
         <span>{clock(buckets[0].ts)}</span>
-          <span>{clock(buckets[Math.floor(buckets.length / 2)].ts)}</span>
-          <span>{clock(buckets[buckets.length - 1].ts)}</span>
+        <span>{clock(buckets[Math.floor(buckets.length / 2)].ts)}</span>
+        <span>{clock(buckets[buckets.length - 1].ts)}</span>
       </p>
-        {/* 图例：四档颜色原来没有任何解释 —— 读者分不清 primary/35 和 /60 差在哪。
-            右边给峰值次数，色阶才有**绝对**含义，而不只是相对深浅。 */}
-        <span />
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-[10px] leading-none text-muted-foreground">
-          {legend.map(([cls, label]) => (
-            <span key={label} className="flex items-center gap-1">
-              <span aria-hidden className={`size-2.5 rounded-[2px] ${cls}`} />
-              {label}
-            </span>
+
+      {/* 图例：一条从快到慢的色带 + 两端的毫秒范围。
+          7 个色块逐个列出来太长，而区间本来是一条轴 —— 色带比清单更贴切。 */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] leading-none text-muted-foreground">
+        <span className="tnum">快 {edges[0]} ms</span>
+        <span aria-hidden className="flex h-2 w-24 overflow-hidden rounded-full">
+          {ramp.map((c) => (
+            <span key={c} className={`h-full flex-1 ${c}`} />
           ))}
-          <span className="tnum ml-auto">峰值 {peak} 次 / 格</span>
-        </div>
-    </>
+        </span>
+        <span className="tnum">慢 {edges[bands]} ms</span>
+        <span className="tnum ml-auto">峰值 {peak} 次 / 柱</span>
+      </div>
+    </div>
   )
 }
 
-/// 丢包条的**行**：同样是「标签 + 格子」的一对 ✓（见 HeatRows 的说明）。
+
+/// 丢包条：一行格子，颜色 = 该时刻的丢包档。
 function LossStrip({ points }: { points: { ts: number; loss: number; avg: number }[] }) {
   if (points.length === 0) return null
   const tone = (l: number) =>
@@ -3137,15 +3161,13 @@ function Ping({ nodes }: { nodes: Node[] }) {
 						<div className="flex flex-wrap items-baseline justify-between gap-x-3">
 							<h4 className="flex items-center gap-1.5 text-sm font-semibold">
 								延迟分布
-								<Help>按<span className="font-medium">时间 × 延迟区间</span>统计每一格里有多少个样本。横轴是时间（与上面那张图同一个窗口）。纵轴是这个窗口内的<span className="font-medium">真实毫秒区间</span> —— 由数据的分位数算出，不是写死的档位（延迟的"正常"取决于目标）。颜色越深表示那一段里落在这个区间的样本越多。丢包不在这里：它没有延迟、落不进任何区间，由上面那条色条负责。悬停任一格会说出这一格最慢的是哪台。</Help>
+								<Help>每根柱 = 一个时间段里的**样本数**；柱内由浅到深是延迟区间（越深越慢）。横轴是时间，与上面那张图同一个窗口。</Help>
 							</h4>
 						</div>
 						{/* 浅底 + 细边（原来是 `bg-muted`）：零值格用 `bg-muted`，容器再是 `bg-muted`
 						    的话它就消失了 —— 截图里那些"白色的口子"就是这么来的。 */}
 						<div className="mt-2 rounded-lg border border-border/60 bg-card p-3">
-							<div className="grid grid-cols-[5.5rem_1fr] items-center gap-y-1">
-								<HeatRows edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
-							</div>
+								<HeatBars edges={heat.edges} buckets={heat.buckets} slowest={slowest} />
 						</div>
 					</section>
 				)}
