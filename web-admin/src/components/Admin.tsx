@@ -2217,8 +2217,6 @@ function BandChart({ points, height = 150 }: {
       .reverse()
       .map((q) => `${x(q.ts).toFixed(1)},${y(Number(q.p25)).toFixed(1)}`)
       .join(" ")}`
-  // 末尾那个数值标签：取**最后一个有值**的点，否则会写到一个空桶上。
-  const last = [...points].reverse().find((q) => q.p50 !== null)
   const clock = (t: number) => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
   return (
     <svg viewBox={`0 0 ${w} ${height}`} className="w-full" role="img" aria-label="延迟分位数随时间的变化">
@@ -2253,16 +2251,9 @@ function BandChart({ points, height = 150 }: {
       {segs.map((s, i) => (
         <polyline key={`p50-${i}`} points={path(s, (q) => q.p50)} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" />
       ))}
-      {/* 中位数标一个数值：只有线没有数，读者没法对着纵轴读数。线是锯齿状的，标签放哪一段都会
-          压上去 —— 于是给它垫一层与图底同色的底片。 */}
-      {last && (
-        <>
-          <rect x={w - 52} y={y(last.p50 as number) - 15} width={50} height={14} rx="3" className="fill-muted" />
-          <text x={w - 4} y={y(last.p50 as number) - 4} fontSize="10" textAnchor="end" className="fill-primary">
-            {last.p50} ms
-          </text>
-        </>
-      )}
+      {/* ⚠️ 中位数的数值标签**不画在图内**：线是锯齿状的，标签放哪都会压上去，
+          垫一层底片又会盖住数据（维护者两次截图里那个白块就是它）。
+          它现在跟图例走（下面那行「中位 N ms」），永远不会与曲线重叠。 */}
       {/* 纵轴刻度**不画在这里** ✗ —— 它们由外层网格的**左列**渲染 ✓（那一列现在就是纵轴泳道 ✓），
           否则左列会空一块，而刻度挤在图内也会与左列的行标签不在同一条视线上 ✓。 */}
       <text x="0" y={height - 2} fontSize="9" className="fill-muted-foreground">{clock(t0)}</text>
@@ -2274,7 +2265,13 @@ function BandChart({ points, height = 150 }: {
 /// 按分位数切成 n 桶的切点（延迟的「正常」取决于目标，所以不写死毫秒阈值）。
 function bucketCuts(sorted: number[], n: number): number[] {
   const cuts: number[] = []
-  for (let i = 1; i < n; i++) cuts.push(pctl(sorted, i / n))
+  for (let i = 1; i < n; i++) {
+    const c = pctl(sorted, i / n)
+    // ⚠️ 只在**严格变大**时才收：延迟值有重复时（5 台平均都是 1 ms），分位数会给出相同的
+    // 切点 ⇒ 出现 `1–1 ms` 这类空区间，还白占一格（维护者截图里那一排就是它）。
+    // 桶数因此是**动态的**（≤ n），Histogram 用 `cuts.length + 1`。
+    if (cuts.length === 0 || c > cuts[cuts.length - 1]) cuts.push(c)
+  }
   return cuts
 }
 
@@ -2295,15 +2292,16 @@ function Histogram({ values, picked, onPick }: {
   const s = [...values].sort((x, y) => x - y)
   if (s.length < 4) return <p className="px-1 py-2 text-xs text-muted-foreground">节点太少，分不出分布。</p>
   const cuts = bucketCuts(s, 5)
-  const counts = new Array(5).fill(0)
+  const buckets = cuts.length + 1
+    const counts = new Array(buckets).fill(0)
   for (const v of s) counts[bucketOf(v, cuts)]++
   const max = Math.max(...counts, 1)
   const w = 640
   const h = 96
-  const bw = w / 5
+  const bw = w / buckets
   const label = (i: number) => {
     const lo = i === 0 ? 0 : cuts[i - 1]
-    const hi = i === 4 ? null : cuts[i]
+    const hi = i === buckets - 1 ? null : cuts[i]
     return hi == null ? `> ${lo} ms` : i === 0 ? `≤ ${hi} ms` : `${lo}–${hi} ms`
   }
   return (
@@ -3143,6 +3141,11 @@ function Ping({ nodes }: { nodes: Node[] }) {
 									<span className="min-h-0 flex-1 bg-ok-fg/20" />
 								</span>
 								底=平均 · 顶=最差
+        {(() => {
+          // 中位数的数值：原来画在图里、压着曲线；跟图例走就永远不会重叠。
+          const last = [...pct].reverse().find((q) => q.p50 !== null)
+          return last ? <span className="tnum">中位 {last.p50} ms</span> : null
+        })()}
 							</span>
 							{[["bg-ok-fg/20", "0"], ["bg-warn-fg/40", "<5%"], ["bg-warn-fg/70", "<20%"],
 								["bg-danger-fg/60", "<50%"], ["bg-danger-fg", "≥50%"]].map(([c, t]) => (
